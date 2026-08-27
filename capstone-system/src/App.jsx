@@ -1745,7 +1745,7 @@ function Dashboard({ profile, onLogout }) {
         <div className="panel" style={{ marginBottom: '18px' }}>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
             <div style={{ flex: '1 1 150px' }}>
-              <label className="field-label">Type</label>
+              <label className="field-label"> Equipment Type</label>
               <select value={filterType} onChange={(e) => setFilterType(e.target.value)}>
                 <option value="">All Types</option>
                 {EQUIPMENT_TYPES.map((type) => (
