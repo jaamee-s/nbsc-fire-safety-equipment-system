@@ -994,7 +994,7 @@ function Dashboard({ profile, onLogout }) {
         </div>
 
         <div className="header-search">
-          <span className="header-search-icon">🔍</span>
+          <span className="header-search-icon"></span>
           <input
             placeholder="Search equipment code, location, building..."
             value={searchTerm}
