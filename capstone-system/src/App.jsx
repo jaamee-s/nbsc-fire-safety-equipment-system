@@ -1905,7 +1905,7 @@ function Dashboard({ profile, onLogout }) {
                           className="btn btn-secondary btn-sm"
                           onClick={() => setExpandedQrId(expandedQrId === item.id ? null : item.id)}
                         >
-                          {expandedQrId === item.id ? 'Hide QR' : '🔖 QR Code'}
+                          {expandedQrId === item.id ? 'Hide QR' : 'QR Code'}
                         </button>
                         <button
                           className="btn btn-secondary btn-sm"
@@ -1913,7 +1913,7 @@ function Dashboard({ profile, onLogout }) {
                         >
                           {expandedHistoryId === item.id
                             ? 'Hide History'
-                            : `📋 Inspection History (${history.length})`}
+                            : `Inspection History (${history.length})`}
                         </button>
                       </div>
 
