@@ -1396,7 +1396,7 @@ function Dashboard({ profile, onLogout }) {
                           setExpandedLocationsBuildingId(expandedLocationsBuildingId === b.id ? null : b.id)
                         }
                       >
-                        {expandedLocationsBuildingId === b.id ? 'Hide Floors/Rooms' : '📍 Manage Floors/Rooms'}
+                        {expandedLocationsBuildingId === b.id ? 'Hide Floors/Rooms' : 'Manage Floors/Rooms'}
                       </button>
                     </div>
 
