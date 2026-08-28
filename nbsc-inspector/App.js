@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -12,6 +13,7 @@ import {
   TextInput,
   View
 } from 'react-native'
+import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import {
   ACTION_TYPES,
@@ -23,15 +25,17 @@ import {
   TYPE_LABELS,
   daysUntil,
   findEquipmentByQrCode,
+  getInspectorDashboard,
   getStoredInspectorName,
+  relativeTime,
   saveInspectorName,
   submitInspection
 } from './lib/inspector'
 
 const C = {
   navy: '#0F2A4A',
-  navyDark: '#0A1D33',
   blue: '#2563EB',
+  blueBg: '#EAF1FF',
   green: '#15803D',
   greenBg: '#EAFAF0',
   red: '#B91C1C',
@@ -46,7 +50,7 @@ const C = {
 }
 
 export default function App() {
-  // 'loading' | 'name' | 'scan' | 'detail' | 'form' | 'done'
+  // 'loading' | 'name' | 'home' | 'scan' | 'manual' | 'detail' | 'form' | 'done'
   const [screen, setScreen] = useState('loading')
   const [inspectorName, setInspectorName] = useState('')
   const [equipment, setEquipment] = useState(null)
@@ -56,44 +60,36 @@ export default function App() {
     getStoredInspectorName().then((name) => {
       if (name) {
         setInspectorName(name)
-        setScreen('scan')
+        setScreen('home')
       } else {
         setScreen('name')
       }
     })
   }, [])
 
-  function handleNameSaved(name) {
-    setInspectorName(name)
-    setScreen('scan')
-  }
-
   function handleFound(item) {
     setEquipment(item)
     setScreen('detail')
   }
 
-  function handleSubmitted(result) {
-    setLastResult(result)
-    setScreen('done')
-  }
-
-  function backToScan() {
+  function goHome() {
     setEquipment(null)
     setLastResult(null)
-    setScreen('scan')
+    setScreen('home')
   }
 
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" backgroundColor={C.navy} />
 
-      <View style={s.header}>
-        <Text style={s.headerTitle}>NBSC Fire Safety</Text>
-        <Text style={s.headerSub}>
-          {inspectorName ? `Inspector: ${inspectorName}` : 'Equipment Inspection'}
-        </Text>
-      </View>
+      {screen !== 'scan' && (
+        <View style={s.header}>
+          <Text style={s.headerTitle}>NBSC Fire Safety</Text>
+          <Text style={s.headerSub}>
+            {inspectorName ? `Inspector: ${inspectorName}` : 'Equipment Inspection'}
+          </Text>
+        </View>
+      )}
 
       {screen === 'loading' && (
         <View style={s.center}>
@@ -101,15 +97,39 @@ export default function App() {
         </View>
       )}
 
-      {screen === 'name' && <NameSetup onSaved={handleNameSaved} />}
+      {screen === 'name' && (
+        <NameSetup
+          onSaved={(name) => {
+            setInspectorName(name)
+            setScreen('home')
+          }}
+        />
+      )}
 
-      {screen === 'scan' && <ScanScreen onFound={handleFound} />}
+      {screen === 'home' && (
+        <HomeScreen
+          inspectorName={inspectorName}
+          onScan={() => setScreen('scan')}
+          onManual={() => setScreen('manual')}
+          onOpenEquipment={handleFound}
+        />
+      )}
+
+      {screen === 'scan' && (
+        <ScanScreen
+          onFound={handleFound}
+          onCancel={goHome}
+          onManual={() => setScreen('manual')}
+        />
+      )}
+
+      {screen === 'manual' && <ManualEntry onFound={handleFound} onCancel={goHome} />}
 
       {screen === 'detail' && (
         <EquipmentDetail
           equipment={equipment}
           onInspect={() => setScreen('form')}
-          onCancel={backToScan}
+          onCancel={goHome}
         />
       )}
 
@@ -117,20 +137,28 @@ export default function App() {
         <InspectionForm
           equipment={equipment}
           inspectorName={inspectorName}
-          onSubmitted={handleSubmitted}
+          onSubmitted={(result) => {
+            setLastResult(result)
+            setScreen('done')
+          }}
           onCancel={() => setScreen('detail')}
         />
       )}
 
       {screen === 'done' && (
-        <DoneScreen result={lastResult} equipment={equipment} onNext={backToScan} />
+        <DoneScreen
+          result={lastResult}
+          equipment={equipment}
+          onNext={() => setScreen('scan')}
+          onHome={goHome}
+        />
       )}
     </SafeAreaView>
   )
 }
 
 /* ------------------------------------------------------------------ */
-/* First launch: who is using this device?                             */
+/* First launch                                                        */
 /* ------------------------------------------------------------------ */
 
 function NameSetup({ onSaved }) {
@@ -142,8 +170,7 @@ function NameSetup({ onSaved }) {
     setError(null)
     setSaving(true)
     try {
-      const saved = await saveInspectorName(name)
-      onSaved(saved)
+      onSaved(await saveInspectorName(name))
     } catch (err) {
       setError(err.message)
     }
@@ -188,21 +215,245 @@ function NameSetup({ onSaved }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Scan or type an equipment code                                      */
+/* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function ScanScreen({ onFound }) {
+function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      setData(await getInspectorDashboard(inspectorName))
+    } catch (err) {
+      setError(err.message)
+    }
+    setLoading(false)
+  }, [inspectorName])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function openFromDue(code) {
+    try {
+      onOpenEquipment(await findEquipmentByQrCode(code))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <ScrollView
+      contentContainerStyle={s.scroll}
+      refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}
+    >
+      <Pressable style={s.scanCta} onPress={onScan}>
+        <Text style={s.scanCtaIcon}>▣</Text>
+        <Text style={s.scanCtaText}>Scan QR Code</Text>
+        <Text style={s.scanCtaSub}>Point the camera at the sticker</Text>
+      </Pressable>
+
+      <Pressable style={[s.btn, s.btnOutline]} onPress={onManual}>
+        <Text style={s.btnOutlineText}>Enter code manually</Text>
+      </Pressable>
+
+      {error && (
+        <View style={[s.card, { marginTop: 14 }]}>
+          <Text style={s.error}>{error}</Text>
+        </View>
+      )}
+
+      {loading && !data ? (
+        <View style={[s.card, s.centerPad, { marginTop: 18 }]}>
+          <ActivityIndicator color={C.blue} />
+        </View>
+      ) : data ? (
+        <>
+          <View style={s.statRow}>
+            <Stat value={data.today_count} label="Today" />
+            <Stat value={data.week_count} label="This week" />
+            <Stat value={data.defect_count} label="Defects found" alert />
+          </View>
+
+          <Text style={s.sectionTitle}>Due for inspection</Text>
+          <Text style={s.sectionHint}>Longest since last check — start here.</Text>
+          <View style={s.card}>
+            {(data.due || []).length === 0 ? (
+              <Text style={s.muted}>No equipment registered yet.</Text>
+            ) : (
+              data.due.map((d, i) => (
+                <Pressable
+                  key={d.id}
+                  style={[s.listRow, i === data.due.length - 1 && s.listRowLast]}
+                  onPress={() => openFromDue(d.equipment_code)}
+                >
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{d.equipment_code}</Text>
+                    <Text style={s.listMeta}>
+                      {TYPE_LABELS[d.equipment_type] || d.equipment_type}
+                      {d.building_name ? ` · ${d.building_name}` : ''}
+                    </Text>
+                    <Text style={s.listMeta}>{d.exact_location}</Text>
+                  </View>
+                  <Text
+                    style={[
+                      s.listWhen,
+                      !d.last_inspected && { color: C.red, fontWeight: '700' }
+                    ]}
+                  >
+                    {relativeTime(d.last_inspected)}
+                  </Text>
+                </Pressable>
+              ))
+            )}
+          </View>
+
+          <Text style={s.sectionTitle}>Your recent inspections</Text>
+          <View style={[s.card, { marginTop: 8 }]}>
+            {(data.recent || []).length === 0 ? (
+              <Text style={s.muted}>Nothing submitted yet.</Text>
+            ) : (
+              data.recent.map((r, i) => {
+                const bad = r.condition_status === 'defective'
+                return (
+                  <View
+                    key={r.id}
+                    style={[s.listRow, i === data.recent.length - 1 && s.listRowLast]}
+                  >
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{r.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {bad ? r.findings || 'Defective' : 'Functional'}
+                      </Text>
+                      <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
+                    </View>
+                    <View style={[s.tag, bad ? s.tagRed : s.tagGreen]}>
+                      <Text style={[s.tagText, { color: bad ? C.red : C.green }]}>
+                        {bad ? 'Defective' : 'OK'}
+                      </Text>
+                    </View>
+                  </View>
+                )
+              })
+            )}
+          </View>
+        </>
+      ) : null}
+    </ScrollView>
+  )
+}
+
+function Stat({ value, label, alert }) {
+  return (
+    <View style={s.stat}>
+      <Text style={[s.statValue, alert && value > 0 && { color: C.red }]}>
+        {value ?? 0}
+      </Text>
+      <Text style={s.statLabel}>{label}</Text>
+    </View>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Camera scanner                                                      */
+/* ------------------------------------------------------------------ */
+
+function ScanScreen({ onFound, onCancel, onManual }) {
+  const [permission, requestPermission] = useCameraPermissions()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+
+  // The camera fires this repeatedly while a code is in frame, so `busy`
+  // guards against firing a dozen lookups for one sticker.
+  async function handleScan({ data }) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      onFound(await findEquipmentByQrCode(data))
+    } catch (err) {
+      setError(err.message)
+      setTimeout(() => setBusy(false), 1500)
+    }
+  }
+
+  if (!permission) {
+    return (
+      <View style={s.center}>
+        <ActivityIndicator color={C.blue} />
+      </View>
+    )
+  }
+
+  if (!permission.granted) {
+    return (
+      <ScrollView contentContainerStyle={s.scroll}>
+        <View style={s.card}>
+          <Text style={s.h1}>Camera access needed</Text>
+          <Text style={s.muted}>
+            The app uses the camera only to read equipment QR stickers. No photos are
+            taken or uploaded.
+          </Text>
+          <Pressable style={[s.btn, s.btnPrimary]} onPress={requestPermission}>
+            <Text style={s.btnPrimaryText}>Allow Camera</Text>
+          </Pressable>
+          <Pressable style={[s.btn, s.btnOutline]} onPress={onManual}>
+            <Text style={s.btnOutlineText}>Enter code manually instead</Text>
+          </Pressable>
+          <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
+            <Text style={s.btnGhostText}>Back</Text>
+          </Pressable>
+        </View>
+      </ScrollView>
+    )
+  }
+
+  return (
+    <View style={s.scanWrap}>
+      <CameraView
+        style={s.camera}
+        facing="back"
+        barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+        onBarcodeScanned={busy ? undefined : handleScan}
+      />
+
+      <View style={s.scanOverlay} pointerEvents="none">
+        <View style={s.scanFrame} />
+        <Text style={s.scanHint}>
+          {busy ? 'Looking up...' : 'Line up the QR sticker'}
+        </Text>
+      </View>
+
+      <View style={s.scanFooter}>
+        {error && <Text style={s.scanError}>{error}</Text>}
+        <Pressable style={[s.btn, s.btnOutlineLight]} onPress={onManual}>
+          <Text style={s.btnOutlineLightText}>Enter code manually</Text>
+        </Pressable>
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
+          <Text style={[s.btnGhostText, { color: C.white }]}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Manual code entry — permanent fallback, not a stopgap               */
+/* ------------------------------------------------------------------ */
+
+function ManualEntry({ onFound, onCancel }) {
   const [code, setCode] = useState('')
   const [error, setError] = useState(null)
   const [looking, setLooking] = useState(false)
 
-  async function lookup(value) {
+  async function lookup() {
     setError(null)
     setLooking(true)
     try {
-      const item = await findEquipmentByQrCode(value)
-      setCode('')
-      onFound(item)
+      onFound(await findEquipmentByQrCode(code))
     } catch (err) {
       setError(err.message)
     }
@@ -216,21 +467,21 @@ function ScanScreen({ onFound }) {
     >
       <ScrollView contentContainerStyle={s.scroll}>
         <View style={s.card}>
-          <Text style={s.h1}>Find equipment</Text>
+          <Text style={s.h1}>Enter code</Text>
           <Text style={s.muted}>
-            Scanning is added in the next step, once camera testing is possible.
-            For now, type the code printed under the QR sticker.
+            Type the code printed under the QR sticker. Use this when a sticker is
+            scratched, faded or painted over.
           </Text>
 
-          <Text style={s.label}>Equipment code</Text>
           <TextInput
-            style={[s.input, s.inputCode]}
+            style={[s.input, s.inputCode, { marginTop: 16 }]}
             value={code}
             onChangeText={(t) => setCode(t.toUpperCase())}
             placeholder="FE-001"
             autoCapitalize="characters"
             autoCorrect={false}
-            onSubmitEditing={() => code.trim() && lookup(code)}
+            autoFocus
+            onSubmitEditing={() => code.trim() && lookup()}
             returnKeyType="search"
           />
 
@@ -238,17 +489,17 @@ function ScanScreen({ onFound }) {
 
           <Pressable
             style={[s.btn, s.btnPrimary, (looking || !code.trim()) && s.btnDisabled]}
-            onPress={() => lookup(code)}
+            onPress={lookup}
             disabled={looking || !code.trim()}
           >
-            <Text style={s.btnPrimaryText}>{looking ? 'Looking up...' : 'Find Equipment'}</Text>
+            <Text style={s.btnPrimaryText}>
+              {looking ? 'Looking up...' : 'Find Equipment'}
+            </Text>
           </Pressable>
 
-          <Text style={s.hint}>
-            Manual entry stays in the finished app. Stickers get scratched, faded or
-            painted over, and an inspector standing in front of an unreadable label
-            still needs a way through.
-          </Text>
+          <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
+            <Text style={s.btnGhostText}>Back</Text>
+          </Pressable>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -275,19 +526,16 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
 
         <View style={[s.pill, isActive ? s.pillGreen : s.pillRed]}>
           <Text style={[s.pillText, { color: isActive ? C.green : C.red }]}>
-            {isActive ? 'Active' : STATUS_LABELS[equipment.current_status] || equipment.current_status}
+            {isActive
+              ? 'Active'
+              : STATUS_LABELS[equipment.current_status] || equipment.current_status}
           </Text>
         </View>
 
         <Row label="Building" value={equipment.buildings?.building_name ?? '—'} />
         <Row label="Location" value={equipment.exact_location ?? '—'} />
-        <Row
-          label="Expiration"
-          value={equipment.expiration_date ?? 'Not applicable'}
-        />
-        {equipment.description ? (
-          <Row label="Notes" value={equipment.description} />
-        ) : null}
+        <Row label="Expiration" value={equipment.expiration_date ?? 'Not applicable'} />
+        {equipment.description ? <Row label="Notes" value={equipment.description} /> : null}
 
         {expired && (
           <View style={[s.banner, s.bannerRed]}>
@@ -345,8 +593,8 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
   const defective = condition === 'defective'
   const isOther = selectedFinding === OTHER_FINDING
 
-  // Choosing a finding sets what it implies. Both stay overridable, but
-  // the override rows stay collapsed so the fast path is: finding, submit.
+  // Choosing a finding sets what it implies. Both stay overridable, but the
+  // override rows stay collapsed so the fast path is: finding, submit.
   function pickFinding(preset) {
     setSelectedFinding(preset.label)
     setActionType(preset.action)
@@ -355,6 +603,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
   }
 
   const findingsText = isOther ? otherText : selectedFinding || ''
+  const canSubmit = condition === 'functional' || (defective && findingsText.trim())
 
   async function submit() {
     setError(null)
@@ -376,8 +625,6 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
     setSaving(false)
   }
 
-  const canSubmit = condition === 'functional' || (defective && findingsText.trim())
-
   return (
     <KeyboardAvoidingView
       style={s.flex}
@@ -396,9 +643,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
               style={[s.choice, condition === 'functional' && s.choiceGreen]}
               onPress={() => setCondition('functional')}
             >
-              <Text
-                style={[s.choiceText, condition === 'functional' && s.choiceTextActive]}
-              >
+              <Text style={[s.choiceText, condition === 'functional' && s.choiceTextActive]}>
                 Functional
               </Text>
             </Pressable>
@@ -406,9 +651,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
               style={[s.choice, defective && s.choiceRed]}
               onPress={() => setCondition('defective')}
             >
-              <Text style={[s.choiceText, defective && s.choiceTextActive]}>
-                Defective
-              </Text>
+              <Text style={[s.choiceText, defective && s.choiceTextActive]}>Defective</Text>
             </Pressable>
           </View>
 
@@ -468,7 +711,6 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
                     {priority.charAt(0).toUpperCase() + priority.slice(1)}
                   </Text>
                 </View>
-
                 <Pressable onPress={() => setShowOverrides((v) => !v)}>
                   <Text style={s.autoChange}>
                     {showOverrides ? 'Done' : 'Set automatically · Change'}
@@ -546,7 +788,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
 /* Confirmation                                                        */
 /* ------------------------------------------------------------------ */
 
-function DoneScreen({ result, equipment, onNext }) {
+function DoneScreen({ result, equipment, onNext, onHome }) {
   const defective = result?.condition === 'defective'
 
   return (
@@ -570,7 +812,11 @@ function DoneScreen({ result, equipment, onNext }) {
         </View>
 
         <Pressable style={[s.btn, s.btnPrimary]} onPress={onNext}>
-          <Text style={s.btnPrimaryText}>Inspect Another</Text>
+          <Text style={s.btnPrimaryText}>Scan Next</Text>
+        </Pressable>
+
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onHome}>
+          <Text style={s.btnGhostText}>Back to dashboard</Text>
         </Pressable>
       </View>
     </ScrollView>
@@ -583,13 +829,10 @@ const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   flex: { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  centerPad: { alignItems: 'center', paddingVertical: 26 },
   scroll: { padding: 16, paddingBottom: 40 },
 
-  header: {
-    backgroundColor: C.navy,
-    paddingHorizontal: 18,
-    paddingVertical: 14
-  },
+  header: { backgroundColor: C.navy, paddingHorizontal: 18, paddingVertical: 14 },
   headerTitle: { color: C.white, fontSize: 18, fontWeight: '700' },
   headerSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
 
@@ -598,12 +841,12 @@ const s = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: C.border,
-    padding: 18
+    padding: 18,
+    marginBottom: 14
   },
 
   h1: { fontSize: 20, fontWeight: '700', color: C.text, marginBottom: 6 },
   muted: { fontSize: 14, color: C.muted, lineHeight: 20 },
-  hint: { fontSize: 12, color: C.muted, marginTop: 14, lineHeight: 17 },
 
   code: { fontSize: 26, fontWeight: '800', color: C.text, letterSpacing: 0.5 },
   type: { fontSize: 15, color: C.muted, marginTop: 2, marginBottom: 10 },
@@ -616,6 +859,9 @@ const s = StyleSheet.create({
     marginBottom: 6
   },
 
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: 2 },
+  sectionHint: { fontSize: 12, color: C.muted, marginBottom: 8 },
+
   input: {
     borderWidth: 1,
     borderColor: C.border,
@@ -626,22 +872,85 @@ const s = StyleSheet.create({
     color: C.text,
     backgroundColor: C.white
   },
-  inputCode: { fontSize: 22, fontWeight: '700', letterSpacing: 2, textAlign: 'center' },
+  inputCode: { fontSize: 24, fontWeight: '700', letterSpacing: 2, textAlign: 'center' },
   textarea: { minHeight: 78, textAlignVertical: 'top' },
 
   error: { color: C.red, fontSize: 14, marginTop: 12 },
 
-  btn: {
-    borderRadius: 10,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 16
-  },
+  btn: { borderRadius: 10, paddingVertical: 16, alignItems: 'center', marginTop: 12 },
   btnPrimary: { backgroundColor: C.blue },
   btnPrimaryText: { color: C.white, fontSize: 16, fontWeight: '700' },
-  btnGhost: { backgroundColor: 'transparent', paddingVertical: 12, marginTop: 6 },
+  btnOutline: { borderWidth: 1, borderColor: C.border, backgroundColor: C.white },
+  btnOutlineText: { color: C.text, fontSize: 15, fontWeight: '600' },
+  btnOutlineLight: { borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)' },
+  btnOutlineLightText: { color: C.white, fontSize: 15, fontWeight: '600' },
+  btnGhost: { backgroundColor: 'transparent', paddingVertical: 12, marginTop: 4 },
   btnGhostText: { color: C.muted, fontSize: 15, fontWeight: '600' },
   btnDisabled: { opacity: 0.5 },
+
+  /* dashboard */
+  scanCta: {
+    backgroundColor: C.navy,
+    borderRadius: 14,
+    paddingVertical: 30,
+    alignItems: 'center',
+    marginBottom: 12
+  },
+  scanCtaIcon: { fontSize: 34, color: C.white, marginBottom: 6 },
+  scanCtaText: { color: C.white, fontSize: 19, fontWeight: '700' },
+  scanCtaSub: { color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 3 },
+
+  statRow: { flexDirection: 'row', gap: 10, marginTop: 18, marginBottom: 20 },
+  stat: {
+    flex: 1,
+    backgroundColor: C.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingVertical: 14,
+    alignItems: 'center'
+  },
+  statValue: { fontSize: 24, fontWeight: '800', color: C.text },
+  statLabel: { fontSize: 11, color: C.muted, marginTop: 3, textAlign: 'center' },
+
+  listRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+    gap: 12
+  },
+  listRowLast: { borderBottomWidth: 0, paddingBottom: 0 },
+  listCode: { fontSize: 15, fontWeight: '700', color: C.text },
+  listMeta: { fontSize: 12, color: C.muted, marginTop: 1 },
+  listWhen: { fontSize: 12, color: C.muted, textAlign: 'right' },
+
+  tag: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
+  tagGreen: { backgroundColor: C.greenBg },
+  tagRed: { backgroundColor: C.redBg },
+  tagText: { fontSize: 12, fontWeight: '700' },
+
+  /* scanner */
+  scanWrap: { flex: 1, backgroundColor: '#000' },
+  camera: { flex: 1 },
+  scanOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  scanFrame: {
+    width: 230,
+    height: 230,
+    borderWidth: 3,
+    borderColor: C.white,
+    borderRadius: 18,
+    backgroundColor: 'transparent'
+  },
+  scanHint: { color: C.white, fontSize: 15, fontWeight: '600', marginTop: 18 },
+  scanFooter: { padding: 18, paddingBottom: 28, backgroundColor: '#000' },
+  scanError: { color: '#FCA5A5', fontSize: 14, textAlign: 'center', marginBottom: 8 },
 
   row: {
     flexDirection: 'row',
@@ -706,12 +1015,7 @@ const s = StyleSheet.create({
   },
   autoLabel: { fontSize: 14, color: C.muted, fontWeight: '600' },
   autoValue: { fontSize: 15, color: C.text, fontWeight: '700' },
-  autoChange: {
-    fontSize: 13,
-    color: C.blue,
-    fontWeight: '600',
-    marginTop: 10
-  },
+  autoChange: { fontSize: 13, color: C.blue, fontWeight: '600', marginTop: 10 },
 
   findingWrap: { gap: 8 },
   finding: {
@@ -722,7 +1026,7 @@ const s = StyleSheet.create({
     paddingVertical: 15,
     backgroundColor: C.white
   },
-  findingActive: { borderColor: C.blue, borderWidth: 2, backgroundColor: '#EAF1FF' },
+  findingActive: { borderColor: C.blue, borderWidth: 2, backgroundColor: C.blueBg },
   findingText: { fontSize: 15, color: C.text, fontWeight: '500' },
   findingTextActive: { color: C.blue, fontWeight: '700' },
 
