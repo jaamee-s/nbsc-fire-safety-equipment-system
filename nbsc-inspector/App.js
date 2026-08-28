@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View
 } from 'react-native'
 import {
@@ -81,13 +82,27 @@ function RootApp() {
 
   function handleFound(item) {
     setEquipment(item)
-    setScreen('detail')
+    goToScreen('detail')
   }
 
   function goHome() {
     setEquipment(null)
     setLastResult(null)
-    setScreen('home')
+    goToScreen('home')
+  }
+
+  // The camera view is a special native surface that Android composites
+  // outside React's normal render order. Swapping screens instantly can
+  // leave a black "hole" from it briefly showing through the next screen.
+  // Leaving a real gap — unmounting to null for one frame before mounting
+  // the destination — gives Android time to release it cleanly.
+  function goToScreen(next) {
+    if (screen === 'scan') {
+      setScreen(null)
+      requestAnimationFrame(() => setScreen(next))
+    } else {
+      setScreen(next)
+    }
   }
 
   // The scan screen wants its own full-bleed handling (camera behind the
@@ -110,6 +125,8 @@ function RootApp() {
           </Text>
         </View>
       )}
+
+      {screen === null && <View style={s.center} />}
 
       {screen === 'loading' && (
         <View style={s.center}>
@@ -139,7 +156,7 @@ function RootApp() {
         <ScanScreen
           onFound={handleFound}
           onCancel={goHome}
-          onManual={() => setScreen('manual')}
+          onManual={() => goToScreen('manual')}
         />
       )}
 
@@ -383,11 +400,19 @@ function Stat({ value, label, alert }) {
 
 function ScanScreen({ onFound, onCancel, onManual }) {
   const insets = useSafeAreaInsets()
+  const { height: windowHeight } = useWindowDimensions()
+  const [footerHeight, setFooterHeight] = useState(0)
   const [permission, requestPermission] = useCameraPermissions()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [cameraError, setCameraError] = useState(null)
   const [cameraReady, setCameraReady] = useState(false)
+
+  // Before the footer has measured itself, estimate; once it reports its
+  // real height via onLayout below, this becomes exact. Either way it's a
+  // real number, not a flex percentage — that's what fixes the sizing bug.
+  const cameraAreaHeight =
+    footerHeight > 0 ? windowHeight - footerHeight : Math.round(windowHeight * 0.72)
 
   // The camera fires this repeatedly while a code is in frame, so `busy`
   // guards against firing a dozen lookups for one sticker.
@@ -441,12 +466,9 @@ function ScanScreen({ onFound, onCancel, onManual }) {
 
   return (
     <View style={s.scanWrap}>
-      {/* Flex-based centering instead of absolute-fill-plus-center — more
-          reliable across OEM Android builds than layering an absolutely
-          positioned overlay on top of a native SurfaceView. */}
-      <View style={s.cameraArea}>
+      <View style={[s.cameraArea, { height: cameraAreaHeight }]}>
         <CameraView
-          style={StyleSheet.absoluteFillObject}
+          style={{ width: '100%', height: cameraAreaHeight }}
           facing="back"
           barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
           onBarcodeScanned={busy ? undefined : handleScan}
@@ -456,7 +478,10 @@ function ScanScreen({ onFound, onCancel, onManual }) {
           }
         />
 
-        <View style={s.scanCenterColumn} pointerEvents="none">
+        <View
+          style={[s.scanCenterColumn, { height: cameraAreaHeight }]}
+          pointerEvents="none"
+        >
           <View style={s.scanFrame} />
           <Text style={s.scanHint}>
             {cameraError
@@ -481,7 +506,10 @@ function ScanScreen({ onFound, onCancel, onManual }) {
         )}
       </View>
 
-      <View style={[s.scanFooter, { paddingBottom: insets.bottom + 18 }]}>
+      <View
+        style={[s.scanFooter, { paddingBottom: insets.bottom + 18 }]}
+        onLayout={(e) => setFooterHeight(e.nativeEvent.layout.height)}
+      >
         {error && <Text style={s.scanError}>{error}</Text>}
         <Pressable style={[s.btn, s.btnOutlineLight]} onPress={onManual}>
           <Text style={s.btnOutlineLightText}>Enter code manually</Text>
@@ -988,13 +1016,16 @@ const s = StyleSheet.create({
 
   /* scanner */
   scanWrap: { flex: 1, backgroundColor: '#000' },
-  // The camera fills this area (absoluteFill); the frame column below is a
-  // normal flex child laid on top of it via elevation/zIndex, centered with
-  // ordinary flexbox rather than absolute-position math — more reliable
-  // across OEM Android camera implementations.
-  cameraArea: { flex: 1, position: 'relative' },
+  // Height is now set explicitly per-render (see ScanScreen), computed from
+  // real measured pixels rather than flex — some Android chipsets get the
+  // camera's SurfaceView stuck at an early small size when it's sized only
+  // by flex/percentage, so an explicit number forces a correct resize.
+  cameraArea: { position: 'relative', width: '100%' },
   scanCenterColumn: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 2
