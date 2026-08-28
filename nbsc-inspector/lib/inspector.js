@@ -193,6 +193,39 @@ export async function submitInspection({
   return { success: true }
 }
 
+// ---------------------------------------------------------------------------
+// Inspector dashboard.
+//
+// The app runs anonymously, and the RLS policy on `inspections` requires an
+// authenticated user — so the table cannot be read directly. This function is
+// the read-side equivalent of submit_inspector_inspection(): one narrow,
+// validated door instead of opening the table to the anon key.
+// ---------------------------------------------------------------------------
+
+export async function getInspectorDashboard(inspectorName) {
+  const { data, error } = await supabase.rpc('get_inspector_dashboard', {
+    p_inspector_name: (inspectorName || '').trim()
+  })
+
+  if (error) throw new Error('Could not load dashboard: ' + error.message)
+  return data
+}
+
+// "3 days ago", "just now" — for dashboard lists.
+export function relativeTime(dateString) {
+  if (!dateString) return 'Never inspected'
+  const mins = Math.floor((new Date() - new Date(dateString)) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`
+  return `${Math.floor(months / 12)} year(s) ago`
+}
+
 // Days until expiry — negative means already expired.
 export function daysUntil(dateString) {
   if (!dateString) return null
