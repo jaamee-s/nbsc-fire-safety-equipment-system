@@ -386,6 +386,8 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   const [permission, requestPermission] = useCameraPermissions()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [cameraError, setCameraError] = useState(null)
+  const [cameraReady, setCameraReady] = useState(false)
 
   // The camera fires this repeatedly while a code is in frame, so `busy`
   // guards against firing a dozen lookups for one sticker.
@@ -439,23 +441,44 @@ function ScanScreen({ onFound, onCancel, onManual }) {
 
   return (
     <View style={s.scanWrap}>
-      {/* Camera + centered frame live in their own flexed area, separate
-          from the footer, so the frame centers on what's actually visible
-          rather than on the full screen height (which the footer covers). */}
+      {/* Flex-based centering instead of absolute-fill-plus-center — more
+          reliable across OEM Android builds than layering an absolutely
+          positioned overlay on top of a native SurfaceView. */}
       <View style={s.cameraArea}>
         <CameraView
           style={StyleSheet.absoluteFillObject}
           facing="back"
           barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
           onBarcodeScanned={busy ? undefined : handleScan}
+          onCameraReady={() => setCameraReady(true)}
+          onMountError={(e) =>
+            setCameraError(e?.message || 'Camera failed to start on this device.')
+          }
         />
 
-        <View style={s.scanOverlay} pointerEvents="none">
+        <View style={s.scanCenterColumn} pointerEvents="none">
           <View style={s.scanFrame} />
           <Text style={s.scanHint}>
-            {busy ? 'Looking up...' : 'Line up the QR sticker'}
+            {cameraError
+              ? 'Camera unavailable'
+              : !cameraReady
+              ? 'Starting camera...'
+              : busy
+              ? 'Looking up...'
+              : 'Line up the QR sticker'}
           </Text>
         </View>
+
+        {cameraError && (
+          <View style={s.cameraErrorBanner} pointerEvents="none">
+            <Text style={s.cameraErrorText}>{cameraError}</Text>
+            <Text style={s.cameraErrorHint}>
+              On some phones, camera access must also be allowed in the phone's
+              Security or Privacy settings, separate from this app's permission
+              prompt. Use "Enter code manually" below in the meantime.
+            </Text>
+          </View>
+        )}
       </View>
 
       <View style={[s.scanFooter, { paddingBottom: insets.bottom + 18 }]}>
@@ -965,14 +988,16 @@ const s = StyleSheet.create({
 
   /* scanner */
   scanWrap: { flex: 1, backgroundColor: '#000' },
-  // The camera and its centered frame live in this flexed, relatively
-  // positioned area only — not the whole screen — so the frame centers on
-  // the space actually visible above the footer.
+  // The camera fills this area (absoluteFill); the frame column below is a
+  // normal flex child laid on top of it via elevation/zIndex, centered with
+  // ordinary flexbox rather than absolute-position math — more reliable
+  // across OEM Android camera implementations.
   cameraArea: { flex: 1, position: 'relative' },
-  scanOverlay: {
-    ...StyleSheet.absoluteFillObject,
+  scanCenterColumn: {
+    flex: 1,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    zIndex: 2
   },
   scanFrame: {
     width: 230,
@@ -985,6 +1010,18 @@ const s = StyleSheet.create({
   scanHint: { color: C.white, fontSize: 15, fontWeight: '600', marginTop: 18 },
   scanFooter: { padding: 18, backgroundColor: '#000' },
   scanError: { color: '#FCA5A5', fontSize: 14, textAlign: 'center', marginBottom: 8 },
+  cameraErrorBanner: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    bottom: 20,
+    backgroundColor: 'rgba(185,28,28,0.92)',
+    borderRadius: 10,
+    padding: 14,
+    zIndex: 3
+  },
+  cameraErrorText: { color: C.white, fontSize: 14, fontWeight: '700', marginBottom: 4 },
+  cameraErrorHint: { color: 'rgba(255,255,255,0.85)', fontSize: 12, lineHeight: 17 },
 
   row: {
     flexDirection: 'row',
