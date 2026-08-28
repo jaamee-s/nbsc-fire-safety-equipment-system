@@ -5,7 +5,6 @@ import {
   Platform,
   Pressable,
   RefreshControl,
-  SafeAreaView,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -13,6 +12,11 @@ import {
   TextInput,
   View
 } from 'react-native'
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  useSafeAreaInsets
+} from 'react-native-safe-area-context'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import {
@@ -50,6 +54,14 @@ const C = {
 }
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <RootApp />
+    </SafeAreaProvider>
+  )
+}
+
+function RootApp() {
   // 'loading' | 'name' | 'home' | 'scan' | 'manual' | 'detail' | 'form' | 'done'
   const [screen, setScreen] = useState('loading')
   const [inspectorName, setInspectorName] = useState('')
@@ -78,11 +90,19 @@ export default function App() {
     setScreen('home')
   }
 
+  // The scan screen wants its own full-bleed handling (camera behind the
+  // status bar, footer padded to the gesture bar) so it manages its own
+  // insets instead of sharing the app-wide SafeAreaView.
+  const isFullBleedScreen = screen === 'scan'
+
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView
+      style={s.safe}
+      edges={isFullBleedScreen ? [] : ['top', 'left', 'right', 'bottom']}
+    >
       <StatusBar barStyle="light-content" backgroundColor={C.navy} />
 
-      {screen !== 'scan' && (
+      {!isFullBleedScreen && (
         <View style={s.header}>
           <Text style={s.headerTitle}>NBSC Fire Safety</Text>
           <Text style={s.headerSub}>
@@ -362,6 +382,7 @@ function Stat({ value, label, alert }) {
 /* ------------------------------------------------------------------ */
 
 function ScanScreen({ onFound, onCancel, onManual }) {
+  const insets = useSafeAreaInsets()
   const [permission, requestPermission] = useCameraPermissions()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -390,7 +411,12 @@ function ScanScreen({ onFound, onCancel, onManual }) {
 
   if (!permission.granted) {
     return (
-      <ScrollView contentContainerStyle={s.scroll}>
+      <ScrollView
+        contentContainerStyle={[
+          s.scroll,
+          { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }
+        ]}
+      >
         <View style={s.card}>
           <Text style={s.h1}>Camera access needed</Text>
           <Text style={s.muted}>
@@ -413,21 +439,26 @@ function ScanScreen({ onFound, onCancel, onManual }) {
 
   return (
     <View style={s.scanWrap}>
-      <CameraView
-        style={s.camera}
-        facing="back"
-        barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-        onBarcodeScanned={busy ? undefined : handleScan}
-      />
+      {/* Camera + centered frame live in their own flexed area, separate
+          from the footer, so the frame centers on what's actually visible
+          rather than on the full screen height (which the footer covers). */}
+      <View style={s.cameraArea}>
+        <CameraView
+          style={StyleSheet.absoluteFillObject}
+          facing="back"
+          barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+          onBarcodeScanned={busy ? undefined : handleScan}
+        />
 
-      <View style={s.scanOverlay} pointerEvents="none">
-        <View style={s.scanFrame} />
-        <Text style={s.scanHint}>
-          {busy ? 'Looking up...' : 'Line up the QR sticker'}
-        </Text>
+        <View style={s.scanOverlay} pointerEvents="none">
+          <View style={s.scanFrame} />
+          <Text style={s.scanHint}>
+            {busy ? 'Looking up...' : 'Line up the QR sticker'}
+          </Text>
+        </View>
       </View>
 
-      <View style={s.scanFooter}>
+      <View style={[s.scanFooter, { paddingBottom: insets.bottom + 18 }]}>
         {error && <Text style={s.scanError}>{error}</Text>}
         <Pressable style={[s.btn, s.btnOutlineLight]} onPress={onManual}>
           <Text style={s.btnOutlineLightText}>Enter code manually</Text>
@@ -934,7 +965,10 @@ const s = StyleSheet.create({
 
   /* scanner */
   scanWrap: { flex: 1, backgroundColor: '#000' },
-  camera: { flex: 1 },
+  // The camera and its centered frame live in this flexed, relatively
+  // positioned area only — not the whole screen — so the frame centers on
+  // the space actually visible above the footer.
+  cameraArea: { flex: 1, position: 'relative' },
   scanOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -949,7 +983,7 @@ const s = StyleSheet.create({
     backgroundColor: 'transparent'
   },
   scanHint: { color: C.white, fontSize: 15, fontWeight: '600', marginTop: 18 },
-  scanFooter: { padding: 18, paddingBottom: 28, backgroundColor: '#000' },
+  scanFooter: { padding: 18, backgroundColor: '#000' },
   scanError: { color: '#FCA5A5', fontSize: 14, textAlign: 'center', marginBottom: 8 },
 
   row: {
