@@ -407,6 +407,18 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   const [error, setError] = useState(null)
   const [cameraError, setCameraError] = useState(null)
   const [cameraReady, setCameraReady] = useState(false)
+  // True the instant the user is leaving this screen. CameraView stops
+  // rendering (and its native camera session starts closing) right away —
+  // the delay below just gives that real teardown time to finish before
+  // the app moves to the next screen, which is what actually prevents the
+  // leftover black surface from bleeding into whatever renders next.
+  const [closing, setClosing] = useState(false)
+
+  function leave(action) {
+    if (closing) return
+    setClosing(true)
+    setTimeout(action, 350)
+  }
 
   // Before the footer has measured itself, estimate; once it reports its
   // real height via onLayout below, this becomes exact. Either way it's a
@@ -417,11 +429,12 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   // The camera fires this repeatedly while a code is in frame, so `busy`
   // guards against firing a dozen lookups for one sticker.
   async function handleScan({ data }) {
-    if (busy) return
+    if (busy || closing) return
     setBusy(true)
     setError(null)
     try {
-      onFound(await findEquipmentByQrCode(data))
+      const item = await findEquipmentByQrCode(data)
+      leave(() => onFound(item))
     } catch (err) {
       setError(err.message)
       setTimeout(() => setBusy(false), 1500)
@@ -431,7 +444,7 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   if (!permission) {
     return (
       <View style={s.center}>
-        <ActivityIndicator color={C.blue} />
+        <ActivityIndicator size="large" color={C.blue} />
       </View>
     )
   }
@@ -461,6 +474,17 @@ function ScanScreen({ onFound, onCancel, onManual }) {
           </Pressable>
         </View>
       </ScrollView>
+    )
+  }
+
+  if (closing) {
+    return (
+      <View style={s.scanWrap}>
+        <View style={s.center}>
+          <ActivityIndicator size="large" color={C.white} />
+          <Text style={[s.scanHint, { marginTop: 14 }]}>Closing camera...</Text>
+        </View>
+      </View>
     )
   }
 
@@ -511,10 +535,10 @@ function ScanScreen({ onFound, onCancel, onManual }) {
         onLayout={(e) => setFooterHeight(e.nativeEvent.layout.height)}
       >
         {error && <Text style={s.scanError}>{error}</Text>}
-        <Pressable style={[s.btn, s.btnOutlineLight]} onPress={onManual}>
+        <Pressable style={[s.btn, s.btnOutlineLight]} onPress={() => leave(onManual)}>
           <Text style={s.btnOutlineLightText}>Enter code manually</Text>
         </Pressable>
-        <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
+        <Pressable style={[s.btn, s.btnGhost]} onPress={() => leave(onCancel)}>
           <Text style={[s.btnGhostText, { color: C.white }]}>Cancel</Text>
         </Pressable>
       </View>
