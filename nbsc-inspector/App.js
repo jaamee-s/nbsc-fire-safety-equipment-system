@@ -105,20 +105,11 @@ function RootApp() {
     }
   }
 
-  // The scan screen wants its own full-bleed handling (camera behind the
-  // status bar, footer padded to the gesture bar) so it manages its own
-  // insets instead of sharing the app-wide SafeAreaView.
-  const isFullBleedScreen = screen === 'scan'
-
   return (
-    <SafeAreaView
-      key={screen}
-      style={s.safe}
-      edges={isFullBleedScreen ? [] : ['top', 'left', 'right', 'bottom']}
-    >
+    <SafeAreaView key={screen} style={s.safe} edges={['top', 'left', 'right', 'bottom']}>
       <StatusBar barStyle="light-content" backgroundColor={C.navy} />
 
-      {!isFullBleedScreen && (
+      {screen !== 'scan' && (
         <View style={s.header}>
           <Text style={s.headerTitle}>NBSC Fire Safety</Text>
           <Text style={s.headerSub}>
@@ -453,10 +444,7 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   if (!permission.granted) {
     return (
       <ScrollView
-        contentContainerStyle={[
-          s.scroll,
-          { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }
-        ]}
+        contentContainerStyle={[s.scroll, { paddingBottom: insets.bottom + 16 }]}
       >
         <View style={s.card}>
           <Text style={s.h1}>Camera access needed</Text>
