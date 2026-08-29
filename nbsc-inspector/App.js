@@ -112,6 +112,7 @@ function RootApp() {
 
   return (
     <SafeAreaView
+      key={screen}
       style={s.safe}
       edges={isFullBleedScreen ? [] : ['top', 'left', 'right', 'bottom']}
     >
