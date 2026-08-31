@@ -54,6 +54,27 @@ const C = {
   white: '#FFFFFF'
 }
 
+// These only need to answer "does this fall in the same window the stat box
+// counted?" — used purely to filter the already-fetched recent-inspections
+// list for the tap-to-expand detail views, not to recompute the counts
+// themselves (those come from the server, which knows the true totals).
+function isToday(dateString) {
+  if (!dateString) return false
+  const d = new Date(dateString)
+  const now = new Date()
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  )
+}
+
+function isThisWeek(dateString) {
+  if (!dateString) return false
+  const diffMs = new Date() - new Date(dateString)
+  return diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -251,6 +272,8 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  // Which stat box's detail list is currently open, if any.
+  const [openStat, setOpenStat] = useState(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -302,10 +325,99 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
       ) : data ? (
         <>
           <View style={s.statRow}>
-            <Stat value={data.today_count} label="Today" />
-            <Stat value={data.week_count} label="This week" />
-            <Stat value={data.defect_count} label="Defects found" alert />
+            <Stat
+              value={data.today_count}
+              label="Today"
+              active={openStat === 'today'}
+              onPress={() => setOpenStat(openStat === 'today' ? null : 'today')}
+            />
+            <Stat
+              value={data.week_count}
+              label="This week"
+              active={openStat === 'week'}
+              onPress={() => setOpenStat(openStat === 'week' ? null : 'week')}
+            />
+            <Stat
+              value={data.defect_count}
+              label="Defects found"
+              alert
+              active={openStat === 'defects'}
+              onPress={() => setOpenStat(openStat === 'defects' ? null : 'defects')}
+            />
           </View>
+
+          {openStat &&
+            (() => {
+              const recent = data.recent || []
+              const filtered =
+                openStat === 'today'
+                  ? recent.filter((r) => isToday(r.inspection_date))
+                  : openStat === 'week'
+                  ? recent.filter((r) => isThisWeek(r.inspection_date))
+                  : recent.filter((r) => r.condition_status === 'defective')
+
+              const totalForStat =
+                openStat === 'today'
+                  ? data.today_count
+                  : openStat === 'week'
+                  ? data.week_count
+                  : data.defect_count
+
+              const titleMap = {
+                today: "Today's inspections",
+                week: "This week's inspections",
+                defects: 'Defects found'
+              }
+
+              return (
+                <View style={[s.card, { marginBottom: 20 }]}>
+                  <View style={s.statPanelHead}>
+                    <Text style={s.sectionTitle}>{titleMap[openStat]}</Text>
+                    <Pressable onPress={() => setOpenStat(null)}>
+                      <Text style={s.statPanelClose}>Close</Text>
+                    </Pressable>
+                  </View>
+
+                  {filtered.length === 0 ? (
+                    <Text style={s.muted}>
+                      {totalForStat > 0
+                        ? "None of these are in your recent list — check your full inspection history."
+                        : 'Nothing here yet.'}
+                    </Text>
+                  ) : (
+                    filtered.map((r, i) => {
+                      const bad = r.condition_status === 'defective'
+                      return (
+                        <View
+                          key={r.id}
+                          style={[s.listRow, i === filtered.length - 1 && s.listRowLast]}
+                        >
+                          <View style={s.flex}>
+                            <Text style={s.listCode}>{r.equipment_code}</Text>
+                            <Text style={s.listMeta}>
+                              {bad ? r.findings || 'Defective' : 'Functional'}
+                            </Text>
+                            <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
+                          </View>
+                          <View style={[s.tag, bad ? s.tagRed : s.tagGreen]}>
+                            <Text style={[s.tagText, { color: bad ? C.red : C.green }]}>
+                              {bad ? 'Defective' : 'OK'}
+                            </Text>
+                          </View>
+                        </View>
+                      )
+                    })
+                  )}
+
+                  {totalForStat > filtered.length && (
+                    <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                      Showing your most recent — the full count ({totalForStat}) may include
+                      older entries not listed here.
+                    </Text>
+                  )}
+                </View>
+              )
+            })()}
 
           <Text style={s.sectionTitle}>Due for inspection</Text>
           <Text style={s.sectionHint}>Longest since last check — start here.</Text>
@@ -375,14 +487,14 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
   )
 }
 
-function Stat({ value, label, alert }) {
+function Stat({ value, label, alert, active, onPress }) {
   return (
-    <View style={s.stat}>
+    <Pressable style={[s.stat, active && s.statActive]} onPress={onPress}>
       <Text style={[s.statValue, alert && value > 0 && { color: C.red }]}>
         {value ?? 0}
       </Text>
       <Text style={s.statLabel}>{label}</Text>
-    </View>
+    </Pressable>
   )
 }
 
@@ -1007,6 +1119,15 @@ const s = StyleSheet.create({
   },
   statValue: { fontSize: 24, fontWeight: '800', color: C.text },
   statLabel: { fontSize: 11, color: C.muted, marginTop: 3, textAlign: 'center' },
+  statActive: { borderColor: C.blue, borderWidth: 2, backgroundColor: C.blueBg },
+
+  statPanelHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4
+  },
+  statPanelClose: { fontSize: 13, color: C.blue, fontWeight: '600' },
 
   listRow: {
     flexDirection: 'row',

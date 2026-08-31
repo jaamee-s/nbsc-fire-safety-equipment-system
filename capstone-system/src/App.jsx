@@ -1161,28 +1161,27 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage 2: Budget check — only when something is being purchased */}
+                {/* Purchase workflow: showing a placeholder status until the
+                    real procurement timeline (12 or 30 working days) is
+                    confirmed with Supply Office. The interactive budget-check
+                    buttons re-enable once that number is settled — see
+                    setBudgetStatus() below, which is kept intact for that. */}
                 {needsBudgetCheck && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      Purchase request needed. Is budget available?
+                  <div
+                    style={{
+                      marginTop: '10px',
+                      background: 'var(--amber-bg)',
+                      border: '1px solid var(--amber-border)',
+                      borderRadius: '8px',
+                      padding: '10px 14px'
+                    }}
+                  >
+                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--amber)', margin: 0 }}>
+                      Pending for procurement
                     </p>
-                    <div className="action-buttons">
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => setBudgetStatus(action.id, 'available')}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        Budget Available (proceed)
-                      </button>
-                      <button
-                        className="btn btn-outline-red btn-sm"
-                        onClick={() => setBudgetStatus(action.id, 'unavailable')}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        Not Available
-                      </button>
-                    </div>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
+                      Awaiting confirmation of Supply Office's processing timeline.
+                    </p>
                   </div>
                 )}
 
