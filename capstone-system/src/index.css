@@ -682,3 +682,43 @@ textarea {
     margin: 12mm;
   }
 }
+/* ============================================================
+   PASSWORD SHOW/HIDE TOGGLE — append to the END of src/index.css
+   ============================================================ */
+
+.password-field-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-field-wrap input {
+  width: 100%;
+  padding-right: 42px; /* room for the eye button so text never overlaps it */
+}
+
+.password-toggle-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: 6px;
+}
+
+.password-toggle-btn:hover {
+  color: var(--text);
+  background: var(--gray-bg);
+}
+
+.password-toggle-btn:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
