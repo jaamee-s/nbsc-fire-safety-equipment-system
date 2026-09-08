@@ -12,12 +12,12 @@ const EQUIPMENT_TYPES = [
 ]
 
 const STATUS_OPTIONS = [
-  'active',
+  'functional',
   'defective',
   'for_repair',
   'for_replacement',
   'expired',
-  'inactive'
+  'not_functional'
 ]
 
 const PRIORITY_ORDER = { critical: 1, high: 2, medium: 3, low: 4 }
@@ -31,12 +31,12 @@ const TYPE_LABELS = {
 }
 
 const STATUS_LABELS = {
-  active: 'Active',
+  functional: 'Functional',
   defective: 'Defective',
   for_repair: 'For Repair',
   for_replacement: 'For Replacement',
   expired: 'Expired',
-  inactive: 'Inactive'
+  not_functional: 'Not Functional'
 }
 
 const CODE_PREFIXES = {
@@ -47,10 +47,9 @@ const CODE_PREFIXES = {
   smoke_detector: 'SD'
 }
 
-// Action types that mean something is actually being bought, and therefore
-// have to pass a budget-availability check before work can start.
-// A plain repair or inspection uses existing manpower — no purchase request.
-const PURCHASE_ACTION_TYPES = ['replace', 'battery_replacement', 'refill']
+// Purchase-need for non-extinguisher equipment is now an explicit GSO
+// decision (see setRepairPath / needsRepairPathChoice below) rather than
+// guessed from action_type — GSO knows the actual damage, the system doesn't.
 
 async function generateEquipmentCode(supabase, equipmentType) {
   const prefix = CODE_PREFIXES[equipmentType] || 'EQ'
@@ -282,7 +281,7 @@ function Dashboard({ profile, onLogout }) {
     qr_code: '',
     installation_date: '',
     expiration_date: '',
-    current_status: 'active',
+    current_status: 'functional',
     description: ''
   })
 
@@ -596,7 +595,7 @@ function Dashboard({ profile, onLogout }) {
       .from('maintenance_actions')
       .select(`
         id, action_type, description, priority, status, reported_date, due_date,
-        disposition, budget_status,
+        disposition, budget_status, repair_path,
         equipment ( id, equipment_code, equipment_type, exact_location,
           buildings ( building_name )
         )
@@ -716,7 +715,7 @@ function Dashboard({ profile, onLogout }) {
         qr_code: '',
         installation_date: '',
         expiration_date: '',
-        current_status: 'active',
+        current_status: 'functional',
         description: ''
       })
       setFormFloor('')
@@ -739,7 +738,7 @@ function Dashboard({ profile, onLogout }) {
       qr_code: item.qr_code || '',
       installation_date: item.installation_date || '',
       expiration_date: item.expiration_date || '',
-      current_status: item.current_status || 'active',
+      current_status: item.current_status || 'functional',
       description: item.description || ''
     })
   }
@@ -818,7 +817,7 @@ function Dashboard({ profile, onLogout }) {
       } else if (remainingActions.length === 0) {
         const { error: revertError } = await supabase
           .from('equipment')
-          .update({ current_status: 'active' })
+          .update({ current_status: 'functional' })
           .eq('id', equipmentId)
         if (revertError) console.error('Error reverting equipment status:', revertError)
       }
@@ -843,6 +842,28 @@ function Dashboard({ profile, onLogout }) {
 
     if (error) {
       console.error('Error setting disposition:', error)
+      alert('Failed to update: ' + error.message)
+    } else {
+      getMaintenanceActions()
+    }
+
+    setActionUpdatingId(null)
+  }
+
+  // Non-extinguisher equipment only: GSO decides whether their own technician
+  // can handle the repair (Job Order — no purchase) or whether it needs
+  // budget/materials/outside expertise (Purchase Request — goes to the
+  // procurement stage). Mirrors setDisposition() above for fire extinguishers.
+  async function setRepairPath(actionId, repairPath) {
+    setActionUpdatingId(actionId)
+
+    const { error } = await supabase
+      .from('maintenance_actions')
+      .update({ repair_path: repairPath })
+      .eq('id', actionId)
+
+    if (error) {
+      console.error('Error setting repair path:', error)
       alert('Failed to update: ' + error.message)
     } else {
       getMaintenanceActions()
@@ -908,7 +929,7 @@ function Dashboard({ profile, onLogout }) {
 
     const { error: equipmentError } = await supabase
       .from('equipment')
-      .update({ current_status: 'inactive' })
+      .update({ current_status: 'not_functional' })
       .eq('id', equipmentId)
 
     if (equipmentError) console.error('Error retiring equipment:', equipmentError)
@@ -937,8 +958,8 @@ function Dashboard({ profile, onLogout }) {
   const REPEAT_FAILURE_THRESHOLD = 2
 
   const totalEquipment = equipment.length
-  const activeCount = equipment.filter((e) => e.current_status === 'active').length
-  const needsActionCount = equipment.filter((e) => e.current_status !== 'active').length
+  const activeCount = equipment.filter((e) => e.current_status === 'functional').length
+  const needsActionCount = equipment.filter((e) => e.current_status !== 'functional').length
   const pendingActionsCount = sortedActions.length
 
   const today = new Date()
@@ -1035,7 +1056,7 @@ function Dashboard({ profile, onLogout }) {
             <div className="stat-icon green">✓</div>
             <div>
               <div className="stat-value">{activeCount}</div>
-              <div className="stat-label">Active</div>
+              <div className="stat-label">Functional</div>
             </div>
           </div>
           <div className="stat-card">
@@ -1082,21 +1103,33 @@ function Dashboard({ profile, onLogout }) {
             const needsDispositionChoice =
               isFireExtinguisher && !action.disposition && action.status === 'pending'
 
+            // Stage 1b — every other equipment type: can our own technician
+            // handle this (Job Order), or does it need budget/materials/
+            // outside expertise (Purchase Request)? This is GSO's call based
+            // on the actual damage — not something guessable from action_type.
+            const needsRepairPathChoice =
+              !isFireExtinguisher && !action.repair_path && action.status === 'pending'
+
             // Does this action actually involve buying something?
             const needsPurchase =
               (isFireExtinguisher && action.disposition === 'refill') ||
-              PURCHASE_ACTION_TYPES.includes(action.action_type)
+              (!isFireExtinguisher && action.repair_path === 'purchase_request')
 
             // Stage 2 — budget check, only when a purchase request is involved
             const needsBudgetCheck =
               !needsDispositionChoice &&
+              !needsRepairPathChoice &&
               action.status === 'pending' &&
               action.budget_status === 'not_applicable' &&
               needsPurchase
 
-            // Stage 2b — repair / inspection / other: no purchase, GSO just starts the work
+            // Stage 2b — Job Order path (non-FE) or a plain repair with no
+            // purchase needed: GSO just starts the work directly
             const needsStartWork =
-              !needsDispositionChoice && !needsBudgetCheck && action.status === 'pending'
+              !needsDispositionChoice &&
+              !needsRepairPathChoice &&
+              !needsBudgetCheck &&
+              action.status === 'pending'
 
             let cardStyle = isOverdue ? 'overdue' : 'warning'
             if (action.status === 'for_disposal') cardStyle = 'warning'
@@ -1120,12 +1153,15 @@ function Dashboard({ profile, onLogout }) {
                   &nbsp;·&nbsp; Status: <strong style={{ textTransform: 'capitalize' }}>{action.status.replace('_', ' ')}</strong>
                 </p>
 
-                {(action.disposition || action.budget_status !== 'not_applicable') && (
+                {(action.disposition || action.repair_path || action.budget_status !== 'not_applicable') && (
                   <p style={{ color: 'var(--text-muted)' }}>
                     {action.disposition && (
                       <>Decision: <strong>{action.disposition === 'dispose' ? 'Dispose' : 'Refillable'}</strong></>
                     )}
-                    {action.disposition && action.budget_status !== 'not_applicable' && ' · '}
+                    {action.repair_path && (
+                      <>Decision: <strong>{action.repair_path === 'job_order' ? 'Job Order' : 'Purchase Request'}</strong></>
+                    )}
+                    {(action.disposition || action.repair_path) && action.budget_status !== 'not_applicable' && ' · '}
                     {action.budget_status !== 'not_applicable' && (
                       <>Budget: <strong>{action.budget_status === 'available' ? 'Available' : 'Not available'}</strong></>
                     )}
@@ -1161,6 +1197,31 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
+                {/* Stage 1b: Non-extinguisher equipment — Job Order vs Purchase Request */}
+                {needsRepairPathChoice && (
+                  <div style={{ marginTop: '10px' }}>
+                    <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
+                      Decision needed: can this be fixed in-house, or does it need a purchase request?
+                    </p>
+                    <div className="action-buttons">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => setRepairPath(action.id, 'job_order')}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        Job Order (technician repairs)
+                      </button>
+                      <button
+                        className="btn btn-outline-red btn-sm"
+                        onClick={() => setRepairPath(action.id, 'purchase_request')}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        Purchase Request (needs budget/materials)
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Purchase workflow: showing a placeholder status until the
                     real procurement timeline (12 or 30 working days) is
                     confirmed with Supply Office. The interactive budget-check
@@ -1185,7 +1246,7 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage 2b: No purchase involved — start the work directly */}
+                {/* Stage 2b: Job Order — no purchase involved, start the work directly */}
                 {needsStartWork && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
@@ -1197,7 +1258,7 @@ function Dashboard({ profile, onLogout }) {
                         onClick={() => updateActionStatus(action.id, 'in_progress', action.equipment?.id)}
                         disabled={actionUpdatingId === action.id}
                       >
-                        Start Work
+                        Start Job Order
                       </button>
                     </div>
                   </div>
@@ -1886,8 +1947,8 @@ function Dashboard({ profile, onLogout }) {
                           </div>
                           <div className="equipment-meta">Expires: {item.expiration_date || '—'}</div>
                         </div>
-                        <span className={`status-badge ${item.current_status === 'active' ? 'active' : 'inactive-state'}`}>
-                          {item.current_status === 'active' ? '✓ Active' : `⚠ ${STATUS_LABELS[item.current_status] || item.current_status}`}
+                        <span className={`status-badge ${item.current_status === 'functional' ? 'active' : 'inactive-state'}`}>
+                          {item.current_status === 'functional' ? '✓ Functional' : `⚠ ${STATUS_LABELS[item.current_status] || item.current_status}`}
                         </span>
                       </div>
 
