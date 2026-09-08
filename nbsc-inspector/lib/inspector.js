@@ -34,12 +34,12 @@ export const ACTION_TYPE_LABELS = {
 }
 
 export const STATUS_LABELS = {
-  active: 'Active',
+  functional: 'Functional',
   defective: 'Defective',
   for_repair: 'For Repair',
   for_replacement: 'For Replacement',
   expired: 'Expired',
-  inactive: 'Inactive'
+  not_functional: 'Not Functional'
 }
 
 // Preset findings per equipment type, derived from the inspection flowcharts.

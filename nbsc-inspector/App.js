@@ -721,7 +721,12 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
   const left = daysUntil(equipment.expiration_date)
   const expired = left !== null && left < 0
   const expiringSoon = left !== null && left >= 0 && left <= 30
-  const isActive = equipment.current_status === 'active'
+  const isFunctional = equipment.current_status === 'functional'
+  // Permanently retired equipment has nothing left to inspect — a disposed
+  // fire extinguisher is physically gone, and anything else in this state
+  // was already confirmed beyond repair. Blocking here also prevents a
+  // stray inspection from silently reviving a status GSO deliberately set.
+  const isRetired = equipment.current_status === 'not_functional'
 
   return (
     <ScrollView contentContainerStyle={s.scroll}>
@@ -731,11 +736,9 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
           {TYPE_LABELS[equipment.equipment_type] || equipment.equipment_type}
         </Text>
 
-        <View style={[s.pill, isActive ? s.pillGreen : s.pillRed]}>
-          <Text style={[s.pillText, { color: isActive ? C.green : C.red }]}>
-            {isActive
-              ? 'Active'
-              : STATUS_LABELS[equipment.current_status] || equipment.current_status}
+        <View style={[s.pill, isFunctional ? s.pillGreen : s.pillRed]}>
+          <Text style={[s.pillText, { color: isFunctional ? C.green : C.red }]}>
+            {STATUS_LABELS[equipment.current_status] || equipment.current_status}
           </Text>
         </View>
 
@@ -759,9 +762,17 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
           </View>
         )}
 
-        <Pressable style={[s.btn, s.btnPrimary]} onPress={onInspect}>
-          <Text style={s.btnPrimaryText}>Start Inspection</Text>
-        </Pressable>
+        {isRetired ? (
+          <View style={[s.banner, s.bannerRed, { marginTop: 16 }]}>
+            <Text style={s.bannerRedText}>
+              This equipment has been retired and is no longer in service.
+            </Text>
+          </View>
+        ) : (
+          <Pressable style={[s.btn, s.btnPrimary]} onPress={onInspect}>
+            <Text style={s.btnPrimaryText}>Start Inspection</Text>
+          </Pressable>
+        )}
 
         <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
           <Text style={s.btnGhostText}>Cancel</Text>
