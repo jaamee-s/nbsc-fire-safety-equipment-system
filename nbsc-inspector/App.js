@@ -726,7 +726,7 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
   // fire extinguisher is physically gone, and anything else in this state
   // was already confirmed beyond repair. Blocking here also prevents a
   // stray inspection from silently reviving a status GSO deliberately set.
-  const isRetired = equipment.current_status === 'not_functional'
+  const isRetired = equipment.current_status === 'no_longer_in_service'
 
   return (
     <ScrollView contentContainerStyle={s.scroll}>

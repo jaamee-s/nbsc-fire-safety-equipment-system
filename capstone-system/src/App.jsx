@@ -17,7 +17,7 @@ const STATUS_OPTIONS = [
   'for_repair',
   'for_replacement',
   'expired',
-  'not_functional'
+  'no_longer_in_service'
 ]
 
 const PRIORITY_ORDER = { critical: 1, high: 2, medium: 3, low: 4 }
@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   for_repair: 'For Repair',
   for_replacement: 'For Replacement',
   expired: 'Expired',
-  not_functional: 'Not Functional'
+  no_longer_in_service: 'No Longer in Service'
 }
 
 const CODE_PREFIXES = {
@@ -291,6 +291,18 @@ function Dashboard({ profile, onLogout }) {
   const [editError, setEditError] = useState(null)
 
   const [actionUpdatingId, setActionUpdatingId] = useState(null)
+
+  // Which top-level tab is showing — replaces the old single long-scroll
+  // page with Dashboard / Buildings / Equipment sections.
+  const [activeTab, setActiveTab] = useState('dashboard')
+  // Which Priority Action card is expanded to show its full equipment
+  // detail and inspection history inline.
+  const [expandedActionId, setExpandedActionId] = useState(null)
+  // Holds the retired unit's type/location right after a fire extinguisher
+  // action completes, so we can suggest — not silently create — its
+  // replacement, pre-filled with the same spot and a 2-year default
+  // expiration. GSO still confirms and can edit afterward.
+  const [replacementPrompt, setReplacementPrompt] = useState(null)
 
   // Inspection history state
   const [inspections, setInspections] = useState([])
@@ -596,7 +608,7 @@ function Dashboard({ profile, onLogout }) {
       .select(`
         id, action_type, description, priority, status, reported_date, due_date,
         disposition, budget_status, repair_path,
-        equipment ( id, equipment_code, equipment_type, exact_location,
+        equipment ( id, equipment_code, equipment_type, exact_location, building_id,
           buildings ( building_name )
         )
       `)
@@ -819,7 +831,7 @@ function Dashboard({ profile, onLogout }) {
         // never repaired in place — so completing their action retires the
         // old physical unit rather than reverting it to functional. Every
         // other equipment type gets fixed where it stands, same sticker.
-        const finalStatus = equipmentType === 'fire_extinguisher' ? 'not_functional' : 'functional'
+        const finalStatus = equipmentType === 'fire_extinguisher' ? 'no_longer_in_service' : 'functional'
         const { error: revertError } = await supabase
           .from('equipment')
           .update({ current_status: finalStatus })
@@ -831,6 +843,45 @@ function Dashboard({ profile, onLogout }) {
     getMaintenanceActions()
     getEquipment()
     setActionUpdatingId(null)
+  }
+
+  // Called when GSO confirms the suggested replacement. Pre-fills the type
+  // and location from the retired unit, generates a new code the normal
+  // way, and defaults to a 2-year expiration from today — the standard
+  // shelf life for the ABC dry chemical units NBSC stocks. All of it stays
+  // editable afterward through the normal Edit form if a specific unit differs.
+  async function handleAddReplacement() {
+    if (!replacementPrompt) return
+
+    const newCode = await generateEquipmentCode(supabase, replacementPrompt.equipment_type)
+    const today = new Date()
+    const installDate = today.toISOString().slice(0, 10)
+    const expiry = new Date(today)
+    expiry.setFullYear(expiry.getFullYear() + 2)
+    const expiryDate = expiry.toISOString().slice(0, 10)
+
+    const { error } = await supabase.from('equipment').insert([
+      {
+        equipment_code: newCode,
+        equipment_type: replacementPrompt.equipment_type,
+        building_id: replacementPrompt.building_id,
+        exact_location: replacementPrompt.exact_location,
+        qr_code: newCode,
+        installation_date: installDate,
+        expiration_date: expiryDate,
+        current_status: 'functional',
+        description: null
+      }
+    ])
+
+    if (error) {
+      console.error('Error adding replacement equipment:', error)
+      alert('Failed to add replacement: ' + error.message)
+    } else {
+      getEquipment()
+      setReplacementPrompt(null)
+      setActiveTab('equipment')
+    }
   }
 
   // GSO decides, for any equipment type including fire extinguishers: can
@@ -943,7 +994,11 @@ function Dashboard({ profile, onLogout }) {
       item.buildings?.building_name?.toLowerCase().includes(term)
 
     const matchesType = !filterType || item.equipment_type === filterType
-    const matchesStatus = !filterStatus || item.current_status === filterStatus
+    const matchesStatus =
+      !filterStatus ||
+      (filterStatus === '__needs_attention__'
+        ? item.current_status !== 'functional'
+        : item.current_status === filterStatus)
     const matchesBuilding = !filterBuilding || item.building_id === filterBuilding
 
     return matchesSearch && matchesType && matchesStatus && matchesBuilding
@@ -958,15 +1013,27 @@ function Dashboard({ profile, onLogout }) {
   )
   const selectedBuildingHasLocations = locationsForSelectedBuilding.length > 0
 
+  // Clicking a stat card into Equipment should show exactly what the card
+  // promised — not everything with the filters wiped, and not last time's
+  // leftover filters. This resets all filters first, then applies the one
+  // that matches the card. '__needs_attention__' is a sentinel — anything
+  // other than functional counts as needing attention, which a single
+  // dropdown value can't express directly, so filteredEquipment below
+  // special-cases it.
+  function jumpToEquipment(statusFilter) {
+    setSearchTerm('')
+    setFilterType('')
+    setFilterBuilding('')
+    setFilterStatus(statusFilter)
+    setActiveTab('equipment')
+  }
+
   return (
     <div>
-      <header className="app-header">
+      <header className="app-header app-header-compact">
         <div className="title-block">
           <div className="badge-icon">🔥</div>
-          <div>
-            <h1>NBSC Fire Safety Equipment System</h1>
-            <p>Inventory · Inspection · Maintenance Monitoring</p>
-          </div>
+          <h1>NBSC Fire Safety Equipment System</h1>
         </div>
 
         <div className="header-search">
@@ -977,7 +1044,10 @@ function Dashboard({ profile, onLogout }) {
             onChange={(e) => setSearchTerm(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
-                document.getElementById('equipment-inventory-section')?.scrollIntoView({ behavior: 'smooth' })
+                setActiveTab('equipment')
+                setTimeout(() => {
+                  document.getElementById('equipment-inventory-section')?.scrollIntoView({ behavior: 'smooth' })
+                }, 0)
               }
             }}
           />
@@ -998,45 +1068,62 @@ function Dashboard({ profile, onLogout }) {
         </div>
       </header>
 
+      <nav className="tab-strip">
+        <button
+          className={`tab-item ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => setActiveTab('dashboard')}
+        >
+          Dashboard
+        </button>
+        <button
+          className={`tab-item ${activeTab === 'buildings' ? 'active' : ''}`}
+          onClick={() => setActiveTab('buildings')}
+        >
+          Buildings
+        </button>
+      </nav>
+
       <div className="page-wrap">
         <div className="stat-grid">
-          <div className="stat-card">
+          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
             <div className="stat-icon blue">📦</div>
             <div>
               <div className="stat-value">{totalEquipment}</div>
               <div className="stat-label">Total Equipment</div>
             </div>
-          </div>
-          <div className="stat-card">
+          </button>
+          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('functional')}>
             <div className="stat-icon green">✓</div>
             <div>
               <div className="stat-value">{activeCount}</div>
               <div className="stat-label">Functional</div>
             </div>
-          </div>
-          <div className="stat-card">
+          </button>
+          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('__needs_attention__')}>
             <div className="stat-icon red">⚠</div>
             <div>
               <div className="stat-value">{needsActionCount}</div>
               <div className="stat-label">Needs Attention</div>
             </div>
-          </div>
-          <div className="stat-card">
+          </button>
+          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('priority')}>
             <div className="stat-icon amber">🛠</div>
             <div>
               <div className="stat-value">{pendingActionsCount}</div>
-              <div className="stat-label">Pending Actions</div>
+              <div className="stat-label">Priority Actions</div>
             </div>
-          </div>
-          <div className="stat-card">
+          </button>
+          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('dashboard')}>
             <div className="stat-icon amber">⏳</div>
             <div>
               <div className="stat-value">{expiringEquipment.length}</div>
               <div className="stat-label">Expiring / Expired</div>
             </div>
-          </div>
+          </button>
         </div>
 
+        {activeTab === 'priority' && (
+        <div>
         <div className="section-heading">
           <h2>Priority Actions</h2>
           {sortedActions.length > 0 && (
@@ -1131,6 +1218,55 @@ function Dashboard({ profile, onLogout }) {
                 <div className="meta">
                   Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
                 </div>
+
+                {(() => {
+                  const history = inspectionsByEquipment[action.equipment?.id] || []
+                  const isExpanded = expandedActionId === action.id
+                  return (
+                    <>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ marginTop: '8px' }}
+                        onClick={() => setExpandedActionId(isExpanded ? null : action.id)}
+                      >
+                        {isExpanded ? 'Hide history' : `Show history (${history.length})`}
+                      </button>
+                      {isExpanded && (
+                        <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border)' }}>
+                          {history.length === 0 ? (
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+                              No inspection history recorded for this unit yet.
+                            </p>
+                          ) : (
+                            history.slice(0, 3).map((insp) => {
+                              const failed = insp.condition_status === 'defective'
+                              return (
+                                <div
+                                  key={insp.id}
+                                  style={{
+                                    borderLeft: `3px solid ${failed ? 'var(--red)' : 'var(--green)'}`,
+                                    paddingLeft: '10px',
+                                    marginBottom: '8px'
+                                  }}
+                                >
+                                  <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>
+                                    {failed ? '⚠ Defective' : '✓ Functional'}
+                                  </span>
+                                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginLeft: '8px' }}>
+                                    {relativeTime(insp.inspection_date)}
+                                  </span>
+                                  {insp.findings && (
+                                    <p style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>{insp.findings}</p>
+                                  )}
+                                </div>
+                              )
+                            })
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
 
                 {/* Job Order vs Purchase Request — same decision for every equipment type */}
                 {needsRepairPathChoice && (
@@ -1235,14 +1371,18 @@ function Dashboard({ profile, onLogout }) {
                   <div className="action-buttons">
                     <button
                       className="btn btn-primary btn-sm"
-                      onClick={() =>
-                        updateActionStatus(
-                          action.id,
-                          'completed',
-                          action.equipment?.id,
-                          action.equipment?.equipment_type
-                        )
-                      }
+                      onClick={async () => {
+                        const eq = action.equipment
+                        await updateActionStatus(action.id, 'completed', eq?.id, eq?.equipment_type)
+                        if (eq?.equipment_type === 'fire_extinguisher') {
+                          setReplacementPrompt({
+                            oldCode: eq.equipment_code,
+                            equipment_type: eq.equipment_type,
+                            building_id: eq.building_id,
+                            exact_location: eq.exact_location
+                          })
+                        }
+                      }}
                       disabled={actionUpdatingId === action.id}
                     >
                       Mark Completed
@@ -1253,7 +1393,42 @@ function Dashboard({ profile, onLogout }) {
             )
           })
         )}
+        </div>
+        )}
 
+        {activeTab === 'dashboard' && (
+        <div>
+        {sortedActions.length > 0 && (
+          <>
+            <div className="section-heading">
+              <h2>Needs your attention</h2>
+              <span className="count-pill">{sortedActions.length} total</span>
+            </div>
+            {sortedActions.slice(0, 3).map((action) => {
+              const age = daysAgo(action.reported_date)
+              const isOverdue = age !== null && age >= 7
+              return (
+                <div
+                  key={action.id}
+                  className={`action-card ${action.status === 'delayed' || isOverdue ? 'overdue' : 'warning'}`}
+                >
+                  <div className="action-title">
+                    ⚠ {action.equipment?.equipment_code} —{' '}
+                    {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
+                    {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
+                  </div>
+                  <p>{action.description}</p>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                    Priority: <strong style={{ textTransform: 'capitalize' }}>{action.priority}</strong>
+                  </p>
+                </div>
+              )
+            })}
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 24px' }}>
+              Tap the Priority Actions card above to see all {sortedActions.length}.
+            </p>
+          </>
+        )}
         <div className="section-heading">
           <h2>Expiration Alerts</h2>
           {expiringEquipment.length > 0 && (
@@ -1291,7 +1466,11 @@ function Dashboard({ profile, onLogout }) {
             )
           })
         )}
+        </div>
+        )}
 
+        {activeTab === 'buildings' && (
+        <div>
         <div className="section-heading" id="buildings-section">
           <h2>Buildings</h2>
           <button className="btn btn-primary btn-sm" onClick={() => setShowBuildingForm((v) => !v)}>
@@ -1609,7 +1788,11 @@ function Dashboard({ profile, onLogout }) {
             ))}
           </div>
         )}
+        </div>
+        )}
 
+        {activeTab === 'equipment' && (
+        <div>
         <div className="section-heading" id="equipment-inventory-section">
           <h2>Equipment Inventory</h2>
           <div style={{ display: 'flex', gap: '8px' }}>
@@ -2003,6 +2186,8 @@ function Dashboard({ profile, onLogout }) {
             </div>
           ))
         )}
+        </div>
+        )}
       </div>
 
       {qrPrintItems.length > 0 && (
@@ -2012,6 +2197,28 @@ function Dashboard({ profile, onLogout }) {
             {qrPrintItems.map((item) => (
               <QrLabel key={item.id} item={item} />
             ))}
+          </div>
+        </div>
+      )}
+
+      {replacementPrompt && (
+        <div className="modal-overlay">
+          <div className="modal-box">
+            <div className="modal-title">Add replacement equipment?</div>
+            <p className="modal-message">
+              {replacementPrompt.oldCode} has been retired. Fire extinguishers typically
+              expire 2 years from installation — add its replacement now, pre-filled with
+              the same location and a 2-year expiration? You can still adjust the details
+              afterward.
+            </p>
+            <div className="modal-actions" style={{ gap: '8px' }}>
+              <button className="btn btn-secondary" onClick={() => setReplacementPrompt(null)}>
+                Not now
+              </button>
+              <button className="btn btn-primary" onClick={handleAddReplacement}>
+                + Add Replacement
+              </button>
+            </div>
           </div>
         </div>
       )}

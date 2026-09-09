@@ -39,7 +39,7 @@ export const STATUS_LABELS = {
   for_repair: 'For Repair',
   for_replacement: 'For Replacement',
   expired: 'Expired',
-  not_functional: 'Not Functional'
+  no_longer_in_service: 'No Longer in Service'
 }
 
 // Preset findings per equipment type, derived from the inspection flowcharts.
