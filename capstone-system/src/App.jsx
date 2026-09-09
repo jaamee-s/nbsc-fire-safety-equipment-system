@@ -790,7 +790,7 @@ function Dashboard({ profile, onLogout }) {
     setEditSaving(false)
   }
 
-  async function updateActionStatus(actionId, newStatus, equipmentId) {
+  async function updateActionStatus(actionId, newStatus, equipmentId, equipmentType) {
     setActionUpdatingId(actionId)
 
     const payload = { status: newStatus }
@@ -815,11 +815,16 @@ function Dashboard({ profile, onLogout }) {
       if (remainingError) {
         console.error('Error checking remaining actions:', remainingError)
       } else if (remainingActions.length === 0) {
+        // Fire extinguishers are always replaced with a whole new unit —
+        // never repaired in place — so completing their action retires the
+        // old physical unit rather than reverting it to functional. Every
+        // other equipment type gets fixed where it stands, same sticker.
+        const finalStatus = equipmentType === 'fire_extinguisher' ? 'not_functional' : 'functional'
         const { error: revertError } = await supabase
           .from('equipment')
-          .update({ current_status: 'functional' })
+          .update({ current_status: finalStatus })
           .eq('id', equipmentId)
-        if (revertError) console.error('Error reverting equipment status:', revertError)
+        if (revertError) console.error('Error updating equipment status:', revertError)
       }
     }
 
@@ -828,32 +833,10 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(null)
   }
 
-  // Fire extinguisher only: GSO decides Dispose vs Refillable
-  async function setDisposition(actionId, disposition) {
-    setActionUpdatingId(actionId)
-
-    const payload = { disposition }
-    if (disposition === 'dispose') {
-      payload.status = 'for_disposal'
-    }
-    // 'refill' keeps status = 'pending' so the budget-check prompt appears next
-
-    const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
-
-    if (error) {
-      console.error('Error setting disposition:', error)
-      alert('Failed to update: ' + error.message)
-    } else {
-      getMaintenanceActions()
-    }
-
-    setActionUpdatingId(null)
-  }
-
-  // Non-extinguisher equipment only: GSO decides whether their own technician
-  // can handle the repair (Job Order — no purchase) or whether it needs
-  // budget/materials/outside expertise (Purchase Request — goes to the
-  // procurement stage). Mirrors setDisposition() above for fire extinguishers.
+  // GSO decides, for any equipment type including fire extinguishers: can
+  // this be handled with what's already on hand (Job Order — a technician
+  // repairs it, or for fire extinguishers, swapped from existing stock), or
+  // does it need budget/materials/outside procurement (Purchase Request)?
   async function setRepairPath(actionId, repairPath) {
     setActionUpdatingId(actionId)
 
@@ -908,34 +891,6 @@ function Dashboard({ profile, onLogout }) {
       getMaintenanceActions()
     }
 
-    setActionUpdatingId(null)
-  }
-
-  // Fire extinguisher disposal confirmed by Supply Office — equipment retires permanently
-  async function confirmDisposalCompleted(actionId, equipmentId) {
-    setActionUpdatingId(actionId)
-
-    const { error: actionError } = await supabase
-      .from('maintenance_actions')
-      .update({ status: 'completed', completed_date: new Date().toISOString() })
-      .eq('id', actionId)
-
-    if (actionError) {
-      console.error('Error confirming disposal:', actionError)
-      alert('Failed to update: ' + actionError.message)
-      setActionUpdatingId(null)
-      return
-    }
-
-    const { error: equipmentError } = await supabase
-      .from('equipment')
-      .update({ current_status: 'not_functional' })
-      .eq('id', equipmentId)
-
-    if (equipmentError) console.error('Error retiring equipment:', equipmentError)
-
-    getMaintenanceActions()
-    getEquipment()
     setActionUpdatingId(null)
   }
 
@@ -1100,39 +1055,29 @@ function Dashboard({ profile, onLogout }) {
             const isFireExtinguisher = action.equipment?.equipment_type === 'fire_extinguisher'
 
             // Stage 1 — fire extinguisher only: dispose or refill?
-            const needsDispositionChoice =
-              isFireExtinguisher && !action.disposition && action.status === 'pending'
+            // GSO's decision: can this be handled with what's already on
+            // hand (Job Order), or does it need procurement (Purchase
+            // Request)? Applies to every equipment type the same way now —
+            // fire extinguishers are never repaired in place, they're always
+            // swapped for a whole new unit, but that's still either "swap
+            // from existing stock" (Job Order) or "need to order more
+            // stock first" (Purchase Request) — same shape as any repair.
+            const needsRepairPathChoice = !action.repair_path && action.status === 'pending'
 
-            // Stage 1b — every other equipment type: can our own technician
-            // handle this (Job Order), or does it need budget/materials/
-            // outside expertise (Purchase Request)? This is GSO's call based
-            // on the actual damage — not something guessable from action_type.
-            const needsRepairPathChoice =
-              !isFireExtinguisher && !action.repair_path && action.status === 'pending'
-
-            // Does this action actually involve buying something?
-            const needsPurchase =
-              (isFireExtinguisher && action.disposition === 'refill') ||
-              (!isFireExtinguisher && action.repair_path === 'purchase_request')
+            const needsPurchase = action.repair_path === 'purchase_request'
 
             // Stage 2 — budget check, only when a purchase request is involved
             const needsBudgetCheck =
-              !needsDispositionChoice &&
               !needsRepairPathChoice &&
               action.status === 'pending' &&
               action.budget_status === 'not_applicable' &&
               needsPurchase
 
-            // Stage 2b — Job Order path (non-FE) or a plain repair with no
-            // purchase needed: GSO just starts the work directly
+            // Stage 2b — Job Order path: GSO just starts the work directly
             const needsStartWork =
-              !needsDispositionChoice &&
-              !needsRepairPathChoice &&
-              !needsBudgetCheck &&
-              action.status === 'pending'
+              !needsRepairPathChoice && !needsBudgetCheck && action.status === 'pending'
 
             let cardStyle = isOverdue ? 'overdue' : 'warning'
-            if (action.status === 'for_disposal') cardStyle = 'warning'
             if (action.status === 'delayed') cardStyle = 'overdue'
 
             return (
@@ -1142,7 +1087,6 @@ function Dashboard({ profile, onLogout }) {
                   {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
                   {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
                   {action.status === 'delayed' && <span className="overdue-tag">DELAYED</span>}
-                  {action.status === 'for_disposal' && <span className="overdue-tag">FOR DISPOSAL</span>}
                 </div>
                 <p>
                   {action.equipment?.buildings?.building_name ?? 'N/A'} — {action.equipment?.exact_location}
@@ -1153,17 +1097,33 @@ function Dashboard({ profile, onLogout }) {
                   &nbsp;·&nbsp; Status: <strong style={{ textTransform: 'capitalize' }}>{action.status.replace('_', ' ')}</strong>
                 </p>
 
-                {(action.disposition || action.repair_path || action.budget_status !== 'not_applicable') && (
+                {(action.repair_path || action.budget_status !== 'not_applicable') && (
                   <p style={{ color: 'var(--text-muted)' }}>
-                    {action.disposition && (
-                      <>Decision: <strong>{action.disposition === 'dispose' ? 'Dispose' : 'Refillable'}</strong></>
-                    )}
                     {action.repair_path && (
-                      <>Decision: <strong>{action.repair_path === 'job_order' ? 'Job Order' : 'Purchase Request'}</strong></>
+                      <>
+                        Decision:{' '}
+                        <strong>
+                          {action.repair_path === 'job_order'
+                            ? isFireExtinguisher
+                              ? 'Replace from Stock'
+                              : 'Job Order'
+                            : isFireExtinguisher
+                            ? 'Order New Stock'
+                            : 'Purchase Request'}
+                        </strong>
+                      </>
                     )}
-                    {(action.disposition || action.repair_path) && action.budget_status !== 'not_applicable' && ' · '}
+                    {action.repair_path && action.budget_status !== 'not_applicable' && ' · '}
                     {action.budget_status !== 'not_applicable' && (
                       <>Budget: <strong>{action.budget_status === 'available' ? 'Available' : 'Not available'}</strong></>
+                    )}
+                    {isFireExtinguisher && (
+                      <>
+                        {' · '}
+                        <span style={{ fontStyle: 'italic' }}>
+                          this unit retires once complete — the replacement gets its own new entry
+                        </span>
+                      </>
                     )}
                   </p>
                 )}
@@ -1172,36 +1132,13 @@ function Dashboard({ profile, onLogout }) {
                   Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
                 </div>
 
-                {/* Stage 1: Fire extinguisher — Dispose vs Refillable */}
-                {needsDispositionChoice && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      Decision needed: dispose this unit, or is it refillable?
-                    </p>
-                    <div className="action-buttons">
-                      <button
-                        className="btn btn-outline-red btn-sm"
-                        onClick={() => setDisposition(action.id, 'dispose')}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        Dispose (report to Supply Office)
-                      </button>
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => setDisposition(action.id, 'refill')}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        Refillable (create PPMP request)
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Stage 1b: Non-extinguisher equipment — Job Order vs Purchase Request */}
+                {/* Job Order vs Purchase Request — same decision for every equipment type */}
                 {needsRepairPathChoice && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      Decision needed: can this be fixed in-house, or does it need a purchase request?
+                      {isFireExtinguisher
+                        ? 'Decision needed: replace from existing stock, or order new stock first?'
+                        : 'Decision needed: can this be fixed in-house, or does it need a purchase request?'}
                     </p>
                     <div className="action-buttons">
                       <button
@@ -1209,14 +1146,16 @@ function Dashboard({ profile, onLogout }) {
                         onClick={() => setRepairPath(action.id, 'job_order')}
                         disabled={actionUpdatingId === action.id}
                       >
-                        Job Order (technician repairs)
+                        {isFireExtinguisher ? 'Replace from Stock (Job Order)' : 'Job Order (technician repairs)'}
                       </button>
                       <button
                         className="btn btn-outline-red btn-sm"
                         onClick={() => setRepairPath(action.id, 'purchase_request')}
                         disabled={actionUpdatingId === action.id}
                       >
-                        Purchase Request (needs budget/materials)
+                        {isFireExtinguisher
+                          ? 'Order New Stock (Purchase Request)'
+                          : 'Purchase Request (needs budget/materials)'}
                       </button>
                     </div>
                   </div>
@@ -1246,7 +1185,9 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage 2b: Job Order — no purchase involved, start the work directly */}
+                {/* Job Order — no purchase involved, start the work directly.
+                    For fire extinguishers this means "swap it from stock";
+                    for everything else it means "our technician fixes it." */}
                 {needsStartWork && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
@@ -1255,10 +1196,17 @@ function Dashboard({ profile, onLogout }) {
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() => updateActionStatus(action.id, 'in_progress', action.equipment?.id)}
+                        onClick={() =>
+                          updateActionStatus(
+                            action.id,
+                            'in_progress',
+                            action.equipment?.id,
+                            action.equipment?.equipment_type
+                          )
+                        }
                         disabled={actionUpdatingId === action.id}
                       >
-                        Start Job Order
+                        {isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
                       </button>
                     </div>
                   </div>
@@ -1280,28 +1228,21 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage: For disposal — waiting on Supply Office */}
-                {action.status === 'for_disposal' && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
-                      Reported to Supply Office for disposal. Confirm once processed.
-                    </p>
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() => confirmDisposalCompleted(action.id, action.equipment?.id)}
-                      disabled={actionUpdatingId === action.id}
-                    >
-                      Confirm Disposal Completed
-                    </button>
-                  </div>
-                )}
-
-                {/* Stage: In progress (budget approved, or work already started) */}
+                {/* Stage: In progress (budget approved, or work already started).
+                    Completing this: fire extinguishers retire (whole-unit swap),
+                    everything else reverts to Functional (fixed in place). */}
                 {action.status === 'in_progress' && (
                   <div className="action-buttons">
                     <button
                       className="btn btn-primary btn-sm"
-                      onClick={() => updateActionStatus(action.id, 'completed', action.equipment?.id)}
+                      onClick={() =>
+                        updateActionStatus(
+                          action.id,
+                          'completed',
+                          action.equipment?.id,
+                          action.equipment?.equipment_type
+                        )
+                      }
                       disabled={actionUpdatingId === action.id}
                     >
                       Mark Completed
