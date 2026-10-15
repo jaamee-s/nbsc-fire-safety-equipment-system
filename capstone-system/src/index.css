@@ -590,10 +590,8 @@ textarea {
   display: flex;
   justify-content: flex-end;
 }
-/* ============================================================
-   QR LABELS — append this to the END of src/index.css
-   ============================================================ */
 
+/* ===== QR labels ===== */
 .qr-label {
   display: flex;
   align-items: center;
@@ -659,8 +657,11 @@ textarea {
 
 @media print {
   /* Remove the dashboard from the layout entirely, not just from view.
-     `visibility: hidden` would leave its full height behind and emit blank pages. */
+     `visibility: hidden` would leave its full height behind and emit
+     blank pages. .tab-strip sits between the header and page-wrap, so
+     it has to be named explicitly or it prints on every label sheet. */
   .app-header,
+  .tab-strip,
   .page-wrap,
   .modal-overlay {
     display: none !important;
@@ -682,10 +683,8 @@ textarea {
     margin: 12mm;
   }
 }
-/* ============================================================
-   PASSWORD SHOW/HIDE TOGGLE — append to the END of src/index.css
-   ============================================================ */
 
+/* ===== Password show/hide toggle ===== */
 .password-field-wrap {
   position: relative;
   display: flex;
@@ -694,7 +693,7 @@ textarea {
 
 .password-field-wrap input {
   width: 100%;
-  padding-right: 42px; /* room for the eye button so text never overlaps it */
+  padding-right: 42px;
 }
 
 .password-toggle-btn {
@@ -722,6 +721,8 @@ textarea {
   outline: 2px solid var(--blue);
   outline-offset: 1px;
 }
+
+/* ===== Tab navigation ===== */
 .tab-strip {
   display: flex;
   background: var(--card);
@@ -729,7 +730,7 @@ textarea {
   padding: 0 22px;
   gap: 4px;
 }
- 
+
 .tab-item {
   background: transparent;
   border: none;
@@ -740,42 +741,42 @@ textarea {
   color: var(--text-muted);
   cursor: pointer;
 }
- 
+
 .tab-item:hover {
   color: var(--text);
 }
- 
+
 .tab-item.active {
   color: var(--blue);
   border-bottom-color: var(--blue);
 }
- 
+
 .stat-card-clickable {
   cursor: pointer;
   text-align: left;
   font-family: inherit;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
- 
+
 .stat-card-clickable:hover {
   border-color: var(--blue);
   box-shadow: 0 2px 6px rgba(15, 42, 74, 0.08);
 }
- 
+
 .app-header-compact {
   padding: 12px 22px;
 }
- 
+
 .app-header-compact .title-block {
   gap: 10px;
 }
- 
+
 .app-header-compact .badge-icon {
   width: 34px;
   height: 34px;
   font-size: 17px;
 }
- 
+
 .app-header-compact h1 {
   font-size: 1.15rem;
 }

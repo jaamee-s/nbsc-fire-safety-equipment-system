@@ -592,7 +592,25 @@ function Dashboard({ profile, onLogout }) {
     setBulkSubmitting(false)
   }
 
-  async function deleteLocation(id) {
+  // exact_location on equipment is a copied text string, not a foreign key,
+  // so the database can't stop this delete from stranding equipment that
+  // still points at this room. We check and warn before deleting instead.
+  async function deleteLocation(id, floorLabel, locationLabel) {
+    const fullLocation = `${floorLabel} - ${locationLabel}`
+    const affected = equipment.filter((e) => e.exact_location === fullLocation)
+
+    const message =
+      affected.length > 0
+        ? `Delete "${locationLabel}"?\n\n${affected.length} piece${
+            affected.length === 1 ? '' : 's'
+          } of equipment (${affected
+            .map((e) => e.equipment_code)
+            .join(', ')}) still list this location. They will keep showing it, ` +
+          `but it will no longer be selectable when adding new equipment.\n\nDelete anyway?`
+        : `Delete "${locationLabel}"? This cannot be undone.`
+
+    if (!window.confirm(message)) return
+
     const { error } = await supabase.from('building_locations').delete().eq('id', id)
     if (error) {
       console.error('Error deleting location:', error)
@@ -608,6 +626,7 @@ function Dashboard({ profile, onLogout }) {
       .select(`
         id, action_type, description, priority, status, reported_date, due_date,
         disposition, budget_status, repair_path,
+        decided_by, decided_at, completed_by,
         equipment ( id, equipment_code, equipment_type, exact_location, building_id,
           buildings ( building_name )
         )
@@ -806,7 +825,10 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(actionId)
 
     const payload = { status: newStatus }
-    if (newStatus === 'completed') payload.completed_date = new Date().toISOString()
+    if (newStatus === 'completed') {
+      payload.completed_date = new Date().toISOString()
+      payload.completed_by = `${profile.full_name} (${profile.role})`
+    }
 
     const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
 
@@ -893,7 +915,11 @@ function Dashboard({ profile, onLogout }) {
 
     const { error } = await supabase
       .from('maintenance_actions')
-      .update({ repair_path: repairPath })
+      .update({
+        repair_path: repairPath,
+        decided_by: `${profile.full_name} (${profile.role})`,
+        decided_at: new Date().toISOString()
+      })
       .eq('id', actionId)
 
     if (error) {
@@ -1217,6 +1243,18 @@ function Dashboard({ profile, onLogout }) {
 
                 <div className="meta">
                   Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
+                  {action.decided_by && (
+                    <>
+                      <br />
+                      Decided by <strong>{action.decided_by}</strong> · {relativeTime(action.decided_at)}
+                    </>
+                  )}
+                  {action.completed_by && (
+                    <>
+                      <br />
+                      Completed by <strong>{action.completed_by}</strong>
+                    </>
+                  )}
                 </div>
 
                 {(() => {
@@ -1617,7 +1655,7 @@ function Dashboard({ profile, onLogout }) {
                                           >
                                             {l.location_label}
                                             <button
-                                              onClick={() => deleteLocation(l.id)}
+                                              onClick={() => deleteLocation(l.id, l.floor_label, l.location_label)}
                                               style={{
                                                 background: 'none',
                                                 border: 'none',
@@ -2006,9 +2044,49 @@ function Dashboard({ profile, onLogout }) {
                       ))}
                     </select>
                   </div>
+                  {/* Dropdown-only, matching Add Equipment — free text here
+                      would reintroduce exactly the typos the Add form's
+                      strict rule exists to prevent. The current value stays
+                      selectable so editing other fields never forces a
+                      location change, and legacy values aren't lost. */}
                   <div>
                     <label className="field-label">Exact Location</label>
-                    <input name="exact_location" value={editForm.exact_location} onChange={handleEditChange} />
+                    {(() => {
+                      const locs = buildingLocations.filter(
+                        (loc) => loc.building_id === editForm.building_id
+                      )
+                      const options = locs.map((loc) => `${loc.floor_label} - ${loc.location_label}`)
+                      const currentIsListed = options.includes(editForm.exact_location)
+
+                      if (locs.length === 0) {
+                        return (
+                          <p style={{ fontSize: '0.85rem', color: 'var(--amber)', margin: 0 }}>
+                            This building has no floors/rooms set up. Current location:{' '}
+                            <strong>{editForm.exact_location || '—'}</strong>
+                          </p>
+                        )
+                      }
+
+                      return (
+                        <select
+                          name="exact_location"
+                          value={editForm.exact_location}
+                          onChange={handleEditChange}
+                        >
+                          {!currentIsListed && editForm.exact_location && (
+                            <option value={editForm.exact_location}>
+                              {editForm.exact_location} (current)
+                            </option>
+                          )}
+                          {!editForm.exact_location && <option value="">-- Select Location --</option>}
+                          {options.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
+                      )
+                    })()}
                   </div>
                   <div>
                     <label className="field-label">QR Code Value (locked)</label>
