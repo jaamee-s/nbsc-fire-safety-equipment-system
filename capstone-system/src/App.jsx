@@ -910,7 +910,20 @@ function Dashboard({ profile, onLogout }) {
   // this be handled with what's already on hand (Job Order — a technician
   // repairs it, or for fire extinguishers, swapped from existing stock), or
   // does it need budget/materials/outside procurement (Purchase Request)?
-  async function setRepairPath(actionId, repairPath) {
+  // These decisions route an action down a path that isn't reversible from
+  // the UI, so each one states plainly what it commits to before writing.
+  async function setRepairPath(actionId, repairPath, equipmentCode, isFireExtinguisher) {
+    const message =
+      repairPath === 'job_order'
+        ? isFireExtinguisher
+          ? `Replace ${equipmentCode} from existing stock?\n\nThis records a Job Order. When you later mark it completed, ${equipmentCode} is permanently retired and you'll be prompted to add its replacement.`
+          : `Record a Job Order for ${equipmentCode}?\n\nThis means your own technician will repair it — no purchase request needed.`
+        : isFireExtinguisher
+        ? `Order new stock for ${equipmentCode}?\n\nThis creates a Purchase Request and sends it to procurement. ${equipmentCode} stays out of service until the replacement arrives.`
+        : `Create a Purchase Request for ${equipmentCode}?\n\nThis means the repair needs budget, materials, or outside expertise, and will go to procurement.`
+
+    if (!window.confirm(message)) return
+
     setActionUpdatingId(actionId)
 
     const { error } = await supabase
@@ -1317,14 +1330,28 @@ function Dashboard({ profile, onLogout }) {
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() => setRepairPath(action.id, 'job_order')}
+                        onClick={() =>
+                          setRepairPath(
+                            action.id,
+                            'job_order',
+                            action.equipment?.equipment_code,
+                            isFireExtinguisher
+                          )
+                        }
                         disabled={actionUpdatingId === action.id}
                       >
                         {isFireExtinguisher ? 'Replace from Stock (Job Order)' : 'Job Order (technician repairs)'}
                       </button>
                       <button
                         className="btn btn-outline-red btn-sm"
-                        onClick={() => setRepairPath(action.id, 'purchase_request')}
+                        onClick={() =>
+                          setRepairPath(
+                            action.id,
+                            'purchase_request',
+                            action.equipment?.equipment_code,
+                            isFireExtinguisher
+                          )
+                        }
                         disabled={actionUpdatingId === action.id}
                       >
                         {isFireExtinguisher
@@ -1370,14 +1397,18 @@ function Dashboard({ profile, onLogout }) {
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() =>
+                        onClick={() => {
+                          const msg = isFireExtinguisher
+                            ? `Start the replacement for ${action.equipment?.equipment_code}?\n\nThis marks the work as in progress.`
+                            : `Start the job order for ${action.equipment?.equipment_code}?\n\nThis marks the repair as in progress.`
+                          if (!window.confirm(msg)) return
                           updateActionStatus(
                             action.id,
                             'in_progress',
                             action.equipment?.id,
                             action.equipment?.equipment_type
                           )
-                        }
+                        }}
                         disabled={actionUpdatingId === action.id}
                       >
                         {isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
@@ -1411,8 +1442,14 @@ function Dashboard({ profile, onLogout }) {
                       className="btn btn-primary btn-sm"
                       onClick={async () => {
                         const eq = action.equipment
+                        const isFE = eq?.equipment_type === 'fire_extinguisher'
+                        const msg = isFE
+                          ? `Mark this completed?\n\n${eq?.equipment_code} will be permanently retired as No Longer in Service, and you'll be asked whether to add its replacement.`
+                          : `Mark this completed?\n\n${eq?.equipment_code} will be marked Functional again, provided no other actions are still open on it.`
+                        if (!window.confirm(msg)) return
+
                         await updateActionStatus(action.id, 'completed', eq?.id, eq?.equipment_type)
-                        if (eq?.equipment_type === 'fire_extinguisher') {
+                        if (isFE) {
                           setReplacementPrompt({
                             oldCode: eq.equipment_code,
                             equipment_type: eq.equipment_type,
