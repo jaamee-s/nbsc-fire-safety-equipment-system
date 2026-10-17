@@ -351,6 +351,30 @@ function Dashboard({ profile, onLogout }) {
   const [bulkError, setBulkError] = useState(null)
   const [bulkFloorMode, setBulkFloorMode] = useState('select')
 
+  // Stock tracking state
+  const [stock, setStock] = useState([])
+  const [stockEdits, setStockEdits] = useState({})
+
+  // Technician management state
+  const [technicians, setTechnicians] = useState([])
+  const [showTechnicianForm, setShowTechnicianForm] = useState(false)
+  const [technicianForm, setTechnicianForm] = useState({ full_name: '', contact_info: '' })
+  const [technicianSubmitting, setTechnicianSubmitting] = useState(false)
+  const [technicianError, setTechnicianError] = useState(null)
+  const [editingTechnicianId, setEditingTechnicianId] = useState(null)
+  const [editTechnicianForm, setEditTechnicianForm] = useState({})
+  const [editTechnicianSaving, setEditTechnicianSaving] = useState(false)
+  const [editTechnicianError, setEditTechnicianError] = useState(null)
+
+  // Outcome modal state (Resolved/Unresolved choice when closing work)
+  const [outcomeModal, setOutcomeModal] = useState(null)
+  const [outcomeChoice, setOutcomeChoice] = useState('resolved')
+  const [outcomeReason, setOutcomeReason] = useState('')
+
+  // Technician assignment modal state (when starting a job order)
+  const [techAssignModal, setTechAssignModal] = useState(null)
+  const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
+
   // Add Equipment form: cascading location picker state
   const [formFloor, setFormFloor] = useState('')
   const [formLocationChoice, setFormLocationChoice] = useState('')
