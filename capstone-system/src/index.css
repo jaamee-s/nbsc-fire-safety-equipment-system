@@ -1093,3 +1093,50 @@ textarea {
     transform: translateY(0);
   }
 }
+
+/* ===== Priority Actions Live Filter Chips ===== */
+.filter-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 18px 0;
+}
+
+.filter-chip {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-chip:hover {
+  background: var(--gray-bg);
+  color: var(--text);
+  border-color: #cbd5e1;
+}
+
+.filter-chip.active {
+  background: var(--navy);
+  color: #fff;
+  border-color: var(--navy);
+}
+
+.filter-chip .chip-count {
+  font-size: 0.73rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.filter-chip.active .chip-count {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+}

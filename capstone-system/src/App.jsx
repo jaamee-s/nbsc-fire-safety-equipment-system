@@ -381,6 +381,9 @@ function Dashboard({ profile, onLogout }) {
   const [formFloor, setFormFloor] = useState('')
   const [formLocationChoice, setFormLocationChoice] = useState('')
 
+  // Priority Actions filter ('all', 'pending', 'in_progress', 'procurement', 'unresolved')
+  const [priorityFilter, setPriorityFilter] = useState('all')
+
   // Back to Top button state and listener
   const [showBackToTop, setShowBackToTop] = useState(false)
 
@@ -1377,10 +1380,27 @@ function Dashboard({ profile, onLogout }) {
   // This is the pattern that justifies replacement over repeated repairs.
   const REPEAT_FAILURE_THRESHOLD = 2
 
-  const totalEquipment = equipment.length
+  // Active deployed equipment (excluding decommissioned/retired units)
+  const totalEquipment = equipment.filter((e) => e.current_status !== 'no_longer_in_service').length
   const activeCount = equipment.filter((e) => e.current_status === 'functional').length
-  const needsActionCount = equipment.filter((e) => e.current_status !== 'functional').length
+  const needsActionCount = equipment.filter(
+    (e) => e.current_status !== 'functional' && e.current_status !== 'no_longer_in_service'
+  ).length
   const pendingActionsCount = sortedActions.length
+
+  // Priority Actions counts by stage
+  const pendingCount = sortedActions.filter((a) => a.status === 'pending' && a.repair_path !== 'purchase_request').length
+  const inProgressCount = sortedActions.filter((a) => a.status === 'in_progress').length
+  const procurementCount = sortedActions.filter((a) => a.repair_path === 'purchase_request' && a.status === 'pending').length
+  const unresolvedCount = sortedActions.filter((a) => a.status === 'unresolved').length
+
+  const displayedActions = sortedActions.filter((a) => {
+    if (priorityFilter === 'pending') return a.status === 'pending' && a.repair_path !== 'purchase_request'
+    if (priorityFilter === 'in_progress') return a.status === 'in_progress'
+    if (priorityFilter === 'procurement') return a.repair_path === 'purchase_request' && a.status === 'pending'
+    if (priorityFilter === 'unresolved') return a.status === 'unresolved'
+    return true
+  })
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -1411,7 +1431,7 @@ function Dashboard({ profile, onLogout }) {
     const matchesStatus =
       !filterStatus ||
       (filterStatus === '__needs_attention__'
-        ? item.current_status !== 'functional'
+        ? item.current_status !== 'functional' && item.current_status !== 'no_longer_in_service'
         : item.current_status === filterStatus)
     const matchesBuilding = !filterBuilding || item.building_id === filterBuilding
 
@@ -1492,6 +1512,20 @@ function Dashboard({ profile, onLogout }) {
             >
               <span className="sidebar-icon">📊</span>
               <span className="sidebar-text">Dashboard</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
+              onClick={() => {
+                setFilterStatus('')
+                setFilterType('')
+                setFilterBuilding('')
+                setSearchTerm('')
+                setActiveTab('equipment')
+              }}
+              title="Equipment"
+            >
+              <span className="sidebar-icon">🧯</span>
+              <span className="sidebar-text">Equipment</span>
             </button>
             <button
               className={`sidebar-item ${activeTab === 'buildings' ? 'active' : ''}`}
@@ -1584,7 +1618,16 @@ function Dashboard({ profile, onLogout }) {
                   <div className="stat-label">Needs Attention</div>
                 </div>
               </button>
-              <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('priority')}>
+              <button
+                className="stat-card stat-card-clickable"
+                onClick={() => {
+                  setActiveTab('dashboard')
+                  setPriorityFilter('all')
+                  setTimeout(() => {
+                    document.getElementById('priority-actions-section')?.scrollIntoView({ behavior: 'smooth' })
+                  }, 50)
+                }}
+              >
                 <div className="stat-icon amber">🛠</div>
                 <div>
                   <div className="stat-value">{pendingActionsCount}</div>
@@ -1593,21 +1636,57 @@ function Dashboard({ profile, onLogout }) {
               </button>
             </div>
 
-        {activeTab === 'priority' && (
+        {(activeTab === 'dashboard' || activeTab === 'priority') && (
         <div>
-        <div className="section-heading">
+        <div id="priority-actions-section" className="section-heading" style={{ scrollMarginTop: '80px' }}>
           <h2>Priority Actions</h2>
           {sortedActions.length > 0 && (
-            <span className="count-pill">{sortedActions.length} pending</span>
+            <span className="count-pill">{sortedActions.length} active</span>
           )}
         </div>
 
-        {sortedActions.length === 0 ? (
+        {/* Live stage filter chips */}
+        <div className="filter-chip-group">
+          <button
+            className={`filter-chip ${priorityFilter === 'all' ? 'active' : ''}`}
+            onClick={() => setPriorityFilter('all')}
+          >
+            All <span className="chip-count">{sortedActions.length}</span>
+          </button>
+          <button
+            className={`filter-chip ${priorityFilter === 'pending' ? 'active' : ''}`}
+            onClick={() => setPriorityFilter('pending')}
+          >
+            ⏳ Pending Decision <span className="chip-count">{pendingCount}</span>
+          </button>
+          <button
+            className={`filter-chip ${priorityFilter === 'in_progress' ? 'active' : ''}`}
+            onClick={() => setPriorityFilter('in_progress')}
+          >
+            🔧 In Progress <span className="chip-count">{inProgressCount}</span>
+          </button>
+          <button
+            className={`filter-chip ${priorityFilter === 'procurement' ? 'active' : ''}`}
+            onClick={() => setPriorityFilter('procurement')}
+          >
+            📦 Procurement <span className="chip-count">{procurementCount}</span>
+          </button>
+          <button
+            className={`filter-chip ${priorityFilter === 'unresolved' ? 'active' : ''}`}
+            onClick={() => setPriorityFilter('unresolved')}
+          >
+            ⚠️ Unresolved <span className="chip-count">{unresolvedCount}</span>
+          </button>
+        </div>
+
+        {displayedActions.length === 0 ? (
           <div className="all-clear-banner">
-            ✓ No pending actions. All equipment accounted for.
+            {sortedActions.length === 0
+              ? '✓ No pending actions. All equipment accounted for.'
+              : `✓ No actions in "${priorityFilter.replace('_', ' ')}" stage.`}
           </div>
         ) : (
-          sortedActions.map((action) => {
+          displayedActions.map((action) => {
             const age = daysAgo(action.reported_date)
             const isOverdue = age !== null && age >= 7
             const isFireExtinguisher = action.equipment?.equipment_type === 'fire_extinguisher'
@@ -1821,7 +1900,7 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Purchase workflow: showing a placeholder status until procurement is ready */}
+                {/* Purchase workflow: procurement with arrival & reassessment actions */}
                 {needsBudgetCheck && (
                   <div
                     style={{
@@ -1829,15 +1908,38 @@ function Dashboard({ profile, onLogout }) {
                       background: 'var(--amber-bg)',
                       border: '1px solid var(--amber-border)',
                       borderRadius: '8px',
-                      padding: '10px 14px'
+                      padding: '12px 14px'
                     }}
                   >
                     <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--amber)', margin: 0 }}>
                       Pending for procurement
                     </p>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
-                      Awaiting confirmation of Supply Office's processing timeline.
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 10px 0' }}>
+                      Awaiting Supply Office delivery of materials or replacement units.
                     </p>
+                    <div className="action-buttons">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => {
+                          setSelectedTechnicianId('')
+                          setTechAssignModal({
+                            actionId: action.id,
+                            isFireExtinguisher,
+                            equipmentCode: action.equipment?.equipment_code
+                          })
+                        }}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        📦 Stock / Materials Arrived — Start Work
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => reassessAction(action.id)}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        🔄 Cancel / Reassess Route
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1882,7 +1984,7 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage: In progress — close with outcome tracking */}
+                {/* Stage: In progress — close with outcome tracking or reassign technician */}
                 {action.status === 'in_progress' && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', color: 'var(--blue)', fontWeight: 600, margin: '0 0 8px 0' }}>
@@ -1899,6 +2001,21 @@ function Dashboard({ profile, onLogout }) {
                         disabled={actionUpdatingId === action.id}
                       >
                         Record Outcome / Close Work
+                      </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => {
+                          setSelectedTechnicianId(action.assigned_technician_id || '')
+                          setTechAssignModal({
+                            actionId: action.id,
+                            isFireExtinguisher,
+                            equipmentCode: action.equipment?.equipment_code,
+                            isReassign: true
+                          })
+                        }}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        Reassign Technician
                       </button>
                     </div>
                   </div>
@@ -1929,43 +2046,8 @@ function Dashboard({ profile, onLogout }) {
             )
           })
         )}
-        </div>
-        )}
 
-        {activeTab === 'dashboard' && (
-        <div>
-        {sortedActions.length > 0 && (
-          <>
-            <div className="section-heading">
-              <h2>Needs your attention</h2>
-              <span className="count-pill">{sortedActions.length} total</span>
-            </div>
-            {sortedActions.slice(0, 3).map((action) => {
-              const age = daysAgo(action.reported_date)
-              const isOverdue = age !== null && age >= 7
-              return (
-                <div
-                  key={action.id}
-                  className={`action-card ${action.status === 'delayed' || isOverdue ? 'overdue' : 'warning'}`}
-                >
-                  <div className="action-title">
-                    ⚠ {action.equipment?.equipment_code} —{' '}
-                    {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
-                    {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
-                  </div>
-                  <p>{action.description}</p>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                    Priority: <strong style={{ textTransform: 'capitalize' }}>{action.priority}</strong>
-                  </p>
-                </div>
-              )
-            })}
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 24px' }}>
-              Tap the Priority Actions card above to see all {sortedActions.length}.
-            </p>
-          </>
-        )}
-        <div className="section-heading">
+        <div className="section-heading" id="expiration-alerts-section" style={{ scrollMarginTop: '80px', marginTop: '36px' }}>
           <h2>Expiration Alerts</h2>
           {expiringEquipment.length > 0 && (
             <span className="count-pill">{expiringEquipment.length} flagged</span>
@@ -3105,7 +3187,7 @@ function Dashboard({ profile, onLogout }) {
         <div className="modal-overlay">
           <div className="modal-box" style={{ maxWidth: '420px' }}>
             <div className="modal-title">
-              {techAssignModal.isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
+              {techAssignModal.isReassign ? 'Reassign Technician' : techAssignModal.isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
             </div>
             <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
               Assign an in-house technician to work on <strong>{techAssignModal.equipmentCode}</strong>:
@@ -3136,7 +3218,7 @@ function Dashboard({ profile, onLogout }) {
                 Cancel
               </button>
               <button className="btn btn-primary" onClick={handleConfirmStartWork}>
-                Start Work
+                {techAssignModal.isReassign ? 'Save Assignment' : 'Start Work'}
               </button>
             </div>
           </div>
