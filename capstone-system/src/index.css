@@ -661,6 +661,8 @@ textarea {
      blank pages. .tab-strip sits between the header and page-wrap, so
      it has to be named explicitly or it prints on every label sheet. */
   .app-header,
+  .app-layout,
+  .app-sidebar,
   .tab-strip,
   .page-wrap,
   .modal-overlay {
@@ -779,4 +781,130 @@ textarea {
 
 .app-header-compact h1 {
   font-size: 1.15rem;
+}
+
+/* ===== App Layout with Sidebar ===== */
+.app-layout {
+  display: flex;
+  min-height: calc(100vh - 65px);
+}
+
+.app-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--card);
+  border-right: 1px solid var(--border);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 14px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sidebar-item:hover {
+  background: var(--gray-bg);
+  color: var(--text);
+}
+
+.sidebar-item.active {
+  background: var(--blue-light);
+  color: var(--blue);
+  font-weight: 700;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar-stat-card {
+  width: 100%;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(15, 42, 74, 0.04);
+  transition: all 0.15s ease;
+}
+
+.sidebar-stat-card:hover {
+  border-color: var(--amber);
+  box-shadow: 0 2px 6px rgba(180, 83, 9, 0.1);
+}
+
+.sidebar-expiring-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--gray-bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.sidebar-expiring-mini-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+}
+
+.mini-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.mini-tag.alert {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.mini-tag.warn {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  .app-layout {
+    flex-direction: column;
+  }
+  .app-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
 }

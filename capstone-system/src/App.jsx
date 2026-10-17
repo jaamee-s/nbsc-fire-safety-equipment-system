@@ -354,6 +354,8 @@ function Dashboard({ profile, onLogout }) {
   // Stock tracking state
   const [stock, setStock] = useState([])
   const [stockEdits, setStockEdits] = useState({})
+  const [stockSaving, setStockSaving] = useState(false)
+  const [stockMessage, setStockMessage] = useState(null)
 
   // Technician management state
   const [technicians, setTechnicians] = useState([])
@@ -385,6 +387,8 @@ function Dashboard({ profile, onLogout }) {
     getMaintenanceActions()
     getBuildingLocations()
     getInspections()
+    getStock()
+    getTechnicians()
   }, [])
 
   async function getEquipment() {
@@ -651,15 +655,46 @@ function Dashboard({ profile, onLogout }) {
         id, action_type, description, priority, status, reported_date, due_date,
         disposition, budget_status, repair_path,
         decided_by, decided_at, completed_by,
+        outcome, outcome_reason, outcome_by, outcome_at, assigned_technician_id,
         equipment ( id, equipment_code, equipment_type, exact_location, building_id,
           buildings ( building_name )
         )
       `)
-      .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
+      .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
       .order('reported_date', { ascending: true })
 
     if (error) console.error('Error fetching maintenance actions:', error)
-    else setMaintenanceActions(data)
+    else setMaintenanceActions(data || [])
+  }
+
+  async function getStock() {
+    const { data, error } = await supabase
+      .from('equipment_stock')
+      .select('equipment_type, quantity_available, updated_at, updated_by')
+
+    if (error) {
+      console.error('Error fetching stock:', error)
+    } else {
+      setStock(data || [])
+      const edits = {}
+      ;(data || []).forEach((s) => {
+        edits[s.equipment_type] = s.quantity_available
+      })
+      setStockEdits(edits)
+    }
+  }
+
+  async function getTechnicians() {
+    const { data, error } = await supabase
+      .from('technicians')
+      .select('id, full_name, contact_info, is_available')
+      .order('full_name', { ascending: true })
+
+    if (error) {
+      console.error('Error fetching technicians:', error)
+    } else {
+      setTechnicians(data || [])
+    }
   }
 
   async function getInspections() {
@@ -852,6 +887,9 @@ function Dashboard({ profile, onLogout }) {
     if (newStatus === 'completed') {
       payload.completed_date = new Date().toISOString()
       payload.completed_by = `${profile.full_name} (${profile.role})`
+      payload.outcome = 'resolved'
+      payload.outcome_by = `${profile.full_name} (${profile.role})`
+      payload.outcome_at = new Date().toISOString()
     }
 
     const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
@@ -868,15 +906,11 @@ function Dashboard({ profile, onLogout }) {
         .from('maintenance_actions')
         .select('id')
         .eq('equipment_id', equipmentId)
-        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
+        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
 
       if (remainingError) {
         console.error('Error checking remaining actions:', remainingError)
       } else if (remainingActions.length === 0) {
-        // Fire extinguishers are always replaced with a whole new unit —
-        // never repaired in place — so completing their action retires the
-        // old physical unit rather than reverting it to functional. Every
-        // other equipment type gets fixed where it stands, same sticker.
         const finalStatus = equipmentType === 'fire_extinguisher' ? 'no_longer_in_service' : 'functional'
         const { error: revertError } = await supabase
           .from('equipment')
@@ -884,11 +918,283 @@ function Dashboard({ profile, onLogout }) {
           .eq('id', equipmentId)
         if (revertError) console.error('Error updating equipment status:', revertError)
       }
+
+      // Auto-decrement stock on successful fire extinguisher replacement
+      if (equipmentType === 'fire_extinguisher') {
+        const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
+        if (currentStock && currentStock.quantity_available > 0) {
+          const newQty = Math.max(0, currentStock.quantity_available - 1)
+          await supabase
+            .from('equipment_stock')
+            .update({
+              quantity_available: newQty,
+              updated_at: new Date().toISOString(),
+              updated_by: `${profile.full_name} (${profile.role})`
+            })
+            .eq('equipment_type', 'fire_extinguisher')
+          getStock()
+        }
+      }
     }
 
     getMaintenanceActions()
     getEquipment()
     setActionUpdatingId(null)
+  }
+
+  // Work outcome handler: either Resolved (success) or Unresolved (failed / cannot complete)
+  async function handleRecordOutcome(action, choice, reason) {
+    if (!action) return
+    const actionId = action.id
+    const eq = action.equipment
+    const isFE = eq?.equipment_type === 'fire_extinguisher'
+
+    setActionUpdatingId(actionId)
+
+    if (choice === 'resolved') {
+      const payload = {
+        status: 'completed',
+        completed_date: new Date().toISOString(),
+        completed_by: `${profile.full_name} (${profile.role})`,
+        outcome: 'resolved',
+        outcome_reason: reason.trim() || null,
+        outcome_by: `${profile.full_name} (${profile.role})`,
+        outcome_at: new Date().toISOString()
+      }
+
+      const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
+      if (error) {
+        alert('Failed to complete action: ' + error.message)
+        setActionUpdatingId(null)
+        return
+      }
+
+      if (eq?.id) {
+        const { data: remainingActions } = await supabase
+          .from('maintenance_actions')
+          .select('id')
+          .eq('equipment_id', eq.id)
+          .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
+
+        if (!remainingActions || remainingActions.length === 0) {
+          const finalStatus = isFE ? 'no_longer_in_service' : 'functional'
+          await supabase.from('equipment').update({ current_status: finalStatus }).eq('id', eq.id)
+        }
+
+        if (isFE) {
+          // Decrement stock
+          const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
+          if (currentStock && currentStock.quantity_available > 0) {
+            await supabase
+              .from('equipment_stock')
+              .update({
+                quantity_available: Math.max(0, currentStock.quantity_available - 1),
+                updated_at: new Date().toISOString(),
+                updated_by: `${profile.full_name} (${profile.role})`
+              })
+              .eq('equipment_type', 'fire_extinguisher')
+            getStock()
+          }
+
+          setReplacementPrompt({
+            oldCode: eq.equipment_code,
+            equipment_type: eq.equipment_type,
+            building_id: eq.building_id,
+            exact_location: eq.exact_location
+          })
+        }
+      }
+    } else {
+      // UNRESOLVED: equipment stays defective, problem stays visible in Priority Actions
+      const payload = {
+        status: 'unresolved',
+        outcome: 'unresolved',
+        outcome_reason: reason.trim(),
+        outcome_by: `${profile.full_name} (${profile.role})`,
+        outcome_at: new Date().toISOString()
+      }
+
+      const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
+      if (error) {
+        alert('Failed to record unresolved outcome: ' + error.message)
+        setActionUpdatingId(null)
+        return
+      }
+    }
+
+    setOutcomeModal(null)
+    setOutcomeReason('')
+    setOutcomeChoice('resolved')
+    getMaintenanceActions()
+    getEquipment()
+    setActionUpdatingId(null)
+  }
+
+  // Reassess an unresolved action: resets status to pending and clears repair_path
+  async function reassessAction(actionId) {
+    if (!window.confirm('Reassess this action?\n\nThis will reset its decision path so GSO can choose a new route (such as Purchase Request or assigning a different technician).')) return
+
+    setActionUpdatingId(actionId)
+    const { error } = await supabase
+      .from('maintenance_actions')
+      .update({
+        status: 'pending',
+        repair_path: null,
+        budget_status: 'not_applicable'
+      })
+      .eq('id', actionId)
+
+    if (error) {
+      alert('Failed to reassess action: ' + error.message)
+    } else {
+      getMaintenanceActions()
+    }
+    setActionUpdatingId(null)
+  }
+
+  // Start Job Order / Replacement with technician assignment
+  async function handleConfirmStartWork() {
+    if (!techAssignModal) return
+    const { actionId, isFireExtinguisher } = techAssignModal
+
+    setActionUpdatingId(actionId)
+    const payload = {
+      status: 'in_progress',
+      assigned_technician_id: selectedTechnicianId || null
+    }
+
+    const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
+    if (error) {
+      alert('Failed to start work: ' + error.message)
+    } else {
+      getMaintenanceActions()
+    }
+
+    setTechAssignModal(null)
+    setSelectedTechnicianId('')
+    setActionUpdatingId(null)
+  }
+
+  // Stock management handlers
+  async function handleSaveStock(type) {
+    const qty = parseInt(stockEdits[type], 10)
+    if (isNaN(qty) || qty < 0) {
+      alert('Stock quantity must be a non-negative number.')
+      return
+    }
+
+    setStockSaving(true)
+    const { error } = await supabase
+      .from('equipment_stock')
+      .upsert({
+        equipment_type: type,
+        quantity_available: qty,
+        updated_at: new Date().toISOString(),
+        updated_by: `${profile.full_name} (${profile.role})`
+      })
+
+    if (error) {
+      alert('Failed to update stock: ' + error.message)
+    } else {
+      setStockMessage(`Stock for ${TYPE_LABELS[type]} updated.`)
+      setTimeout(() => setStockMessage(null), 3000)
+      getStock()
+    }
+    setStockSaving(false)
+  }
+
+  // Technician management handlers
+  async function handleTechnicianSubmit(e) {
+    e.preventDefault()
+    setTechnicianError(null)
+
+    if (!technicianForm.full_name.trim()) {
+      setTechnicianError('Technician name is required.')
+      return
+    }
+
+    setTechnicianSubmitting(true)
+    const { error } = await supabase.from('technicians').insert([
+      {
+        full_name: technicianForm.full_name.trim(),
+        contact_info: technicianForm.contact_info.trim() || null,
+        is_available: true
+      }
+    ])
+
+    if (error) {
+      setTechnicianError(error.message)
+    } else {
+      setTechnicianForm({ full_name: '', contact_info: '' })
+      setShowTechnicianForm(false)
+      getTechnicians()
+    }
+    setTechnicianSubmitting(false)
+  }
+
+  async function toggleTechnicianAvailability(id, currentVal) {
+    const { error } = await supabase
+      .from('technicians')
+      .update({ is_available: !currentVal })
+      .eq('id', id)
+
+    if (error) {
+      alert('Failed to update availability: ' + error.message)
+    } else {
+      getTechnicians()
+    }
+  }
+
+  function startEditTechnician(t) {
+    setEditingTechnicianId(t.id)
+    setEditTechnicianError(null)
+    setEditTechnicianForm({
+      full_name: t.full_name || '',
+      contact_info: t.contact_info || '',
+      is_available: t.is_available
+    })
+  }
+
+  function cancelEditTechnician() {
+    setEditingTechnicianId(null)
+    setEditTechnicianForm({})
+    setEditTechnicianError(null)
+  }
+
+  async function saveEditTechnician(id) {
+    if (!editTechnicianForm.full_name.trim()) {
+      setEditTechnicianError('Technician name is required.')
+      return
+    }
+
+    setEditTechnicianSaving(true)
+    const { error } = await supabase
+      .from('technicians')
+      .update({
+        full_name: editTechnicianForm.full_name.trim(),
+        contact_info: editTechnicianForm.contact_info.trim() || null,
+        is_available: editTechnicianForm.is_available
+      })
+      .eq('id', id)
+
+    if (error) {
+      setEditTechnicianError(error.message)
+    } else {
+      setEditingTechnicianId(null)
+      getTechnicians()
+    }
+    setEditTechnicianSaving(false)
+  }
+
+  async function deleteTechnician(id, name) {
+    if (!window.confirm(`Delete technician "${name}"? Any past actions assigned to this technician will retain their record.`)) return
+
+    const { error } = await supabase.from('technicians').delete().eq('id', id)
+    if (error) {
+      alert('Failed to delete technician: ' + error.message)
+    } else {
+      getTechnicians()
+    }
   }
 
   // Called when GSO confirms the suggested replacement. Pre-fills the type
@@ -1131,59 +1437,116 @@ function Dashboard({ profile, onLogout }) {
         </div>
       </header>
 
-      <nav className="tab-strip">
-        <button
-          className={`tab-item ${activeTab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setActiveTab('dashboard')}
-        >
-          Dashboard
-        </button>
-        <button
-          className={`tab-item ${activeTab === 'buildings' ? 'active' : ''}`}
-          onClick={() => setActiveTab('buildings')}
-        >
-          Buildings
-        </button>
-      </nav>
+      <div className="app-layout">
+        <aside className="app-sidebar">
+          <nav className="sidebar-nav">
+            <button
+              className={`sidebar-item ${activeTab === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setActiveTab('dashboard')}
+              title="Dashboard"
+            >
+              <span className="sidebar-icon">📊</span>
+              <span className="sidebar-text">Dashboard</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'buildings' ? 'active' : ''}`}
+              onClick={() => setActiveTab('buildings')}
+              title="Buildings"
+            >
+              <span className="sidebar-icon">🏢</span>
+              <span className="sidebar-text">Buildings</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'stock' ? 'active' : ''}`}
+              onClick={() => setActiveTab('stock')}
+              title="Stock"
+            >
+              <span className="sidebar-icon">📦</span>
+              <span className="sidebar-text">Stock</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'technicians' ? 'active' : ''}`}
+              onClick={() => setActiveTab('technicians')}
+              title="Technicians"
+            >
+              <span className="sidebar-icon">🔧</span>
+              <span className="sidebar-text">Technicians</span>
+            </button>
+          </nav>
 
-      <div className="page-wrap">
-        <div className="stat-grid">
-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
-            <div className="stat-icon blue">📦</div>
-            <div>
-              <div className="stat-value">{totalEquipment}</div>
-              <div className="stat-label">Total Equipment</div>
+          {/* Expiring card placed in the sidebar together */}
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">
+              Alerts
             </div>
-          </button>
-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('functional')}>
-            <div className="stat-icon green">✓</div>
-            <div>
-              <div className="stat-value">{activeCount}</div>
-              <div className="stat-label">Functional</div>
+            <button
+              className="sidebar-stat-card"
+              onClick={() => {
+                setActiveTab('dashboard')
+                setTimeout(() => {
+                  document.getElementById('expiration-alerts-section')?.scrollIntoView({ behavior: 'smooth' })
+                }, 0)
+              }}
+              title="Expiring / Expired Equipment"
+            >
+              <div className="stat-icon amber sidebar-alert-icon">
+                ⏳
+                {expiringEquipment.length > 0 && (
+                  <span className="sidebar-badge-dot">{expiringEquipment.length}</span>
+                )}
+              </div>
+              <div className="sidebar-alert-details">
+                <div className="stat-value">{expiringEquipment.length}</div>
+                <div className="stat-label">Expiring / Expired</div>
+              </div>
+            </button>
+            {expiringEquipment.length > 0 && (
+              <div className="sidebar-expiring-mini">
+                {expiringEquipment.slice(0, 3).map((item) => (
+                  <div key={item.id} className="sidebar-expiring-mini-row">
+                    <span style={{ fontWeight: 600 }}>{item.equipment_code}</span>
+                    <span className={`mini-tag ${item.daysLeft < 0 ? 'alert' : 'warn'}`}>
+                      {item.daysLeft < 0 ? 'Expired' : `${item.daysLeft}d`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <main className="main-content">
+          <div className="page-wrap">
+            <div className="stat-grid">
+              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
+                <div className="stat-icon blue">📦</div>
+                <div>
+                  <div className="stat-value">{totalEquipment}</div>
+                  <div className="stat-label">Total Equipment</div>
+                </div>
+              </button>
+              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('functional')}>
+                <div className="stat-icon green">✓</div>
+                <div>
+                  <div className="stat-value">{activeCount}</div>
+                  <div className="stat-label">Functional</div>
+                </div>
+              </button>
+              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('__needs_attention__')}>
+                <div className="stat-icon red">⚠</div>
+                <div>
+                  <div className="stat-value">{needsActionCount}</div>
+                  <div className="stat-label">Needs Attention</div>
+                </div>
+              </button>
+              <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('priority')}>
+                <div className="stat-icon amber">🛠</div>
+                <div>
+                  <div className="stat-value">{pendingActionsCount}</div>
+                  <div className="stat-label">Priority Actions</div>
+                </div>
+              </button>
             </div>
-          </button>
-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('__needs_attention__')}>
-            <div className="stat-icon red">⚠</div>
-            <div>
-              <div className="stat-value">{needsActionCount}</div>
-              <div className="stat-label">Needs Attention</div>
-            </div>
-          </button>
-          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('priority')}>
-            <div className="stat-icon amber">🛠</div>
-            <div>
-              <div className="stat-value">{pendingActionsCount}</div>
-              <div className="stat-label">Priority Actions</div>
-            </div>
-          </button>
-          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('dashboard')}>
-            <div className="stat-icon amber">⏳</div>
-            <div>
-              <div className="stat-value">{expiringEquipment.length}</div>
-              <div className="stat-label">Expiring / Expired</div>
-            </div>
-          </button>
-        </div>
 
         {activeTab === 'priority' && (
         <div>
@@ -1228,7 +1591,11 @@ function Dashboard({ profile, onLogout }) {
               !needsRepairPathChoice && !needsBudgetCheck && action.status === 'pending'
 
             let cardStyle = isOverdue ? 'overdue' : 'warning'
-            if (action.status === 'delayed') cardStyle = 'overdue'
+            if (action.status === 'delayed' || action.status === 'unresolved') cardStyle = 'overdue'
+
+            const feStockObj = stock.find((s) => s.equipment_type === 'fire_extinguisher')
+            const feStockCount = feStockObj ? feStockObj.quantity_available : 0
+            const assignedTech = technicians.find((t) => t.id === action.assigned_technician_id)
 
             return (
               <div key={action.id} className={`action-card ${cardStyle}`}>
@@ -1237,6 +1604,7 @@ function Dashboard({ profile, onLogout }) {
                   {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
                   {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
                   {action.status === 'delayed' && <span className="overdue-tag">DELAYED</span>}
+                  {action.status === 'unresolved' && <span className="overdue-tag" style={{ background: '#b91c1c' }}>UNRESOLVED</span>}
                 </div>
                 <p>
                   {action.equipment?.buildings?.building_name ?? 'N/A'} — {action.equipment?.exact_location}
@@ -1280,13 +1648,27 @@ function Dashboard({ profile, onLogout }) {
 
                 <div className="meta">
                   Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
+                  {assignedTech && (
+                    <>
+                      <br />
+                      Assigned to: <strong>{assignedTech.full_name}</strong> {assignedTech.contact_info ? `(${assignedTech.contact_info})` : ''}
+                    </>
+                  )}
                   {action.decided_by && (
                     <>
                       <br />
                       Decided by <strong>{action.decided_by}</strong> · {relativeTime(action.decided_at)}
                     </>
                   )}
-                  {action.completed_by && (
+                  {action.outcome && (
+                    <>
+                      <br />
+                      Outcome: <strong style={{ color: action.outcome === 'resolved' ? 'var(--green)' : 'var(--red)' }}>{action.outcome.toUpperCase()}</strong>
+                      {action.outcome_reason && <> — "{action.outcome_reason}"</>}
+                      {action.outcome_by && <> · Reported by <strong>{action.outcome_by}</strong> {relativeTime(action.outcome_at)}</>}
+                    </>
+                  )}
+                  {action.completed_by && !action.outcome && (
                     <>
                       <br />
                       Completed by <strong>{action.completed_by}</strong>
@@ -1348,23 +1730,31 @@ function Dashboard({ profile, onLogout }) {
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
                       {isFireExtinguisher
-                        ? 'Decision needed: replace from existing stock, or order new stock first?'
+                        ? `Decision needed: replace from existing stock (${feStockCount} available), or order new stock first?`
                         : 'Decision needed: can this be fixed in-house, or does it need a purchase request?'}
                     </p>
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
-                        onClick={() =>
+                        onClick={() => {
+                          if (isFireExtinguisher && feStockCount === 0) {
+                            const proceed = window.confirm(
+                              `⚠ Warning: There are 0 fire extinguishers in stock.\n\nIf you choose "Replace from Stock", you will need to replenish stock before the replacement unit is available.\n\nProceed anyway?`
+                            )
+                            if (!proceed) return
+                          }
                           setRepairPath(
                             action.id,
                             'job_order',
                             action.equipment?.equipment_code,
                             isFireExtinguisher
                           )
-                        }
+                        }}
                         disabled={actionUpdatingId === action.id}
                       >
-                        {isFireExtinguisher ? 'Replace from Stock (Job Order)' : 'Job Order (technician repairs)'}
+                        {isFireExtinguisher
+                          ? `Replace from Stock (Job Order) — ${feStockCount} in stock`
+                          : 'Job Order (technician repairs)'}
                       </button>
                       <button
                         className="btn btn-outline-red btn-sm"
@@ -1386,11 +1776,7 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Purchase workflow: showing a placeholder status until the
-                    real procurement timeline (12 or 30 working days) is
-                    confirmed with Supply Office. The interactive budget-check
-                    buttons re-enable once that number is settled — see
-                    setBudgetStatus() below, which is kept intact for that. */}
+                {/* Purchase workflow: showing a placeholder status until procurement is ready */}
                 {needsBudgetCheck && (
                   <div
                     style={{
@@ -1410,32 +1796,26 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Job Order — no purchase involved, start the work directly.
-                    For fire extinguishers this means "swap it from stock";
-                    for everything else it means "our technician fixes it." */}
+                {/* Job Order — start work with technician assignment */}
                 {needsStartWork && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
-                      No purchase request needed for this action.
+                      Ready to assign technician and start work.
                     </p>
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
                         onClick={() => {
-                          const msg = isFireExtinguisher
-                            ? `Start the replacement for ${action.equipment?.equipment_code}?\n\nThis marks the work as in progress.`
-                            : `Start the job order for ${action.equipment?.equipment_code}?\n\nThis marks the repair as in progress.`
-                          if (!window.confirm(msg)) return
-                          updateActionStatus(
-                            action.id,
-                            'in_progress',
-                            action.equipment?.id,
-                            action.equipment?.equipment_type
-                          )
+                          setSelectedTechnicianId('')
+                          setTechAssignModal({
+                            actionId: action.id,
+                            isFireExtinguisher,
+                            equipmentCode: action.equipment?.equipment_code
+                          })
                         }}
                         disabled={actionUpdatingId === action.id}
                       >
-                        {isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
+                        {isFireExtinguisher ? 'Start Replacement & Assign' : 'Start Job Order & Assign'}
                       </button>
                     </div>
                   </div>
@@ -1457,34 +1837,46 @@ function Dashboard({ profile, onLogout }) {
                   </div>
                 )}
 
-                {/* Stage: In progress (budget approved, or work already started).
-                    Completing this: fire extinguishers retire (whole-unit swap),
-                    everything else reverts to Functional (fixed in place). */}
+                {/* Stage: In progress — close with outcome tracking */}
                 {action.status === 'in_progress' && (
-                  <div className="action-buttons">
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={async () => {
-                        const eq = action.equipment
-                        const isFE = eq?.equipment_type === 'fire_extinguisher'
-                        const msg = isFE
-                          ? `Mark this completed?\n\n${eq?.equipment_code} will be permanently retired as No Longer in Service, and you'll be asked whether to add its replacement.`
-                          : `Mark this completed?\n\n${eq?.equipment_code} will be marked Functional again, provided no other actions are still open on it.`
-                        if (!window.confirm(msg)) return
+                  <div style={{ marginTop: '10px' }}>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--blue)', fontWeight: 600, margin: '0 0 8px 0' }}>
+                      Work is currently in progress.
+                    </p>
+                    <div className="action-buttons">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => {
+                          setOutcomeChoice('resolved')
+                          setOutcomeReason('')
+                          setOutcomeModal(action)
+                        }}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        Record Outcome / Close Work
+                      </button>
+                    </div>
+                  </div>
+                )}
 
-                        await updateActionStatus(action.id, 'completed', eq?.id, eq?.equipment_type)
-                        if (isFE) {
-                          setReplacementPrompt({
-                            oldCode: eq.equipment_code,
-                            equipment_type: eq.equipment_type,
-                            building_id: eq.building_id,
-                            exact_location: eq.exact_location
-                          })
-                        }
-                      }}
+                {/* Stage: Unresolved — failed repair or incomplete */}
+                {action.status === 'unresolved' && (
+                  <div style={{ marginTop: '10px', background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: '8px', padding: '10px 14px' }}>
+                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--red)', margin: 0 }}>
+                      Work marked Unresolved
+                    </p>
+                    <p style={{ fontSize: '0.85rem', margin: '4px 0 8px 0' }}>
+                      Reason: <em>"{action.outcome_reason || 'No reason provided'}"</em>
+                    </p>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 10px 0' }}>
+                      The equipment remains in defective status. You can reassess to try a different repair route.
+                    </p>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => reassessAction(action.id)}
                       disabled={actionUpdatingId === action.id}
                     >
-                      Mark Completed
+                      🔄 Reassess Action
                     </button>
                   </div>
                 )}
@@ -2327,7 +2719,384 @@ function Dashboard({ profile, onLogout }) {
         )}
         </div>
         )}
+
+        {/* ===================== STOCK TAB ===================== */}
+        {activeTab === 'stock' && (
+          <div>
+            <div className="section-heading">
+              <h2>Equipment Stock Inventory</h2>
+              <span className="count-pill" style={{ background: 'var(--blue-light)', color: 'var(--blue)', borderColor: '#bfdbfe' }}>
+                Simple Count per Type
+              </span>
+            </div>
+
+            <div className="panel" style={{ marginBottom: '16px' }}>
+              <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                Track available replacement units kept in the GSO storeroom. When GSO staff choose
+                "Replace from Stock" on a defective fire extinguisher, the system checks this count and warns if zero.
+                Completing a stock replacement automatically deducts 1 unit.
+              </p>
+            </div>
+
+            {stockMessage && (
+              <div className="all-clear-banner" style={{ marginBottom: '14px' }}>
+                ✓ {stockMessage}
+              </div>
+            )}
+
+            <div className="panel">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                {EQUIPMENT_TYPES.map((type) => {
+                  const s = stock.find((item) => item.equipment_type === type)
+                  const currentQty = s ? s.quantity_available : 0
+                  const isFE = type === 'fire_extinguisher'
+
+                  return (
+                    <div
+                      key={type}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: '10px',
+                        padding: '16px',
+                        background: '#fff'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ fontWeight: 700, fontSize: '1rem' }}>
+                          {TYPE_LABELS[type]}
+                        </div>
+                        {isFE && (
+                          <span style={{ fontSize: '0.72rem', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)', padding: '2px 8px', borderRadius: '999px', fontWeight: 600 }}>
+                            Stock-swapped
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                        {s?.updated_by ? `Updated by ${s.updated_by} · ${relativeTime(s.updated_at)}` : 'No updates recorded yet'}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ flex: 1 }}>
+                          <label className="field-label" style={{ fontSize: '0.78rem' }}>Available Quantity</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={stockEdits[type] !== undefined ? stockEdits[type] : currentQty}
+                            onChange={(e) => {
+                              const val = e.target.value
+                              setStockEdits((prev) => ({ ...prev, [type]: val }))
+                            }}
+                            style={{ fontWeight: 700, fontSize: '1.1rem' }}
+                          />
+                        </div>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          style={{ alignSelf: 'flex-end', height: '42px' }}
+                          onClick={() => handleSaveStock(type)}
+                          disabled={stockSaving}
+                        >
+                          Save
+                        </button>
+                      </div>
+
+                      <div style={{ marginTop: '10px', fontSize: '0.8rem', color: currentQty === 0 ? 'var(--red)' : 'var(--green)', fontWeight: 600 }}>
+                        {currentQty === 0 ? '⚠ Zero units available (out of stock)' : `✓ ${currentQty} units on hand`}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================== TECHNICIANS TAB ===================== */}
+        {activeTab === 'technicians' && (
+          <div>
+            <div className="section-heading">
+              <h2>Technicians</h2>
+              <button className="btn btn-primary btn-sm" onClick={() => setShowTechnicianForm((v) => !v)}>
+                {showTechnicianForm ? 'Close' : '+ Add Technician'}
+              </button>
+            </div>
+
+            {showTechnicianForm && (
+              <div className="panel">
+                <form onSubmit={handleTechnicianSubmit} className="form-grid">
+                  <div>
+                    <label className="field-label">Full Name</label>
+                    <input
+                      placeholder="e.g. Juan Dela Cruz"
+                      value={technicianForm.full_name}
+                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, full_name: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label">Contact Information</label>
+                    <input
+                      placeholder="e.g. 0917-123-4567 / Ext. 102"
+                      value={technicianForm.contact_info}
+                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
+                    />
+                  </div>
+
+                  {technicianError && <p className="form-error">{technicianError}</p>}
+
+                  <button type="submit" className="btn btn-primary" disabled={technicianSubmitting}>
+                    {technicianSubmitting ? 'Saving...' : 'Add Technician'}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {technicians.length === 0 ? (
+              <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>No technicians registered yet.</p>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: '14px', marginBottom: '18px' }}>
+                {technicians.map((t) => (
+                  <div key={t.id} className="panel" style={{ margin: 0 }}>
+                    {editingTechnicianId === t.id ? (
+                      <div className="form-grid">
+                        <div>
+                          <label className="field-label">Full Name</label>
+                          <input
+                            value={editTechnicianForm.full_name}
+                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, full_name: e.target.value }))}
+                          />
+                        </div>
+                        <div>
+                          <label className="field-label">Contact Info</label>
+                          <input
+                            value={editTechnicianForm.contact_info}
+                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
+                          />
+                        </div>
+                        <div>
+                          <label className="field-label">Availability</label>
+                          <select
+                            value={editTechnicianForm.is_available ? 'yes' : 'no'}
+                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, is_available: e.target.value === 'yes' }))}
+                          >
+                            <option value="yes">Available</option>
+                            <option value="no">Unavailable</option>
+                          </select>
+                        </div>
+                        {editTechnicianError && <p className="form-error">{editTechnicianError}</p>}
+                        <div className="equipment-actions">
+                          <button className="btn btn-primary btn-sm" onClick={() => saveEditTechnician(t.id)} disabled={editTechnicianSaving}>
+                            Save
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={cancelEditTechnician}>
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>{t.full_name}</div>
+                            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              {t.contact_info || 'No contact provided'}
+                            </div>
+                          </div>
+                          <span
+                            className={`status-badge ${t.is_available ? 'active' : 'inactive-state'}`}
+                            style={{ cursor: 'pointer' }}
+                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
+                            title="Click to toggle availability"
+                          >
+                            {t.is_available ? '✓ Available' : '✕ Unavailable'}
+                          </span>
+                        </div>
+
+                        <div className="equipment-actions" style={{ marginTop: '14px' }}>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
+                          >
+                            Set {t.is_available ? 'Unavailable' : 'Available'}
+                          </button>
+                          <button className="btn btn-secondary btn-sm" onClick={() => startEditTechnician(t)}>
+                            Edit
+                          </button>
+                          <button className="btn btn-outline-red btn-sm" onClick={() => deleteTechnician(t.id, t.full_name)}>
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+          </div>
+        </main>
       </div>
+
+      {/* ===================== OUTCOME MODAL (Feature 1) ===================== */}
+      {outcomeModal && (
+        <div className="modal-overlay">
+          <div className="modal-box" style={{ maxWidth: '460px' }}>
+            <div className="modal-title">Record Work Outcome</div>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
+              Equipment: <strong>{outcomeModal.equipment?.equipment_code}</strong> ({TYPE_LABELS[outcomeModal.equipment?.equipment_type] || outcomeModal.equipment?.equipment_type})
+            </p>
+
+            <div style={{ display: 'flex', gap: '10px', marginBottom: '16px' }}>
+              <label
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  border: `2px solid ${outcomeChoice === 'resolved' ? 'var(--blue)' : 'var(--border)'}`,
+                  background: outcomeChoice === 'resolved' ? 'var(--blue-light)' : '#fff',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  fontSize: '0.9rem'
+                }}
+              >
+                <input
+                  type="radio"
+                  name="outcomeChoice"
+                  value="resolved"
+                  checked={outcomeChoice === 'resolved'}
+                  onChange={() => setOutcomeChoice('resolved')}
+                  style={{ width: 'auto', margin: 0 }}
+                />
+                Resolved (Success)
+              </label>
+
+              <label
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 12px',
+                  borderRadius: '8px',
+                  border: `2px solid ${outcomeChoice === 'unresolved' ? 'var(--red)' : 'var(--border)'}`,
+                  background: outcomeChoice === 'unresolved' ? 'var(--red-bg)' : '#fff',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  fontSize: '0.9rem'
+                }}
+              >
+                <input
+                  type="radio"
+                  name="outcomeChoice"
+                  value="unresolved"
+                  checked={outcomeChoice === 'unresolved'}
+                  onChange={() => setOutcomeChoice('unresolved')}
+                  style={{ width: 'auto', margin: 0 }}
+                />
+                Unresolved (Failed)
+              </label>
+            </div>
+
+            {outcomeChoice === 'resolved' ? (
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '14px', background: 'var(--gray-bg)', padding: '10px 12px', borderRadius: '8px' }}>
+                {outcomeModal.equipment?.equipment_type === 'fire_extinguisher' ? (
+                  <>✓ <strong>{outcomeModal.equipment?.equipment_code}</strong> will be retired as <em>No Longer in Service</em>. 1 unit will be deducted from stock, and you will be asked to add the replacement unit.</>
+                ) : (
+                  <>✓ Work succeeded. <strong>{outcomeModal.equipment?.equipment_code}</strong> will revert to <strong>Functional</strong>.</>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: '0.85rem', color: 'var(--red)', marginBottom: '14px', background: 'var(--red-bg)', border: '1px solid var(--red-border)', padding: '10px 12px', borderRadius: '8px' }}>
+                ⚠ Work failed or could not be completed. The equipment will <strong>NOT</strong> be marked functional. This action will stay visible in Priority Actions with an <em>Unresolved</em> badge so GSO can reassess.
+              </div>
+            )}
+
+            <div>
+              <label className="field-label">
+                {outcomeChoice === 'unresolved' ? 'Reason for Failure / Notes (Required)' : 'Completion Notes (Optional)'}
+              </label>
+              <textarea
+                placeholder={outcomeChoice === 'unresolved' ? 'e.g. Technician could not fix panel; board burned, requires full replacement.' : 'e.g. Repaired and tested working.'}
+                value={outcomeReason}
+                onChange={(e) => setOutcomeReason(e.target.value)}
+                style={{ minHeight: '75px' }}
+              />
+            </div>
+
+            <div className="modal-actions" style={{ gap: '8px', marginTop: '16px' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  setOutcomeModal(null)
+                  setOutcomeReason('')
+                }}
+                disabled={actionUpdatingId === outcomeModal.id}
+              >
+                Cancel
+              </button>
+              <button
+                className={`btn ${outcomeChoice === 'resolved' ? 'btn-primary' : 'btn-outline-red'}`}
+                onClick={() => {
+                  if (outcomeChoice === 'unresolved' && !outcomeReason.trim()) {
+                    alert('Please enter a reason why the work could not be completed.')
+                    return
+                  }
+                  handleRecordOutcome(outcomeModal, outcomeChoice, outcomeReason)
+                }}
+                disabled={actionUpdatingId === outcomeModal.id}
+              >
+                {outcomeChoice === 'resolved' ? 'Confirm Resolved' : 'Mark Unresolved'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================== TECHNICIAN ASSIGNMENT MODAL (Feature 3) ===================== */}
+      {techAssignModal && (
+        <div className="modal-overlay">
+          <div className="modal-box" style={{ maxWidth: '420px' }}>
+            <div className="modal-title">
+              {techAssignModal.isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
+            </div>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
+              Assign an in-house technician to work on <strong>{techAssignModal.equipmentCode}</strong>:
+            </p>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label className="field-label">Select Technician</label>
+              <select
+                value={selectedTechnicianId}
+                onChange={(e) => setSelectedTechnicianId(e.target.value)}
+              >
+                <option value="">-- Unassigned / Not specified --</option>
+                {technicians.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.contact_info ? `· ${t.contact_info}` : ''}
+                  </option>
+                ))}
+              </select>
+              {technicians.length === 0 && (
+                <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
+                  No technicians listed yet. You can add technicians anytime in the Technicians tab.
+                </p>
+              )}
+            </div>
+
+            <div className="modal-actions" style={{ gap: '8px' }}>
+              <button className="btn btn-secondary" onClick={() => setTechAssignModal(null)}>
+                Cancel
+              </button>
+              <button className="btn btn-primary" onClick={handleConfirmStartWork}>
+                Start Work
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {qrPrintItems.length > 0 && (
         <div className="qr-print-area">
