@@ -381,6 +381,21 @@ function Dashboard({ profile, onLogout }) {
   const [formFloor, setFormFloor] = useState('')
   const [formLocationChoice, setFormLocationChoice] = useState('')
 
+  // Back to Top button state and listener
+  const [showBackToTop, setShowBackToTop] = useState(false)
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 300)
+    }
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   useEffect(() => {
     getEquipment()
     getBuildings()
@@ -3159,6 +3174,18 @@ function Dashboard({ profile, onLogout }) {
             </div>
           </div>
         </div>
+      )}
+
+      {showBackToTop && (
+        <button
+          className="back-to-top-btn"
+          onClick={scrollToTop}
+          title="Back to Top"
+          aria-label="Back to Top"
+        >
+          <span className="back-to-top-arrow">↑</span>
+          <span className="back-to-top-text">Back to Top</span>
+        </button>
       )}
     </div>
   )

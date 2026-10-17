@@ -40,6 +40,9 @@ h1, h2, h3 {
 
 /* ===== Header ===== */
 .app-header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   background: linear-gradient(180deg, var(--navy) 0%, var(--navy-dark) 100%);
   color: #fff;
   padding: 18px 28px;
@@ -48,6 +51,7 @@ h1, h2, h3 {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
+  box-shadow: 0 2px 8px rgba(15, 42, 74, 0.15);
 }
 
 .app-header .title-block {
@@ -766,7 +770,11 @@ textarea {
 }
 
 .app-header-compact {
-  padding: 12px 22px;
+  height: 64px;
+  box-sizing: border-box;
+  padding: 0 22px;
+  display: flex;
+  align-items: center;
 }
 
 .app-header-compact .title-block {
@@ -786,10 +794,16 @@ textarea {
 /* ===== App Layout with Animated Expanding Sidebar ===== */
 .app-layout {
   display: flex;
-  min-height: calc(100vh - 65px);
+  min-height: calc(100vh - 64px);
+  position: relative;
+  align-items: flex-start;
 }
 
 .app-sidebar {
+  position: sticky;
+  top: 64px;
+  height: calc(100vh - 64px);
+  align-self: flex-start;
   width: 72px;
   flex-shrink: 0;
   background: var(--card);
@@ -799,8 +813,11 @@ textarea {
   flex-direction: column;
   gap: 20px;
   transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.28s ease, padding 0.28s ease;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   white-space: nowrap;
+  scrollbar-width: thin;
+  z-index: 90;
 }
 
 .app-sidebar:hover {
@@ -1029,5 +1046,50 @@ textarea {
   }
   .app-sidebar:hover {
     width: 100%;
+  }
+}
+
+/* ===== Back to Top Floating Button ===== */
+.back-to-top-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999;
+  background: var(--navy);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 10px 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 18px rgba(15, 42, 74, 0.28);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: backToTopFadeIn 0.25s ease-out;
+}
+
+.back-to-top-btn:hover {
+  background: var(--navy-dark);
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(15, 42, 74, 0.38);
+}
+
+.back-to-top-arrow {
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+@keyframes backToTopFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
