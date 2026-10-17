@@ -1,0 +1,2253 @@
+diff --git a/capstone-system/migrations/001_outcome_stock_technicians.sql b/capstone-system/migrations/001_outcome_stock_technicians.sql
+new file mode 100644
+index 0000000..8e6d7fc
+--- /dev/null
++++ b/capstone-system/migrations/001_outcome_stock_technicians.sql
+@@ -0,0 +1,151 @@
++-- ============================================================
++-- Migration: Work Outcome Tracking + Stock + Technicians
++-- Run in Supabase Dashboard -> SQL Editor -> New Query -> Run
++-- ============================================================
++
++-- 1. Add outcome tracking columns to maintenance_actions
++ALTER TABLE maintenance_actions
++  ADD COLUMN IF NOT EXISTS outcome text,
++  ADD COLUMN IF NOT EXISTS outcome_reason text,
++  ADD COLUMN IF NOT EXISTS outcome_by text,
++  ADD COLUMN IF NOT EXISTS outcome_at timestamptz,
++  ADD COLUMN IF NOT EXISTS assigned_technician_id uuid;
++
++-- Update the status check constraint to include 'unresolved'
++DO $$
++BEGIN
++  BEGIN
++    ALTER TABLE maintenance_actions DROP CONSTRAINT IF EXISTS maintenance_actions_status_check;
++  EXCEPTION WHEN undefined_object THEN NULL;
++  END;
++  BEGIN
++    ALTER TABLE maintenance_actions DROP CONSTRAINT IF EXISTS valid_status;
++  EXCEPTION WHEN undefined_object THEN NULL;
++  END;
++END $$;
++
++ALTER TABLE maintenance_actions
++  ADD CONSTRAINT maintenance_actions_status_check
++  CHECK (status IN ('pending', 'in_progress', 'completed', 'delayed', 'for_disposal', 'unresolved'));
++
++
++-- 2. Equipment stock table
++CREATE TABLE IF NOT EXISTS equipment_stock (
++  equipment_type text PRIMARY KEY,
++  quantity_available integer NOT NULL DEFAULT 0 CHECK (quantity_available >= 0),
++  updated_at timestamptz DEFAULT now(),
++  updated_by text
++);
++
++-- Seed with all equipment types at 0
++INSERT INTO equipment_stock (equipment_type, quantity_available)
++VALUES
++  ('fire_extinguisher', 0),
++  ('fire_alarm', 0),
++  ('sprinkler', 0),
++  ('emergency_light', 0),
++  ('smoke_detector', 0)
++ON CONFLICT (equipment_type) DO NOTHING;
++
++-- RLS for equipment_stock
++ALTER TABLE equipment_stock ENABLE ROW LEVEL SECURITY;
++
++DROP POLICY IF EXISTS "Authenticated users can read stock" ON equipment_stock;
++CREATE POLICY "Authenticated users can read stock"
++  ON equipment_stock FOR SELECT
++  TO authenticated
++  USING (true);
++
++DROP POLICY IF EXISTS "Admin/manager can insert stock" ON equipment_stock;
++CREATE POLICY "Admin/manager can insert stock"
++  ON equipment_stock FOR INSERT
++  TO authenticated
++  WITH CHECK (
++    EXISTS (
++      SELECT 1 FROM profiles
++      WHERE profiles.id = auth.uid()
++      AND profiles.role IN ('admin', 'manager')
++    )
++  );
++
++DROP POLICY IF EXISTS "Admin/manager can update stock" ON equipment_stock;
++CREATE POLICY "Admin/manager can update stock"
++  ON equipment_stock FOR UPDATE
++  TO authenticated
++  USING (
++    EXISTS (
++      SELECT 1 FROM profiles
++      WHERE profiles.id = auth.uid()
++      AND profiles.role IN ('admin', 'manager')
++    )
++  );
++
++
++-- 3. Technicians table
++CREATE TABLE IF NOT EXISTS technicians (
++  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
++  full_name text NOT NULL,
++  contact_info text,
++  is_available boolean NOT NULL DEFAULT true,
++  created_at timestamptz DEFAULT now()
++);
++
++-- RLS for technicians
++ALTER TABLE technicians ENABLE ROW LEVEL SECURITY;
++
++DROP POLICY IF EXISTS "Authenticated users can read technicians" ON technicians;
++CREATE POLICY "Authenticated users can read technicians"
++  ON technicians FOR SELECT
++  TO authenticated
++  USING (true);
++
++DROP POLICY IF EXISTS "Admin/manager can insert technicians" ON technicians;
++CREATE POLICY "Admin/manager can insert technicians"
++  ON technicians FOR INSERT
++  TO authenticated
++  WITH CHECK (
++    EXISTS (
++      SELECT 1 FROM profiles
++      WHERE profiles.id = auth.uid()
++      AND profiles.role IN ('admin', 'manager')
++    )
++  );
++
++DROP POLICY IF EXISTS "Admin/manager can update technicians" ON technicians;
++CREATE POLICY "Admin/manager can update technicians"
++  ON technicians FOR UPDATE
++  TO authenticated
++  USING (
++    EXISTS (
++      SELECT 1 FROM profiles
++      WHERE profiles.id = auth.uid()
++      AND profiles.role IN ('admin', 'manager')
++    )
++  );
++
++DROP POLICY IF EXISTS "Admin/manager can delete technicians" ON technicians;
++CREATE POLICY "Admin/manager can delete technicians"
++  ON technicians FOR DELETE
++  TO authenticated
++  USING (
++    EXISTS (
++      SELECT 1 FROM profiles
++      WHERE profiles.id = auth.uid()
++      AND profiles.role IN ('admin', 'manager')
++    )
++  );
++
++-- FK from maintenance_actions to technicians (nullable)
++DO $$
++BEGIN
++  IF NOT EXISTS (
++    SELECT 1 FROM pg_constraint WHERE conname = 'fk_assigned_technician'
++  ) THEN
++    ALTER TABLE maintenance_actions
++      ADD CONSTRAINT fk_assigned_technician
++      FOREIGN KEY (assigned_technician_id)
++      REFERENCES technicians(id)
++      ON DELETE SET NULL;
++  END IF;
++END $$;
++
+diff --git a/capstone-system/src/App.jsx b/capstone-system/src/App.jsx
+index cc27cb8..e198d55 100644
+--- a/capstone-system/src/App.jsx
++++ b/capstone-system/src/App.jsx
+@@ -351,16 +351,62 @@ function Dashboard({ profile, onLogout }) {
+   const [bulkError, setBulkError] = useState(null)
+   const [bulkFloorMode, setBulkFloorMode] = useState('select')
+ 
++  // Stock tracking state
++  const [stock, setStock] = useState([])
++  const [stockEdits, setStockEdits] = useState({})
++  const [stockSaving, setStockSaving] = useState(false)
++  const [stockMessage, setStockMessage] = useState(null)
++
++  // Technician management state
++  const [technicians, setTechnicians] = useState([])
++  const [showTechnicianForm, setShowTechnicianForm] = useState(false)
++  const [technicianForm, setTechnicianForm] = useState({ full_name: '', contact_info: '' })
++  const [technicianSubmitting, setTechnicianSubmitting] = useState(false)
++  const [technicianError, setTechnicianError] = useState(null)
++  const [editingTechnicianId, setEditingTechnicianId] = useState(null)
++  const [editTechnicianForm, setEditTechnicianForm] = useState({})
++  const [editTechnicianSaving, setEditTechnicianSaving] = useState(false)
++  const [editTechnicianError, setEditTechnicianError] = useState(null)
++
++  // Outcome modal state (Resolved/Unresolved choice when closing work)
++  const [outcomeModal, setOutcomeModal] = useState(null)
++  const [outcomeChoice, setOutcomeChoice] = useState('resolved')
++  const [outcomeReason, setOutcomeReason] = useState('')
++
++  // Technician assignment modal state (when starting a job order)
++  const [techAssignModal, setTechAssignModal] = useState(null)
++  const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
++
+   // Add Equipment form: cascading location picker state
+   const [formFloor, setFormFloor] = useState('')
+   const [formLocationChoice, setFormLocationChoice] = useState('')
+ 
++  // Priority Actions filter ('all', 'pending', 'in_progress', 'procurement', 'unresolved')
++  const [priorityFilter, setPriorityFilter] = useState('all')
++
++  // Back to Top button state and listener
++  const [showBackToTop, setShowBackToTop] = useState(false)
++
++  useEffect(() => {
++    const handleScroll = () => {
++      setShowBackToTop(window.scrollY > 300)
++    }
++    window.addEventListener('scroll', handleScroll, { passive: true })
++    return () => window.removeEventListener('scroll', handleScroll)
++  }, [])
++
++  const scrollToTop = () => {
++    window.scrollTo({ top: 0, behavior: 'smooth' })
++  }
++
+   useEffect(() => {
+     getEquipment()
+     getBuildings()
+     getMaintenanceActions()
+     getBuildingLocations()
+     getInspections()
++    getStock()
++    getTechnicians()
+   }, [])
+ 
+   async function getEquipment() {
+@@ -592,7 +638,25 @@ function Dashboard({ profile, onLogout }) {
+     setBulkSubmitting(false)
+   }
+ 
+-  async function deleteLocation(id) {
++  // exact_location on equipment is a copied text string, not a foreign key,
++  // so the database can't stop this delete from stranding equipment that
++  // still points at this room. We check and warn before deleting instead.
++  async function deleteLocation(id, floorLabel, locationLabel) {
++    const fullLocation = `${floorLabel} - ${locationLabel}`
++    const affected = equipment.filter((e) => e.exact_location === fullLocation)
++
++    const message =
++      affected.length > 0
++        ? `Delete "${locationLabel}"?\n\n${affected.length} piece${
++            affected.length === 1 ? '' : 's'
++          } of equipment (${affected
++            .map((e) => e.equipment_code)
++            .join(', ')}) still list this location. They will keep showing it, ` +
++          `but it will no longer be selectable when adding new equipment.\n\nDelete anyway?`
++        : `Delete "${locationLabel}"? This cannot be undone.`
++
++    if (!window.confirm(message)) return
++
+     const { error } = await supabase.from('building_locations').delete().eq('id', id)
+     if (error) {
+       console.error('Error deleting location:', error)
+@@ -603,20 +667,74 @@ function Dashboard({ profile, onLogout }) {
+   }
+ 
+   async function getMaintenanceActions() {
+-    const { data, error } = await supabase
++    let { data, error } = await supabase
+       .from('maintenance_actions')
+       .select(`
+         id, action_type, description, priority, status, reported_date, due_date,
+         disposition, budget_status, repair_path,
++        decided_by, decided_at, completed_by,
++        outcome, outcome_reason, outcome_by, outcome_at, assigned_technician_id,
+         equipment ( id, equipment_code, equipment_type, exact_location, building_id,
+           buildings ( building_name )
+         )
+       `)
+-      .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
++      .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
+       .order('reported_date', { ascending: true })
+ 
+-    if (error) console.error('Error fetching maintenance actions:', error)
+-    else setMaintenanceActions(data)
++    if (error) {
++      // Graceful fallback if the SQL migration has not been run in Supabase yet
++      console.warn('Extended columns not found, using base query:', error.message)
++      const fallback = await supabase
++        .from('maintenance_actions')
++        .select(`
++          id, action_type, description, priority, status, reported_date, due_date,
++          disposition, budget_status, repair_path,
++          decided_by, decided_at, completed_by,
++          equipment ( id, equipment_code, equipment_type, exact_location, building_id,
++            buildings ( building_name )
++          )
++        `)
++        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
++        .order('reported_date', { ascending: true })
++
++      if (fallback.error) {
++        console.error('Error fetching maintenance actions:', fallback.error)
++      } else {
++        setMaintenanceActions(fallback.data || [])
++      }
++    } else {
++      setMaintenanceActions(data || [])
++    }
++  }
++
++  async function getStock() {
++    const { data, error } = await supabase
++      .from('equipment_stock')
++      .select('equipment_type, quantity_available, updated_at, updated_by')
++
++    if (error) {
++      console.error('Error fetching stock:', error)
++    } else {
++      setStock(data || [])
++      const edits = {}
++      ;(data || []).forEach((s) => {
++        edits[s.equipment_type] = s.quantity_available
++      })
++      setStockEdits(edits)
++    }
++  }
++
++  async function getTechnicians() {
++    const { data, error } = await supabase
++      .from('technicians')
++      .select('id, full_name, contact_info, is_available')
++      .order('full_name', { ascending: true })
++
++    if (error) {
++      console.error('Error fetching technicians:', error)
++    } else {
++      setTechnicians(data || [])
++    }
+   }
+ 
+   async function getInspections() {
+@@ -806,7 +924,13 @@ function Dashboard({ profile, onLogout }) {
+     setActionUpdatingId(actionId)
+ 
+     const payload = { status: newStatus }
+-    if (newStatus === 'completed') payload.completed_date = new Date().toISOString()
++    if (newStatus === 'completed') {
++      payload.completed_date = new Date().toISOString()
++      payload.completed_by = `${profile.full_name} (${profile.role})`
++      payload.outcome = 'resolved'
++      payload.outcome_by = `${profile.full_name} (${profile.role})`
++      payload.outcome_at = new Date().toISOString()
++    }
+ 
+     const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
+ 
+@@ -822,15 +946,11 @@ function Dashboard({ profile, onLogout }) {
+         .from('maintenance_actions')
+         .select('id')
+         .eq('equipment_id', equipmentId)
+-        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
++        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
+ 
+       if (remainingError) {
+         console.error('Error checking remaining actions:', remainingError)
+       } else if (remainingActions.length === 0) {
+-        // Fire extinguishers are always replaced with a whole new unit —
+-        // never repaired in place — so completing their action retires the
+-        // old physical unit rather than reverting it to functional. Every
+-        // other equipment type gets fixed where it stands, same sticker.
+         const finalStatus = equipmentType === 'fire_extinguisher' ? 'no_longer_in_service' : 'functional'
+         const { error: revertError } = await supabase
+           .from('equipment')
+@@ -838,13 +958,293 @@ function Dashboard({ profile, onLogout }) {
+           .eq('id', equipmentId)
+         if (revertError) console.error('Error updating equipment status:', revertError)
+       }
++
++      // Auto-decrement stock on successful fire extinguisher replacement
++      if (equipmentType === 'fire_extinguisher') {
++        const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
++        if (currentStock && currentStock.quantity_available > 0) {
++          const newQty = Math.max(0, currentStock.quantity_available - 1)
++          await supabase
++            .from('equipment_stock')
++            .update({
++              quantity_available: newQty,
++              updated_at: new Date().toISOString(),
++              updated_by: `${profile.full_name} (${profile.role})`
++            })
++            .eq('equipment_type', 'fire_extinguisher')
++          getStock()
++        }
++      }
++    }
++
++    getMaintenanceActions()
++    getEquipment()
++    setActionUpdatingId(null)
++  }
++
++  // Work outcome handler: either Resolved (success) or Unresolved (failed / cannot complete)
++  async function handleRecordOutcome(action, choice, reason) {
++    if (!action) return
++    const actionId = action.id
++    const eq = action.equipment
++    const isFE = eq?.equipment_type === 'fire_extinguisher'
++
++    setActionUpdatingId(actionId)
++
++    if (choice === 'resolved') {
++      const payload = {
++        status: 'completed',
++        completed_date: new Date().toISOString(),
++        completed_by: `${profile.full_name} (${profile.role})`,
++        outcome: 'resolved',
++        outcome_reason: reason.trim() || null,
++        outcome_by: `${profile.full_name} (${profile.role})`,
++        outcome_at: new Date().toISOString()
++      }
++
++      const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
++      if (error) {
++        alert('Failed to complete action: ' + error.message)
++        setActionUpdatingId(null)
++        return
++      }
++
++      if (eq?.id) {
++        const { data: remainingActions } = await supabase
++          .from('maintenance_actions')
++          .select('id')
++          .eq('equipment_id', eq.id)
++          .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
++
++        if (!remainingActions || remainingActions.length === 0) {
++          const finalStatus = isFE ? 'no_longer_in_service' : 'functional'
++          await supabase.from('equipment').update({ current_status: finalStatus }).eq('id', eq.id)
++        }
++
++        if (isFE) {
++          // Decrement stock
++          const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
++          if (currentStock && currentStock.quantity_available > 0) {
++            await supabase
++              .from('equipment_stock')
++              .update({
++                quantity_available: Math.max(0, currentStock.quantity_available - 1),
++                updated_at: new Date().toISOString(),
++                updated_by: `${profile.full_name} (${profile.role})`
++              })
++              .eq('equipment_type', 'fire_extinguisher')
++            getStock()
++          }
++
++          setReplacementPrompt({
++            oldCode: eq.equipment_code,
++            equipment_type: eq.equipment_type,
++            building_id: eq.building_id,
++            exact_location: eq.exact_location
++          })
++        }
++      }
++    } else {
++      // UNRESOLVED: equipment stays defective, problem stays visible in Priority Actions
++      const payload = {
++        status: 'unresolved',
++        outcome: 'unresolved',
++        outcome_reason: reason.trim(),
++        outcome_by: `${profile.full_name} (${profile.role})`,
++        outcome_at: new Date().toISOString()
++      }
++
++      const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
++      if (error) {
++        alert('Failed to record unresolved outcome: ' + error.message)
++        setActionUpdatingId(null)
++        return
++      }
+     }
+ 
++    setOutcomeModal(null)
++    setOutcomeReason('')
++    setOutcomeChoice('resolved')
+     getMaintenanceActions()
+     getEquipment()
+     setActionUpdatingId(null)
+   }
+ 
++  // Reassess an unresolved action: resets status to pending and clears repair_path
++  async function reassessAction(actionId) {
++    if (!window.confirm('Reassess this action?\n\nThis will reset its decision path so GSO can choose a new route (such as Purchase Request or assigning a different technician).')) return
++
++    setActionUpdatingId(actionId)
++    const { error } = await supabase
++      .from('maintenance_actions')
++      .update({
++        status: 'pending',
++        repair_path: null,
++        budget_status: 'not_applicable'
++      })
++      .eq('id', actionId)
++
++    if (error) {
++      alert('Failed to reassess action: ' + error.message)
++    } else {
++      getMaintenanceActions()
++    }
++    setActionUpdatingId(null)
++  }
++
++  // Start Job Order / Replacement with technician assignment
++  async function handleConfirmStartWork() {
++    if (!techAssignModal) return
++    const { actionId, isFireExtinguisher } = techAssignModal
++
++    setActionUpdatingId(actionId)
++    const payload = {
++      status: 'in_progress',
++      assigned_technician_id: selectedTechnicianId || null
++    }
++
++    const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
++    if (error) {
++      alert('Failed to start work: ' + error.message)
++    } else {
++      getMaintenanceActions()
++    }
++
++    setTechAssignModal(null)
++    setSelectedTechnicianId('')
++    setActionUpdatingId(null)
++  }
++
++  // Stock management handlers
++  async function handleSaveStock(type) {
++    const qty = parseInt(stockEdits[type], 10)
++    if (isNaN(qty) || qty < 0) {
++      alert('Stock quantity must be a non-negative number.')
++      return
++    }
++
++    setStockSaving(true)
++    const { error } = await supabase
++      .from('equipment_stock')
++      .upsert({
++        equipment_type: type,
++        quantity_available: qty,
++        updated_at: new Date().toISOString(),
++        updated_by: `${profile.full_name} (${profile.role})`
++      })
++
++    if (error) {
++      if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
++        alert('Database table "equipment_stock" has not been created yet in Supabase.\n\nPlease run the SQL migration (001_outcome_stock_technicians.sql) in your Supabase SQL Editor.')
++      } else {
++        alert('Failed to update stock: ' + error.message)
++      }
++    } else {
++      setStockMessage(`Stock for ${TYPE_LABELS[type]} updated.`)
++      setTimeout(() => setStockMessage(null), 3000)
++      getStock()
++    }
++    setStockSaving(false)
++  }
++
++  // Technician management handlers
++  async function handleTechnicianSubmit(e) {
++    e.preventDefault()
++    setTechnicianError(null)
++
++    if (!technicianForm.full_name.trim()) {
++      setTechnicianError('Technician name is required.')
++      return
++    }
++
++    setTechnicianSubmitting(true)
++    const { error } = await supabase.from('technicians').insert([
++      {
++        full_name: technicianForm.full_name.trim(),
++        contact_info: technicianForm.contact_info.trim() || null,
++        is_available: true
++      }
++    ])
++
++    if (error) {
++      if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
++        setTechnicianError('Database table "technicians" has not been created yet in Supabase. Please run the SQL migration (001_outcome_stock_technicians.sql) in your Supabase SQL Editor.')
++      } else {
++        setTechnicianError(error.message)
++      }
++    } else {
++      setTechnicianForm({ full_name: '', contact_info: '' })
++      setShowTechnicianForm(false)
++      getTechnicians()
++    }
++    setTechnicianSubmitting(false)
++  }
++
++  async function toggleTechnicianAvailability(id, currentVal) {
++    const { error } = await supabase
++      .from('technicians')
++      .update({ is_available: !currentVal })
++      .eq('id', id)
++
++    if (error) {
++      alert('Failed to update availability: ' + error.message)
++    } else {
++      getTechnicians()
++    }
++  }
++
++  function startEditTechnician(t) {
++    setEditingTechnicianId(t.id)
++    setEditTechnicianError(null)
++    setEditTechnicianForm({
++      full_name: t.full_name || '',
++      contact_info: t.contact_info || '',
++      is_available: t.is_available
++    })
++  }
++
++  function cancelEditTechnician() {
++    setEditingTechnicianId(null)
++    setEditTechnicianForm({})
++    setEditTechnicianError(null)
++  }
++
++  async function saveEditTechnician(id) {
++    if (!editTechnicianForm.full_name.trim()) {
++      setEditTechnicianError('Technician name is required.')
++      return
++    }
++
++    setEditTechnicianSaving(true)
++    const { error } = await supabase
++      .from('technicians')
++      .update({
++        full_name: editTechnicianForm.full_name.trim(),
++        contact_info: editTechnicianForm.contact_info.trim() || null,
++        is_available: editTechnicianForm.is_available
++      })
++      .eq('id', id)
++
++    if (error) {
++      setEditTechnicianError(error.message)
++    } else {
++      setEditingTechnicianId(null)
++      getTechnicians()
++    }
++    setEditTechnicianSaving(false)
++  }
++
++  async function deleteTechnician(id, name) {
++    if (!window.confirm(`Delete technician "${name}"? Any past actions assigned to this technician will retain their record.`)) return
++
++    const { error } = await supabase.from('technicians').delete().eq('id', id)
++    if (error) {
++      alert('Failed to delete technician: ' + error.message)
++    } else {
++      getTechnicians()
++    }
++  }
++
+   // Called when GSO confirms the suggested replacement. Pre-fills the type
+   // and location from the retired unit, generates a new code the normal
+   // way, and defaults to a 2-year expiration from today — the standard
+@@ -888,12 +1288,29 @@ function Dashboard({ profile, onLogout }) {
+   // this be handled with what's already on hand (Job Order — a technician
+   // repairs it, or for fire extinguishers, swapped from existing stock), or
+   // does it need budget/materials/outside procurement (Purchase Request)?
+-  async function setRepairPath(actionId, repairPath) {
++  // These decisions route an action down a path that isn't reversible from
++  // the UI, so each one states plainly what it commits to before writing.
++  async function setRepairPath(actionId, repairPath, equipmentCode, isFireExtinguisher) {
++    const message =
++      repairPath === 'job_order'
++        ? isFireExtinguisher
++          ? `Replace ${equipmentCode} from existing stock?\n\nThis records a Job Order. When you later mark it completed, ${equipmentCode} is permanently retired and you'll be prompted to add its replacement.`
++          : `Record a Job Order for ${equipmentCode}?\n\nThis means your own technician will repair it — no purchase request needed.`
++        : isFireExtinguisher
++        ? `Order new stock for ${equipmentCode}?\n\nThis creates a Purchase Request and sends it to procurement. ${equipmentCode} stays out of service until the replacement arrives.`
++        : `Create a Purchase Request for ${equipmentCode}?\n\nThis means the repair needs budget, materials, or outside expertise, and will go to procurement.`
++
++    if (!window.confirm(message)) return
++
+     setActionUpdatingId(actionId)
+ 
+     const { error } = await supabase
+       .from('maintenance_actions')
+-      .update({ repair_path: repairPath })
++      .update({
++        repair_path: repairPath,
++        decided_by: `${profile.full_name} (${profile.role})`,
++        decided_at: new Date().toISOString()
++      })
+       .eq('id', actionId)
+ 
+     if (error) {
+@@ -963,11 +1380,28 @@ function Dashboard({ profile, onLogout }) {
+   // This is the pattern that justifies replacement over repeated repairs.
+   const REPEAT_FAILURE_THRESHOLD = 2
+ 
+-  const totalEquipment = equipment.length
++  // Active deployed equipment (excluding decommissioned/retired units)
++  const totalEquipment = equipment.filter((e) => e.current_status !== 'no_longer_in_service').length
+   const activeCount = equipment.filter((e) => e.current_status === 'functional').length
+-  const needsActionCount = equipment.filter((e) => e.current_status !== 'functional').length
++  const needsActionCount = equipment.filter(
++    (e) => e.current_status !== 'functional' && e.current_status !== 'no_longer_in_service'
++  ).length
+   const pendingActionsCount = sortedActions.length
+ 
++  // Priority Actions counts by stage
++  const pendingCount = sortedActions.filter((a) => a.status === 'pending' && a.repair_path !== 'purchase_request').length
++  const inProgressCount = sortedActions.filter((a) => a.status === 'in_progress').length
++  const procurementCount = sortedActions.filter((a) => a.repair_path === 'purchase_request' && a.status === 'pending').length
++  const unresolvedCount = sortedActions.filter((a) => a.status === 'unresolved').length
++
++  const displayedActions = sortedActions.filter((a) => {
++    if (priorityFilter === 'pending') return a.status === 'pending' && a.repair_path !== 'purchase_request'
++    if (priorityFilter === 'in_progress') return a.status === 'in_progress'
++    if (priorityFilter === 'procurement') return a.repair_path === 'purchase_request' && a.status === 'pending'
++    if (priorityFilter === 'unresolved') return a.status === 'unresolved'
++    return true
++  })
++
+   const today = new Date()
+   today.setHours(0, 0, 0, 0)
+ 
+@@ -997,7 +1431,7 @@ function Dashboard({ profile, onLogout }) {
+     const matchesStatus =
+       !filterStatus ||
+       (filterStatus === '__needs_attention__'
+-        ? item.current_status !== 'functional'
++        ? item.current_status !== 'functional' && item.current_status !== 'no_longer_in_service'
+         : item.current_status === filterStatus)
+     const matchesBuilding = !filterBuilding || item.building_id === filterBuilding
+ 
+@@ -1068,75 +1502,191 @@ function Dashboard({ profile, onLogout }) {
+         </div>
+       </header>
+ 
+-      <nav className="tab-strip">
+-        <button
+-          className={`tab-item ${activeTab === 'dashboard' ? 'active' : ''}`}
+-          onClick={() => setActiveTab('dashboard')}
+-        >
+-          Dashboard
+-        </button>
+-        <button
+-          className={`tab-item ${activeTab === 'buildings' ? 'active' : ''}`}
+-          onClick={() => setActiveTab('buildings')}
+-        >
+-          Buildings
+-        </button>
+-      </nav>
++      <div className="app-layout">
++        <aside className="app-sidebar">
++          <nav className="sidebar-nav">
++            <button
++              className={`sidebar-item ${activeTab === 'dashboard' ? 'active' : ''}`}
++              onClick={() => setActiveTab('dashboard')}
++              title="Dashboard"
++            >
++              <span className="sidebar-icon">📊</span>
++              <span className="sidebar-text">Dashboard</span>
++            </button>
++            <button
++              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
++              onClick={() => {
++                setFilterStatus('')
++                setFilterType('')
++                setFilterBuilding('')
++                setSearchTerm('')
++                setActiveTab('equipment')
++              }}
++              title="Equipment"
++            >
++              <span className="sidebar-icon">🧯</span>
++              <span className="sidebar-text">Equipment</span>
++            </button>
++            <button
++              className={`sidebar-item ${activeTab === 'buildings' ? 'active' : ''}`}
++              onClick={() => setActiveTab('buildings')}
++              title="Buildings"
++            >
++              <span className="sidebar-icon">🏢</span>
++              <span className="sidebar-text">Buildings</span>
++            </button>
++            <button
++              className={`sidebar-item ${activeTab === 'stock' ? 'active' : ''}`}
++              onClick={() => setActiveTab('stock')}
++              title="Stock"
++            >
++              <span className="sidebar-icon">📦</span>
++              <span className="sidebar-text">Stock</span>
++            </button>
++            <button
++              className={`sidebar-item ${activeTab === 'technicians' ? 'active' : ''}`}
++              onClick={() => setActiveTab('technicians')}
++              title="Technicians"
++            >
++              <span className="sidebar-icon">🔧</span>
++              <span className="sidebar-text">Technicians</span>
++            </button>
++          </nav>
+ 
+-      <div className="page-wrap">
+-        <div className="stat-grid">
+-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
+-            <div className="stat-icon blue">📦</div>
+-            <div>
+-              <div className="stat-value">{totalEquipment}</div>
+-              <div className="stat-label">Total Equipment</div>
+-            </div>
+-          </button>
+-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('functional')}>
+-            <div className="stat-icon green">✓</div>
+-            <div>
+-              <div className="stat-value">{activeCount}</div>
+-              <div className="stat-label">Functional</div>
++          {/* Expiring card placed in the sidebar together */}
++          <div className="sidebar-section">
++            <div className="sidebar-section-header">
++              Alerts
+             </div>
+-          </button>
+-          <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('__needs_attention__')}>
+-            <div className="stat-icon red">⚠</div>
+-            <div>
+-              <div className="stat-value">{needsActionCount}</div>
+-              <div className="stat-label">Needs Attention</div>
+-            </div>
+-          </button>
+-          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('priority')}>
+-            <div className="stat-icon amber">🛠</div>
+-            <div>
+-              <div className="stat-value">{pendingActionsCount}</div>
+-              <div className="stat-label">Priority Actions</div>
+-            </div>
+-          </button>
+-          <button className="stat-card stat-card-clickable" onClick={() => setActiveTab('dashboard')}>
+-            <div className="stat-icon amber">⏳</div>
+-            <div>
+-              <div className="stat-value">{expiringEquipment.length}</div>
+-              <div className="stat-label">Expiring / Expired</div>
++            <button
++              className="sidebar-stat-card"
++              onClick={() => {
++                setActiveTab('dashboard')
++                setTimeout(() => {
++                  document.getElementById('expiration-alerts-section')?.scrollIntoView({ behavior: 'smooth' })
++                }, 0)
++              }}
++              title="Expiring / Expired Equipment"
++            >
++              <div className="stat-icon amber sidebar-alert-icon">
++                ⏳
++                {expiringEquipment.length > 0 && (
++                  <span className="sidebar-badge-dot">{expiringEquipment.length}</span>
++                )}
++              </div>
++              <div className="sidebar-alert-details">
++                <div className="stat-value">{expiringEquipment.length}</div>
++                <div className="stat-label">Expiring / Expired</div>
++              </div>
++            </button>
++            {expiringEquipment.length > 0 && (
++              <div className="sidebar-expiring-mini">
++                {expiringEquipment.slice(0, 3).map((item) => (
++                  <div key={item.id} className="sidebar-expiring-mini-row">
++                    <span style={{ fontWeight: 600 }}>{item.equipment_code}</span>
++                    <span className={`mini-tag ${item.daysLeft < 0 ? 'alert' : 'warn'}`}>
++                      {item.daysLeft < 0 ? 'Expired' : `${item.daysLeft}d`}
++                    </span>
++                  </div>
++                ))}
++              </div>
++            )}
++          </div>
++        </aside>
++
++        <main className="main-content">
++          <div className="page-wrap">
++            <div className="stat-grid">
++              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
++                <div className="stat-icon blue">📦</div>
++                <div>
++                  <div className="stat-value">{totalEquipment}</div>
++                  <div className="stat-label">Total Equipment</div>
++                </div>
++              </button>
++              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('functional')}>
++                <div className="stat-icon green">✓</div>
++                <div>
++                  <div className="stat-value">{activeCount}</div>
++                  <div className="stat-label">Functional</div>
++                </div>
++              </button>
++              <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('__needs_attention__')}>
++                <div className="stat-icon red">⚠</div>
++                <div>
++                  <div className="stat-value">{needsActionCount}</div>
++                  <div className="stat-label">Needs Attention</div>
++                </div>
++              </button>
++              <button
++                className="stat-card stat-card-clickable"
++                onClick={() => {
++                  setActiveTab('dashboard')
++                  setPriorityFilter('all')
++                  setTimeout(() => {
++                    document.getElementById('priority-actions-section')?.scrollIntoView({ behavior: 'smooth' })
++                  }, 50)
++                }}
++              >
++                <div className="stat-icon amber">🛠</div>
++                <div>
++                  <div className="stat-value">{pendingActionsCount}</div>
++                  <div className="stat-label">Priority Actions</div>
++                </div>
++              </button>
+             </div>
+-          </button>
+-        </div>
+ 
+-        {activeTab === 'priority' && (
++        {(activeTab === 'dashboard' || activeTab === 'priority') && (
+         <div>
+-        <div className="section-heading">
++        <div id="priority-actions-section" className="section-heading" style={{ scrollMarginTop: '80px' }}>
+           <h2>Priority Actions</h2>
+           {sortedActions.length > 0 && (
+-            <span className="count-pill">{sortedActions.length} pending</span>
++            <span className="count-pill">{sortedActions.length} active</span>
+           )}
+         </div>
+ 
+-        {sortedActions.length === 0 ? (
++        {/* Live stage filter chips */}
++        <div className="filter-chip-group">
++          <button
++            className={`filter-chip ${priorityFilter === 'all' ? 'active' : ''}`}
++            onClick={() => setPriorityFilter('all')}
++          >
++            All <span className="chip-count">{sortedActions.length}</span>
++          </button>
++          <button
++            className={`filter-chip ${priorityFilter === 'pending' ? 'active' : ''}`}
++            onClick={() => setPriorityFilter('pending')}
++          >
++            ⏳ Pending Decision <span className="chip-count">{pendingCount}</span>
++          </button>
++          <button
++            className={`filter-chip ${priorityFilter === 'in_progress' ? 'active' : ''}`}
++            onClick={() => setPriorityFilter('in_progress')}
++          >
++            🔧 In Progress <span className="chip-count">{inProgressCount}</span>
++          </button>
++          <button
++            className={`filter-chip ${priorityFilter === 'procurement' ? 'active' : ''}`}
++            onClick={() => setPriorityFilter('procurement')}
++          >
++            📦 Procurement <span className="chip-count">{procurementCount}</span>
++          </button>
++          <button
++            className={`filter-chip ${priorityFilter === 'unresolved' ? 'active' : ''}`}
++            onClick={() => setPriorityFilter('unresolved')}
++          >
++            ⚠️ Unresolved <span className="chip-count">{unresolvedCount}</span>
++          </button>
++        </div>
++
++        {displayedActions.length === 0 ? (
+           <div className="all-clear-banner">
+-            ✓ No pending actions. All equipment accounted for.
++            {sortedActions.length === 0
++              ? '✓ No pending actions. All equipment accounted for.'
++              : `✓ No actions in "${priorityFilter.replace('_', ' ')}" stage.`}
+           </div>
+         ) : (
+-          sortedActions.map((action) => {
++          displayedActions.map((action) => {
+             const age = daysAgo(action.reported_date)
+             const isOverdue = age !== null && age >= 7
+             const isFireExtinguisher = action.equipment?.equipment_type === 'fire_extinguisher'
+@@ -1165,7 +1715,11 @@ function Dashboard({ profile, onLogout }) {
+               !needsRepairPathChoice && !needsBudgetCheck && action.status === 'pending'
+ 
+             let cardStyle = isOverdue ? 'overdue' : 'warning'
+-            if (action.status === 'delayed') cardStyle = 'overdue'
++            if (action.status === 'delayed' || action.status === 'unresolved') cardStyle = 'overdue'
++
++            const feStockObj = stock.find((s) => s.equipment_type === 'fire_extinguisher')
++            const feStockCount = feStockObj ? feStockObj.quantity_available : 0
++            const assignedTech = technicians.find((t) => t.id === action.assigned_technician_id)
+ 
+             return (
+               <div key={action.id} className={`action-card ${cardStyle}`}>
+@@ -1174,6 +1728,7 @@ function Dashboard({ profile, onLogout }) {
+                   {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
+                   {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
+                   {action.status === 'delayed' && <span className="overdue-tag">DELAYED</span>}
++                  {action.status === 'unresolved' && <span className="overdue-tag" style={{ background: '#b91c1c' }}>UNRESOLVED</span>}
+                 </div>
+                 <p>
+                   {action.equipment?.buildings?.building_name ?? 'N/A'} — {action.equipment?.exact_location}
+@@ -1217,6 +1772,32 @@ function Dashboard({ profile, onLogout }) {
+ 
+                 <div className="meta">
+                   Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
++                  {assignedTech && (
++                    <>
++                      <br />
++                      Assigned to: <strong>{assignedTech.full_name}</strong> {assignedTech.contact_info ? `(${assignedTech.contact_info})` : ''}
++                    </>
++                  )}
++                  {action.decided_by && (
++                    <>
++                      <br />
++                      Decided by <strong>{action.decided_by}</strong> · {relativeTime(action.decided_at)}
++                    </>
++                  )}
++                  {action.outcome && (
++                    <>
++                      <br />
++                      Outcome: <strong style={{ color: action.outcome === 'resolved' ? 'var(--green)' : 'var(--red)' }}>{action.outcome.toUpperCase()}</strong>
++                      {action.outcome_reason && <> — "{action.outcome_reason}"</>}
++                      {action.outcome_by && <> · Reported by <strong>{action.outcome_by}</strong> {relativeTime(action.outcome_at)}</>}
++                    </>
++                  )}
++                  {action.completed_by && !action.outcome && (
++                    <>
++                      <br />
++                      Completed by <strong>{action.completed_by}</strong>
++                    </>
++                  )}
+                 </div>
+ 
+                 {(() => {
+@@ -1273,20 +1854,42 @@ function Dashboard({ profile, onLogout }) {
+                   <div style={{ marginTop: '10px' }}>
+                     <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
+                       {isFireExtinguisher
+-                        ? 'Decision needed: replace from existing stock, or order new stock first?'
++                        ? `Decision needed: replace from existing stock (${feStockCount} available), or order new stock first?`
+                         : 'Decision needed: can this be fixed in-house, or does it need a purchase request?'}
+                     </p>
+                     <div className="action-buttons">
+                       <button
+                         className="btn btn-primary btn-sm"
+-                        onClick={() => setRepairPath(action.id, 'job_order')}
++                        onClick={() => {
++                          if (isFireExtinguisher && feStockCount === 0) {
++                            const proceed = window.confirm(
++                              `⚠ Warning: There are 0 fire extinguishers in stock.\n\nIf you choose "Replace from Stock", you will need to replenish stock before the replacement unit is available.\n\nProceed anyway?`
++                            )
++                            if (!proceed) return
++                          }
++                          setRepairPath(
++                            action.id,
++                            'job_order',
++                            action.equipment?.equipment_code,
++                            isFireExtinguisher
++                          )
++                        }}
+                         disabled={actionUpdatingId === action.id}
+                       >
+-                        {isFireExtinguisher ? 'Replace from Stock (Job Order)' : 'Job Order (technician repairs)'}
++                        {isFireExtinguisher
++                          ? `Replace from Stock (Job Order) — ${feStockCount} in stock`
++                          : 'Job Order (technician repairs)'}
+                       </button>
+                       <button
+                         className="btn btn-outline-red btn-sm"
+-                        onClick={() => setRepairPath(action.id, 'purchase_request')}
++                        onClick={() =>
++                          setRepairPath(
++                            action.id,
++                            'purchase_request',
++                            action.equipment?.equipment_code,
++                            isFireExtinguisher
++                          )
++                        }
+                         disabled={actionUpdatingId === action.id}
+                       >
+                         {isFireExtinguisher
+@@ -1297,11 +1900,7 @@ function Dashboard({ profile, onLogout }) {
+                   </div>
+                 )}
+ 
+-                {/* Purchase workflow: showing a placeholder status until the
+-                    real procurement timeline (12 or 30 working days) is
+-                    confirmed with Supply Office. The interactive budget-check
+-                    buttons re-enable once that number is settled — see
+-                    setBudgetStatus() below, which is kept intact for that. */}
++                {/* Purchase workflow: procurement with arrival & reassessment actions */}
+                 {needsBudgetCheck && (
+                   <div
+                     style={{
+@@ -1309,40 +1908,61 @@ function Dashboard({ profile, onLogout }) {
+                       background: 'var(--amber-bg)',
+                       border: '1px solid var(--amber-border)',
+                       borderRadius: '8px',
+-                      padding: '10px 14px'
++                      padding: '12px 14px'
+                     }}
+                   >
+                     <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--amber)', margin: 0 }}>
+                       Pending for procurement
+                     </p>
+-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
+-                      Awaiting confirmation of Supply Office's processing timeline.
++                    <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 10px 0' }}>
++                      Awaiting Supply Office delivery of materials or replacement units.
+                     </p>
++                    <div className="action-buttons">
++                      <button
++                        className="btn btn-primary btn-sm"
++                        onClick={() => {
++                          setSelectedTechnicianId('')
++                          setTechAssignModal({
++                            actionId: action.id,
++                            isFireExtinguisher,
++                            equipmentCode: action.equipment?.equipment_code
++                          })
++                        }}
++                        disabled={actionUpdatingId === action.id}
++                      >
++                        📦 Stock / Materials Arrived — Start Work
++                      </button>
++                      <button
++                        className="btn btn-secondary btn-sm"
++                        onClick={() => reassessAction(action.id)}
++                        disabled={actionUpdatingId === action.id}
++                      >
++                        🔄 Cancel / Reassess Route
++                      </button>
++                    </div>
+                   </div>
+                 )}
+ 
+-                {/* Job Order — no purchase involved, start the work directly.
+-                    For fire extinguishers this means "swap it from stock";
+-                    for everything else it means "our technician fixes it." */}
++                {/* Job Order — start work with technician assignment */}
+                 {needsStartWork && (
+                   <div style={{ marginTop: '10px' }}>
+                     <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
+-                      No purchase request needed for this action.
++                      Ready to assign technician and start work.
+                     </p>
+                     <div className="action-buttons">
+                       <button
+                         className="btn btn-primary btn-sm"
+-                        onClick={() =>
+-                          updateActionStatus(
+-                            action.id,
+-                            'in_progress',
+-                            action.equipment?.id,
+-                            action.equipment?.equipment_type
+-                          )
+-                        }
++                        onClick={() => {
++                          setSelectedTechnicianId('')
++                          setTechAssignModal({
++                            actionId: action.id,
++                            isFireExtinguisher,
++                            equipmentCode: action.equipment?.equipment_code
++                          })
++                        }}
+                         disabled={actionUpdatingId === action.id}
+                       >
+-                        {isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
++                        {isFireExtinguisher ? 'Start Replacement & Assign' : 'Start Job Order & Assign'}
+                       </button>
+                     </div>
+                   </div>
+@@ -1364,28 +1984,61 @@ function Dashboard({ profile, onLogout }) {
+                   </div>
+                 )}
+ 
+-                {/* Stage: In progress (budget approved, or work already started).
+-                    Completing this: fire extinguishers retire (whole-unit swap),
+-                    everything else reverts to Functional (fixed in place). */}
++                {/* Stage: In progress — close with outcome tracking or reassign technician */}
+                 {action.status === 'in_progress' && (
+-                  <div className="action-buttons">
+-                    <button
+-                      className="btn btn-primary btn-sm"
+-                      onClick={async () => {
+-                        const eq = action.equipment
+-                        await updateActionStatus(action.id, 'completed', eq?.id, eq?.equipment_type)
+-                        if (eq?.equipment_type === 'fire_extinguisher') {
+-                          setReplacementPrompt({
+-                            oldCode: eq.equipment_code,
+-                            equipment_type: eq.equipment_type,
+-                            building_id: eq.building_id,
+-                            exact_location: eq.exact_location
++                  <div style={{ marginTop: '10px' }}>
++                    <p style={{ fontSize: '0.85rem', color: 'var(--blue)', fontWeight: 600, margin: '0 0 8px 0' }}>
++                      Work is currently in progress.
++                    </p>
++                    <div className="action-buttons">
++                      <button
++                        className="btn btn-primary btn-sm"
++                        onClick={() => {
++                          setOutcomeChoice('resolved')
++                          setOutcomeReason('')
++                          setOutcomeModal(action)
++                        }}
++                        disabled={actionUpdatingId === action.id}
++                      >
++                        Record Outcome / Close Work
++                      </button>
++                      <button
++                        className="btn btn-secondary btn-sm"
++                        onClick={() => {
++                          setSelectedTechnicianId(action.assigned_technician_id || '')
++                          setTechAssignModal({
++                            actionId: action.id,
++                            isFireExtinguisher,
++                            equipmentCode: action.equipment?.equipment_code,
++                            isReassign: true
+                           })
+-                        }
+-                      }}
++                        }}
++                        disabled={actionUpdatingId === action.id}
++                      >
++                        Reassign Technician
++                      </button>
++                    </div>
++                  </div>
++                )}
++
++                {/* Stage: Unresolved — failed repair or incomplete */}
++                {action.status === 'unresolved' && (
++                  <div style={{ marginTop: '10px', background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: '8px', padding: '10px 14px' }}>
++                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--red)', margin: 0 }}>
++                      Work marked Unresolved
++                    </p>
++                    <p style={{ fontSize: '0.85rem', margin: '4px 0 8px 0' }}>
++                      Reason: <em>"{action.outcome_reason || 'No reason provided'}"</em>
++                    </p>
++                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 10px 0' }}>
++                      The equipment remains in defective status. You can reassess to try a different repair route.
++                    </p>
++                    <button
++                      className="btn btn-secondary btn-sm"
++                      onClick={() => reassessAction(action.id)}
+                       disabled={actionUpdatingId === action.id}
+                     >
+-                      Mark Completed
++                      🔄 Reassess Action
+                     </button>
+                   </div>
+                 )}
+@@ -1393,43 +2046,8 @@ function Dashboard({ profile, onLogout }) {
+             )
+           })
+         )}
+-        </div>
+-        )}
+ 
+-        {activeTab === 'dashboard' && (
+-        <div>
+-        {sortedActions.length > 0 && (
+-          <>
+-            <div className="section-heading">
+-              <h2>Needs your attention</h2>
+-              <span className="count-pill">{sortedActions.length} total</span>
+-            </div>
+-            {sortedActions.slice(0, 3).map((action) => {
+-              const age = daysAgo(action.reported_date)
+-              const isOverdue = age !== null && age >= 7
+-              return (
+-                <div
+-                  key={action.id}
+-                  className={`action-card ${action.status === 'delayed' || isOverdue ? 'overdue' : 'warning'}`}
+-                >
+-                  <div className="action-title">
+-                    ⚠ {action.equipment?.equipment_code} —{' '}
+-                    {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
+-                    {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
+-                  </div>
+-                  <p>{action.description}</p>
+-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+-                    Priority: <strong style={{ textTransform: 'capitalize' }}>{action.priority}</strong>
+-                  </p>
+-                </div>
+-              )
+-            })}
+-            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 24px' }}>
+-              Tap the Priority Actions card above to see all {sortedActions.length}.
+-            </p>
+-          </>
+-        )}
+-        <div className="section-heading">
++        <div className="section-heading" id="expiration-alerts-section" style={{ scrollMarginTop: '80px', marginTop: '36px' }}>
+           <h2>Expiration Alerts</h2>
+           {expiringEquipment.length > 0 && (
+             <span className="count-pill">{expiringEquipment.length} flagged</span>
+@@ -1617,7 +2235,7 @@ function Dashboard({ profile, onLogout }) {
+                                           >
+                                             {l.location_label}
+                                             <button
+-                                              onClick={() => deleteLocation(l.id)}
++                                              onClick={() => deleteLocation(l.id, l.floor_label, l.location_label)}
+                                               style={{
+                                                 background: 'none',
+                                                 border: 'none',
+@@ -2006,9 +2624,49 @@ function Dashboard({ profile, onLogout }) {
+                       ))}
+                     </select>
+                   </div>
++                  {/* Dropdown-only, matching Add Equipment — free text here
++                      would reintroduce exactly the typos the Add form's
++                      strict rule exists to prevent. The current value stays
++                      selectable so editing other fields never forces a
++                      location change, and legacy values aren't lost. */}
+                   <div>
+                     <label className="field-label">Exact Location</label>
+-                    <input name="exact_location" value={editForm.exact_location} onChange={handleEditChange} />
++                    {(() => {
++                      const locs = buildingLocations.filter(
++                        (loc) => loc.building_id === editForm.building_id
++                      )
++                      const options = locs.map((loc) => `${loc.floor_label} - ${loc.location_label}`)
++                      const currentIsListed = options.includes(editForm.exact_location)
++
++                      if (locs.length === 0) {
++                        return (
++                          <p style={{ fontSize: '0.85rem', color: 'var(--amber)', margin: 0 }}>
++                            This building has no floors/rooms set up. Current location:{' '}
++                            <strong>{editForm.exact_location || '—'}</strong>
++                          </p>
++                        )
++                      }
++
++                      return (
++                        <select
++                          name="exact_location"
++                          value={editForm.exact_location}
++                          onChange={handleEditChange}
++                        >
++                          {!currentIsListed && editForm.exact_location && (
++                            <option value={editForm.exact_location}>
++                              {editForm.exact_location} (current)
++                            </option>
++                          )}
++                          {!editForm.exact_location && <option value="">-- Select Location --</option>}
++                          {options.map((opt) => (
++                            <option key={opt} value={opt}>
++                              {opt}
++                            </option>
++                          ))}
++                        </select>
++                      )
++                    })()}
+                   </div>
+                   <div>
+                     <label className="field-label">QR Code Value (locked)</label>
+@@ -2188,8 +2846,385 @@ function Dashboard({ profile, onLogout }) {
+         )}
+         </div>
+         )}
++
++        {/* ===================== STOCK TAB ===================== */}
++        {activeTab === 'stock' && (
++          <div>
++            <div className="section-heading">
++              <h2>Equipment Stock Inventory</h2>
++              <span className="count-pill" style={{ background: 'var(--blue-light)', color: 'var(--blue)', borderColor: '#bfdbfe' }}>
++                Simple Count per Type
++              </span>
++            </div>
++
++            <div className="panel" style={{ marginBottom: '16px' }}>
++              <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
++                Track available replacement units kept in the GSO storeroom. When GSO staff choose
++                "Replace from Stock" on a defective fire extinguisher, the system checks this count and warns if zero.
++                Completing a stock replacement automatically deducts 1 unit.
++              </p>
++            </div>
++
++            {stockMessage && (
++              <div className="all-clear-banner" style={{ marginBottom: '14px' }}>
++                ✓ {stockMessage}
++              </div>
++            )}
++
++            <div className="panel">
++              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
++                {EQUIPMENT_TYPES.map((type) => {
++                  const s = stock.find((item) => item.equipment_type === type)
++                  const currentQty = s ? s.quantity_available : 0
++                  const isFE = type === 'fire_extinguisher'
++
++                  return (
++                    <div
++                      key={type}
++                      style={{
++                        border: '1px solid var(--border)',
++                        borderRadius: '10px',
++                        padding: '16px',
++                        background: '#fff'
++                      }}
++                    >
++                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
++                        <div style={{ fontWeight: 700, fontSize: '1rem' }}>
++                          {TYPE_LABELS[type]}
++                        </div>
++                        {isFE && (
++                          <span style={{ fontSize: '0.72rem', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)', padding: '2px 8px', borderRadius: '999px', fontWeight: 600 }}>
++                            Stock-swapped
++                          </span>
++                        )}
++                      </div>
++
++                      <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
++                        {s?.updated_by ? `Updated by ${s.updated_by} · ${relativeTime(s.updated_at)}` : 'No updates recorded yet'}
++                      </div>
++
++                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
++                        <div style={{ flex: 1 }}>
++                          <label className="field-label" style={{ fontSize: '0.78rem' }}>Available Quantity</label>
++                          <input
++                            type="number"
++                            min="0"
++                            value={stockEdits[type] !== undefined ? stockEdits[type] : currentQty}
++                            onChange={(e) => {
++                              const val = e.target.value
++                              setStockEdits((prev) => ({ ...prev, [type]: val }))
++                            }}
++                            style={{ fontWeight: 700, fontSize: '1.1rem' }}
++                          />
++                        </div>
++                        <button
++                          className="btn btn-primary btn-sm"
++                          style={{ alignSelf: 'flex-end', height: '42px' }}
++                          onClick={() => handleSaveStock(type)}
++                          disabled={stockSaving}
++                        >
++                          Save
++                        </button>
++                      </div>
++
++                      <div style={{ marginTop: '10px', fontSize: '0.8rem', color: currentQty === 0 ? 'var(--red)' : 'var(--green)', fontWeight: 600 }}>
++                        {currentQty === 0 ? '⚠ Zero units available (out of stock)' : `✓ ${currentQty} units on hand`}
++                      </div>
++                    </div>
++                  )
++                })}
++              </div>
++            </div>
++          </div>
++        )}
++
++        {/* ===================== TECHNICIANS TAB ===================== */}
++        {activeTab === 'technicians' && (
++          <div>
++            <div className="section-heading">
++              <h2>Technicians</h2>
++              <button className="btn btn-primary btn-sm" onClick={() => setShowTechnicianForm((v) => !v)}>
++                {showTechnicianForm ? 'Close' : '+ Add Technician'}
++              </button>
++            </div>
++
++            {showTechnicianForm && (
++              <div className="panel">
++                <form onSubmit={handleTechnicianSubmit} className="form-grid">
++                  <div>
++                    <label className="field-label">Full Name</label>
++                    <input
++                      placeholder="e.g. Juan Dela Cruz"
++                      value={technicianForm.full_name}
++                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, full_name: e.target.value }))}
++                    />
++                  </div>
++                  <div>
++                    <label className="field-label">Contact Information</label>
++                    <input
++                      placeholder="e.g. 0917-123-4567 / Ext. 102"
++                      value={technicianForm.contact_info}
++                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
++                    />
++                  </div>
++
++                  {technicianError && <p className="form-error">{technicianError}</p>}
++
++                  <button type="submit" className="btn btn-primary" disabled={technicianSubmitting}>
++                    {technicianSubmitting ? 'Saving...' : 'Add Technician'}
++                  </button>
++                </form>
++              </div>
++            )}
++
++            {technicians.length === 0 ? (
++              <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>No technicians registered yet.</p>
++            ) : (
++              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: '14px', marginBottom: '18px' }}>
++                {technicians.map((t) => (
++                  <div key={t.id} className="panel" style={{ margin: 0 }}>
++                    {editingTechnicianId === t.id ? (
++                      <div className="form-grid">
++                        <div>
++                          <label className="field-label">Full Name</label>
++                          <input
++                            value={editTechnicianForm.full_name}
++                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, full_name: e.target.value }))}
++                          />
++                        </div>
++                        <div>
++                          <label className="field-label">Contact Info</label>
++                          <input
++                            value={editTechnicianForm.contact_info}
++                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
++                          />
++                        </div>
++                        <div>
++                          <label className="field-label">Availability</label>
++                          <select
++                            value={editTechnicianForm.is_available ? 'yes' : 'no'}
++                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, is_available: e.target.value === 'yes' }))}
++                          >
++                            <option value="yes">Available</option>
++                            <option value="no">Unavailable</option>
++                          </select>
++                        </div>
++                        {editTechnicianError && <p className="form-error">{editTechnicianError}</p>}
++                        <div className="equipment-actions">
++                          <button className="btn btn-primary btn-sm" onClick={() => saveEditTechnician(t.id)} disabled={editTechnicianSaving}>
++                            Save
++                          </button>
++                          <button className="btn btn-secondary btn-sm" onClick={cancelEditTechnician}>
++                            Cancel
++                          </button>
++                        </div>
++                      </div>
++                    ) : (
++                      <div>
++                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
++                          <div>
++                            <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>{t.full_name}</div>
++                            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
++                              {t.contact_info || 'No contact provided'}
++                            </div>
++                          </div>
++                          <span
++                            className={`status-badge ${t.is_available ? 'active' : 'inactive-state'}`}
++                            style={{ cursor: 'pointer' }}
++                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
++                            title="Click to toggle availability"
++                          >
++                            {t.is_available ? '✓ Available' : '✕ Unavailable'}
++                          </span>
++                        </div>
++
++                        <div className="equipment-actions" style={{ marginTop: '14px' }}>
++                          <button
++                            className="btn btn-secondary btn-sm"
++                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
++                          >
++                            Set {t.is_available ? 'Unavailable' : 'Available'}
++                          </button>
++                          <button className="btn btn-secondary btn-sm" onClick={() => startEditTechnician(t)}>
++                            Edit
++                          </button>
++                          <button className="btn btn-outline-red btn-sm" onClick={() => deleteTechnician(t.id, t.full_name)}>
++                            Delete
++                          </button>
++                        </div>
++                      </div>
++                    )}
++                  </div>
++                ))}
++              </div>
++            )}
++          </div>
++        )}
++          </div>
++        </main>
+       </div>
+ 
++      {/* ===================== OUTCOME MODAL (Feature 1) ===================== */}
++      {outcomeModal && (
++        <div className="modal-overlay">
++          <div className="modal-box" style={{ maxWidth: '460px' }}>
++            <div className="modal-title">Record Work Outcome</div>
++            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
++              Equipment: <strong>{outcomeModal.equipment?.equipment_code}</strong> ({TYPE_LABELS[outcomeModal.equipment?.equipment_type] || outcomeModal.equipment?.equipment_type})
++            </p>
++
++            <div style={{ display: 'flex', gap: '10px', marginBottom: '16px' }}>
++              <label
++                style={{
++                  flex: 1,
++                  display: 'flex',
++                  alignItems: 'center',
++                  gap: '8px',
++                  padding: '10px 12px',
++                  borderRadius: '8px',
++                  border: `2px solid ${outcomeChoice === 'resolved' ? 'var(--blue)' : 'var(--border)'}`,
++                  background: outcomeChoice === 'resolved' ? 'var(--blue-light)' : '#fff',
++                  cursor: 'pointer',
++                  fontWeight: 600,
++                  fontSize: '0.9rem'
++                }}
++              >
++                <input
++                  type="radio"
++                  name="outcomeChoice"
++                  value="resolved"
++                  checked={outcomeChoice === 'resolved'}
++                  onChange={() => setOutcomeChoice('resolved')}
++                  style={{ width: 'auto', margin: 0 }}
++                />
++                Resolved (Success)
++              </label>
++
++              <label
++                style={{
++                  flex: 1,
++                  display: 'flex',
++                  alignItems: 'center',
++                  gap: '8px',
++                  padding: '10px 12px',
++                  borderRadius: '8px',
++                  border: `2px solid ${outcomeChoice === 'unresolved' ? 'var(--red)' : 'var(--border)'}`,
++                  background: outcomeChoice === 'unresolved' ? 'var(--red-bg)' : '#fff',
++                  cursor: 'pointer',
++                  fontWeight: 600,
++                  fontSize: '0.9rem'
++                }}
++              >
++                <input
++                  type="radio"
++                  name="outcomeChoice"
++                  value="unresolved"
++                  checked={outcomeChoice === 'unresolved'}
++                  onChange={() => setOutcomeChoice('unresolved')}
++                  style={{ width: 'auto', margin: 0 }}
++                />
++                Unresolved (Failed)
++              </label>
++            </div>
++
++            {outcomeChoice === 'resolved' ? (
++              <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '14px', background: 'var(--gray-bg)', padding: '10px 12px', borderRadius: '8px' }}>
++                {outcomeModal.equipment?.equipment_type === 'fire_extinguisher' ? (
++                  <>✓ <strong>{outcomeModal.equipment?.equipment_code}</strong> will be retired as <em>No Longer in Service</em>. 1 unit will be deducted from stock, and you will be asked to add the replacement unit.</>
++                ) : (
++                  <>✓ Work succeeded. <strong>{outcomeModal.equipment?.equipment_code}</strong> will revert to <strong>Functional</strong>.</>
++                )}
++              </div>
++            ) : (
++              <div style={{ fontSize: '0.85rem', color: 'var(--red)', marginBottom: '14px', background: 'var(--red-bg)', border: '1px solid var(--red-border)', padding: '10px 12px', borderRadius: '8px' }}>
++                ⚠ Work failed or could not be completed. The equipment will <strong>NOT</strong> be marked functional. This action will stay visible in Priority Actions with an <em>Unresolved</em> badge so GSO can reassess.
++              </div>
++            )}
++
++            <div>
++              <label className="field-label">
++                {outcomeChoice === 'unresolved' ? 'Reason for Failure / Notes (Required)' : 'Completion Notes (Optional)'}
++              </label>
++              <textarea
++                placeholder={outcomeChoice === 'unresolved' ? 'e.g. Technician could not fix panel; board burned, requires full replacement.' : 'e.g. Repaired and tested working.'}
++                value={outcomeReason}
++                onChange={(e) => setOutcomeReason(e.target.value)}
++                style={{ minHeight: '75px' }}
++              />
++            </div>
++
++            <div className="modal-actions" style={{ gap: '8px', marginTop: '16px' }}>
++              <button
++                className="btn btn-secondary"
++                onClick={() => {
++                  setOutcomeModal(null)
++                  setOutcomeReason('')
++                }}
++                disabled={actionUpdatingId === outcomeModal.id}
++              >
++                Cancel
++              </button>
++              <button
++                className={`btn ${outcomeChoice === 'resolved' ? 'btn-primary' : 'btn-outline-red'}`}
++                onClick={() => {
++                  if (outcomeChoice === 'unresolved' && !outcomeReason.trim()) {
++                    alert('Please enter a reason why the work could not be completed.')
++                    return
++                  }
++                  handleRecordOutcome(outcomeModal, outcomeChoice, outcomeReason)
++                }}
++                disabled={actionUpdatingId === outcomeModal.id}
++              >
++                {outcomeChoice === 'resolved' ? 'Confirm Resolved' : 'Mark Unresolved'}
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++
++      {/* ===================== TECHNICIAN ASSIGNMENT MODAL (Feature 3) ===================== */}
++      {techAssignModal && (
++        <div className="modal-overlay">
++          <div className="modal-box" style={{ maxWidth: '420px' }}>
++            <div className="modal-title">
++              {techAssignModal.isReassign ? 'Reassign Technician' : techAssignModal.isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
++            </div>
++            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
++              Assign an in-house technician to work on <strong>{techAssignModal.equipmentCode}</strong>:
++            </p>
++
++            <div style={{ marginBottom: '16px' }}>
++              <label className="field-label">Select Technician</label>
++              <select
++                value={selectedTechnicianId}
++                onChange={(e) => setSelectedTechnicianId(e.target.value)}
++              >
++                <option value="">-- Unassigned / Not specified --</option>
++                {technicians.map((t) => (
++                  <option key={t.id} value={t.id}>
++                    {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.contact_info ? `· ${t.contact_info}` : ''}
++                  </option>
++                ))}
++              </select>
++              {technicians.length === 0 && (
++                <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
++                  No technicians listed yet. You can add technicians anytime in the Technicians tab.
++                </p>
++              )}
++            </div>
++
++            <div className="modal-actions" style={{ gap: '8px' }}>
++              <button className="btn btn-secondary" onClick={() => setTechAssignModal(null)}>
++                Cancel
++              </button>
++              <button className="btn btn-primary" onClick={handleConfirmStartWork}>
++                {techAssignModal.isReassign ? 'Save Assignment' : 'Start Work'}
++              </button>
++            </div>
++          </div>
++        </div>
++      )}
++
+       {qrPrintItems.length > 0 && (
+         <div className="qr-print-area">
+           <h2 className="qr-print-title">NBSC Fire Safety Equipment — QR Labels</h2>
+@@ -2222,6 +3257,18 @@ function Dashboard({ profile, onLogout }) {
+           </div>
+         </div>
+       )}
++
++      {showBackToTop && (
++        <button
++          className="back-to-top-btn"
++          onClick={scrollToTop}
++          title="Back to Top"
++          aria-label="Back to Top"
++        >
++          <span className="back-to-top-arrow">↑</span>
++          <span className="back-to-top-text">Back to Top</span>
++        </button>
++      )}
+     </div>
+   )
+ }
+diff --git a/capstone-system/src/index.css b/capstone-system/src/index.css
+index 9a1d146..92cac4c 100644
+--- a/capstone-system/src/index.css
++++ b/capstone-system/src/index.css
+@@ -40,6 +40,9 @@ h1, h2, h3 {
+ 
+ /* ===== Header ===== */
+ .app-header {
++  position: sticky;
++  top: 0;
++  z-index: 100;
+   background: linear-gradient(180deg, var(--navy) 0%, var(--navy-dark) 100%);
+   color: #fff;
+   padding: 18px 28px;
+@@ -48,6 +51,7 @@ h1, h2, h3 {
+   justify-content: space-between;
+   flex-wrap: wrap;
+   gap: 12px;
++  box-shadow: 0 2px 8px rgba(15, 42, 74, 0.15);
+ }
+ 
+ .app-header .title-block {
+@@ -590,10 +594,8 @@ textarea {
+   display: flex;
+   justify-content: flex-end;
+ }
+-/* ============================================================
+-   QR LABELS — append this to the END of src/index.css
+-   ============================================================ */
+ 
++/* ===== QR labels ===== */
+ .qr-label {
+   display: flex;
+   align-items: center;
+@@ -659,8 +661,13 @@ textarea {
+ 
+ @media print {
+   /* Remove the dashboard from the layout entirely, not just from view.
+-     `visibility: hidden` would leave its full height behind and emit blank pages. */
++     `visibility: hidden` would leave its full height behind and emit
++     blank pages. .tab-strip sits between the header and page-wrap, so
++     it has to be named explicitly or it prints on every label sheet. */
+   .app-header,
++  .app-layout,
++  .app-sidebar,
++  .tab-strip,
+   .page-wrap,
+   .modal-overlay {
+     display: none !important;
+@@ -682,10 +689,8 @@ textarea {
+     margin: 12mm;
+   }
+ }
+-/* ============================================================
+-   PASSWORD SHOW/HIDE TOGGLE — append to the END of src/index.css
+-   ============================================================ */
+ 
++/* ===== Password show/hide toggle ===== */
+ .password-field-wrap {
+   position: relative;
+   display: flex;
+@@ -694,7 +699,7 @@ textarea {
+ 
+ .password-field-wrap input {
+   width: 100%;
+-  padding-right: 42px; /* room for the eye button so text never overlaps it */
++  padding-right: 42px;
+ }
+ 
+ .password-toggle-btn {
+@@ -722,6 +727,8 @@ textarea {
+   outline: 2px solid var(--blue);
+   outline-offset: 1px;
+ }
++
++/* ===== Tab navigation ===== */
+ .tab-strip {
+   display: flex;
+   background: var(--card);
+@@ -729,7 +736,7 @@ textarea {
+   padding: 0 22px;
+   gap: 4px;
+ }
+- 
++
+ .tab-item {
+   background: transparent;
+   border: none;
+@@ -740,42 +747,396 @@ textarea {
+   color: var(--text-muted);
+   cursor: pointer;
+ }
+- 
++
+ .tab-item:hover {
+   color: var(--text);
+ }
+- 
++
+ .tab-item.active {
+   color: var(--blue);
+   border-bottom-color: var(--blue);
+ }
+- 
++
+ .stat-card-clickable {
+   cursor: pointer;
+   text-align: left;
+   font-family: inherit;
+   transition: border-color 0.12s ease, box-shadow 0.12s ease;
+ }
+- 
++
+ .stat-card-clickable:hover {
+   border-color: var(--blue);
+   box-shadow: 0 2px 6px rgba(15, 42, 74, 0.08);
+ }
+- 
++
+ .app-header-compact {
+-  padding: 12px 22px;
++  height: 64px;
++  box-sizing: border-box;
++  padding: 0 22px;
++  display: flex;
++  align-items: center;
+ }
+- 
++
+ .app-header-compact .title-block {
+   gap: 10px;
+ }
+- 
++
+ .app-header-compact .badge-icon {
+   width: 34px;
+   height: 34px;
+   font-size: 17px;
+ }
+- 
++
+ .app-header-compact h1 {
+   font-size: 1.15rem;
+ }
++
++/* ===== App Layout with Animated Expanding Sidebar ===== */
++.app-layout {
++  display: flex;
++  min-height: calc(100vh - 64px);
++  position: relative;
++  align-items: flex-start;
++}
++
++.app-sidebar {
++  position: sticky;
++  top: 64px;
++  height: calc(100vh - 64px);
++  align-self: flex-start;
++  width: 72px;
++  flex-shrink: 0;
++  background: var(--card);
++  border-right: 1px solid var(--border);
++  padding: 20px 10px;
++  display: flex;
++  flex-direction: column;
++  gap: 20px;
++  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.28s ease, padding 0.28s ease;
++  overflow-y: auto;
++  overflow-x: hidden;
++  white-space: nowrap;
++  scrollbar-width: thin;
++  z-index: 90;
++}
++
++.app-sidebar:hover {
++  width: 240px;
++  padding: 20px 14px;
++  box-shadow: 4px 0 18px rgba(15, 42, 74, 0.08);
++}
++
++.sidebar-nav {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++
++.sidebar-item {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  width: 100%;
++  height: 44px;
++  background: transparent;
++  border: none;
++  border-radius: 8px;
++  padding: 0 12px;
++  color: var(--text-muted);
++  cursor: pointer;
++  transition: background 0.15s ease, color 0.15s ease, padding 0.2s ease;
++}
++
++.sidebar-item:hover {
++  background: var(--gray-bg);
++  color: var(--text);
++}
++
++.sidebar-item.active {
++  background: var(--blue-light);
++  color: var(--blue);
++  font-weight: 700;
++}
++
++/* Normal (minimized): ONLY the emoji icon is visible */
++.sidebar-icon {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  font-size: 1.35rem;
++  line-height: 1;
++}
++
++.sidebar-text {
++  display: none;
++  font-size: 0.95rem;
++  font-weight: 600;
++  color: inherit;
++}
++
++/* Hovered (expanded): emoji is hidden, clean text expands without emojis */
++.app-sidebar:hover .sidebar-item {
++  justify-content: flex-start;
++  padding: 0 16px;
++}
++
++.app-sidebar:hover .sidebar-icon {
++  display: none !important;
++}
++
++.app-sidebar:hover .sidebar-text {
++  display: block;
++  animation: sidebarFadeIn 0.22s ease-in-out;
++}
++
++/* Sidebar Alerts Section */
++.sidebar-section {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  margin-top: 6px;
++  border-top: 1px solid var(--border);
++  padding-top: 16px;
++}
++
++.sidebar-section-header {
++  display: none;
++  font-size: 0.72rem;
++  font-weight: 700;
++  color: var(--text-muted);
++  text-transform: uppercase;
++  letter-spacing: 0.6px;
++  padding: 0 8px;
++}
++
++.app-sidebar:hover .sidebar-section-header {
++  display: block;
++  animation: sidebarFadeIn 0.22s ease-in-out;
++}
++
++.sidebar-stat-card {
++  width: 100%;
++  background: #fff;
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
++  padding: 8px;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  cursor: pointer;
++  box-shadow: 0 1px 2px rgba(15, 42, 74, 0.04);
++  transition: all 0.2s ease;
++  position: relative;
++}
++
++.sidebar-stat-card:hover {
++  border-color: var(--amber);
++  box-shadow: 0 2px 6px rgba(180, 83, 9, 0.12);
++}
++
++.sidebar-alert-icon {
++  position: relative;
++  width: 44px;
++  height: 44px;
++  margin: 0 auto;
++  border-radius: 10px;
++  font-size: 1.35rem;
++}
++
++.sidebar-badge-dot {
++  position: absolute;
++  top: -5px;
++  right: -5px;
++  background: var(--red);
++  color: #fff;
++  font-size: 0.7rem;
++  font-weight: 700;
++  min-width: 18px;
++  height: 18px;
++  border-radius: 999px;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  padding: 0 4px;
++  border: 2px solid #fff;
++}
++
++.sidebar-alert-details {
++  display: none;
++  text-align: left;
++}
++
++/* On hover: alert card expands, emoji disappears, text details appear */
++.app-sidebar:hover .sidebar-stat-card {
++  justify-content: flex-start;
++  padding: 12px 14px;
++}
++
++.app-sidebar:hover .sidebar-alert-icon {
++  display: none !important;
++}
++
++.app-sidebar:hover .sidebar-alert-details {
++  display: block;
++  animation: sidebarFadeIn 0.22s ease-in-out;
++}
++
++.sidebar-expiring-mini {
++  display: none;
++}
++
++.app-sidebar:hover .sidebar-expiring-mini {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  background: var(--gray-bg);
++  border-radius: 8px;
++  padding: 8px 10px;
++  animation: sidebarFadeIn 0.22s ease-in-out;
++}
++
++.sidebar-expiring-mini-row {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  font-size: 0.8rem;
++}
++
++.mini-tag {
++  font-size: 0.72rem;
++  font-weight: 700;
++  padding: 2px 6px;
++  border-radius: 999px;
++}
++
++.mini-tag.alert {
++  background: var(--red-bg);
++  color: var(--red);
++}
++
++.mini-tag.warn {
++  background: var(--amber-bg);
++  color: var(--amber);
++}
++
++@keyframes sidebarFadeIn {
++  from {
++    opacity: 0;
++    transform: translateX(-4px);
++  }
++  to {
++    opacity: 1;
++    transform: translateX(0);
++  }
++}
++
++.main-content {
++  flex: 1;
++  min-width: 0;
++}
++
++@media (max-width: 860px) {
++  .app-layout {
++    flex-direction: column;
++  }
++  .app-sidebar {
++    width: 100%;
++    border-right: none;
++    border-bottom: 1px solid var(--border);
++  }
++  .app-sidebar:hover {
++    width: 100%;
++  }
++}
++
++/* ===== Back to Top Floating Button ===== */
++.back-to-top-btn {
++  position: fixed;
++  bottom: 24px;
++  right: 24px;
++  z-index: 999;
++  background: var(--navy);
++  color: #fff;
++  border: 1px solid rgba(255, 255, 255, 0.22);
++  border-radius: 999px;
++  padding: 10px 18px;
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++  font-size: 0.85rem;
++  font-weight: 600;
++  cursor: pointer;
++  box-shadow: 0 4px 18px rgba(15, 42, 74, 0.28);
++  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
++  animation: backToTopFadeIn 0.25s ease-out;
++}
++
++.back-to-top-btn:hover {
++  background: var(--navy-dark);
++  transform: translateY(-3px);
++  box-shadow: 0 8px 24px rgba(15, 42, 74, 0.38);
++}
++
++.back-to-top-arrow {
++  font-size: 1.1rem;
++  font-weight: 700;
++  line-height: 1;
++}
++
++@keyframes backToTopFadeIn {
++  from {
++    opacity: 0;
++    transform: translateY(12px);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0);
++  }
++}
++
++/* ===== Priority Actions Live Filter Chips ===== */
++.filter-chip-group {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++  margin: 10px 0 18px 0;
++}
++
++.filter-chip {
++  background: var(--card);
++  border: 1px solid var(--border);
++  border-radius: 999px;
++  padding: 6px 14px;
++  font-size: 0.82rem;
++  font-weight: 600;
++  color: var(--text-muted);
++  cursor: pointer;
++  transition: all 0.18s ease;
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++}
++
++.filter-chip:hover {
++  background: var(--gray-bg);
++  color: var(--text);
++  border-color: #cbd5e1;
++}
++
++.filter-chip.active {
++  background: var(--navy);
++  color: #fff;
++  border-color: var(--navy);
++}
++
++.filter-chip .chip-count {
++  font-size: 0.73rem;
++  padding: 1px 6px;
++  border-radius: 999px;
++  background: rgba(0, 0, 0, 0.08);
++}
++
++.filter-chip.active .chip-count {
++  background: rgba(255, 255, 255, 0.22);
++  color: #fff;
++}
+\ No newline at end of file

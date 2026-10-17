@@ -1095,7 +1095,22 @@ function Dashboard({ profile, onLogout }) {
   // Start Job Order / Replacement with technician assignment
   async function handleConfirmStartWork() {
     if (!techAssignModal) return
-    const { actionId, isFireExtinguisher } = techAssignModal
+    const { actionId, isFireExtinguisher, equipmentCode, isReassign } = techAssignModal
+
+    // Reassigning only changes who is on the job, so it needs no extra pause.
+    // Starting work is the real commitment, so it states what it does first.
+    if (!isReassign) {
+      const tech = technicians.find((t) => t.id === selectedTechnicianId)
+      const techLine = tech
+        ? `Assigned technician: ${tech.full_name}${tech.is_available ? '' : ' (currently marked Unavailable)'}.`
+        : 'No technician is selected, so this will be started unassigned.'
+
+      const message = isFireExtinguisher
+        ? `Start replacement of ${equipmentCode}?\n\n${techLine}\n\nThe action will be marked In Progress.`
+        : `Start Job Order for ${equipmentCode}?\n\n${techLine}\n\nThe action will be marked In Progress.`
+
+      if (!window.confirm(message)) return
+    }
 
     setActionUpdatingId(actionId)
     const payload = {
@@ -3171,6 +3186,16 @@ function Dashboard({ profile, onLogout }) {
                     alert('Please enter a reason why the work could not be completed.')
                     return
                   }
+
+                  if (outcomeChoice === 'resolved') {
+                    const code = outcomeModal.equipment?.equipment_code
+                    const isFE = outcomeModal.equipment?.equipment_type === 'fire_extinguisher'
+                    const message = isFE
+                      ? `Confirm ${code} is resolved?\n\nThis is permanent. ${code} will be retired as No Longer in Service, 1 unit will be deducted from stock, and you will be asked to add its replacement.\n\nThis cannot be undone from the dashboard.`
+                      : `Confirm ${code} is resolved?\n\nThe work succeeded and ${code} will return to Functional.`
+                    if (!window.confirm(message)) return
+                  }
+
                   handleRecordOutcome(outcomeModal, outcomeChoice, outcomeReason)
                 }}
                 disabled={actionUpdatingId === outcomeModal.id}
