@@ -649,7 +649,7 @@ function Dashboard({ profile, onLogout }) {
   }
 
   async function getMaintenanceActions() {
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('maintenance_actions')
       .select(`
         id, action_type, description, priority, status, reported_date, due_date,
@@ -663,8 +663,30 @@ function Dashboard({ profile, onLogout }) {
       .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
       .order('reported_date', { ascending: true })
 
-    if (error) console.error('Error fetching maintenance actions:', error)
-    else setMaintenanceActions(data || [])
+    if (error) {
+      // Graceful fallback if the SQL migration has not been run in Supabase yet
+      console.warn('Extended columns not found, using base query:', error.message)
+      const fallback = await supabase
+        .from('maintenance_actions')
+        .select(`
+          id, action_type, description, priority, status, reported_date, due_date,
+          disposition, budget_status, repair_path,
+          decided_by, decided_at, completed_by,
+          equipment ( id, equipment_code, equipment_type, exact_location, building_id,
+            buildings ( building_name )
+          )
+        `)
+        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal'])
+        .order('reported_date', { ascending: true })
+
+      if (fallback.error) {
+        console.error('Error fetching maintenance actions:', fallback.error)
+      } else {
+        setMaintenanceActions(fallback.data || [])
+      }
+    } else {
+      setMaintenanceActions(data || [])
+    }
   }
 
   async function getStock() {
