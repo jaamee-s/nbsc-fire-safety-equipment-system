@@ -1,6 +1,6 @@
 -- ============================================================
 -- Migration: Work Outcome Tracking + Stock + Technicians
--- Run in Supabase SQL Editor before deploying code changes.
+-- Run in Supabase Dashboard -> SQL Editor -> New Query -> Run
 -- ============================================================
 
 -- 1. Add outcome tracking columns to maintenance_actions
@@ -12,7 +12,6 @@ ALTER TABLE maintenance_actions
   ADD COLUMN IF NOT EXISTS assigned_technician_id uuid;
 
 -- Update the status check constraint to include 'unresolved'
--- (drop existing constraint first — name may vary across environments)
 DO $$
 BEGIN
   BEGIN
@@ -51,11 +50,25 @@ ON CONFLICT (equipment_type) DO NOTHING;
 -- RLS for equipment_stock
 ALTER TABLE equipment_stock ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Authenticated users can read stock" ON equipment_stock;
 CREATE POLICY "Authenticated users can read stock"
   ON equipment_stock FOR SELECT
   TO authenticated
   USING (true);
 
+DROP POLICY IF EXISTS "Admin/manager can insert stock" ON equipment_stock;
+CREATE POLICY "Admin/manager can insert stock"
+  ON equipment_stock FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM profiles
+      WHERE profiles.id = auth.uid()
+      AND profiles.role IN ('admin', 'manager')
+    )
+  );
+
+DROP POLICY IF EXISTS "Admin/manager can update stock" ON equipment_stock;
 CREATE POLICY "Admin/manager can update stock"
   ON equipment_stock FOR UPDATE
   TO authenticated
@@ -80,11 +93,13 @@ CREATE TABLE IF NOT EXISTS technicians (
 -- RLS for technicians
 ALTER TABLE technicians ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Authenticated users can read technicians" ON technicians;
 CREATE POLICY "Authenticated users can read technicians"
   ON technicians FOR SELECT
   TO authenticated
   USING (true);
 
+DROP POLICY IF EXISTS "Admin/manager can insert technicians" ON technicians;
 CREATE POLICY "Admin/manager can insert technicians"
   ON technicians FOR INSERT
   TO authenticated
@@ -96,6 +111,7 @@ CREATE POLICY "Admin/manager can insert technicians"
     )
   );
 
+DROP POLICY IF EXISTS "Admin/manager can update technicians" ON technicians;
 CREATE POLICY "Admin/manager can update technicians"
   ON technicians FOR UPDATE
   TO authenticated
@@ -107,6 +123,7 @@ CREATE POLICY "Admin/manager can update technicians"
     )
   );
 
+DROP POLICY IF EXISTS "Admin/manager can delete technicians" ON technicians;
 CREATE POLICY "Admin/manager can delete technicians"
   ON technicians FOR DELETE
   TO authenticated
@@ -119,9 +136,16 @@ CREATE POLICY "Admin/manager can delete technicians"
   );
 
 -- FK from maintenance_actions to technicians (nullable)
-ALTER TABLE maintenance_actions
-  ADD CONSTRAINT fk_assigned_technician
-  FOREIGN KEY (assigned_technician_id)
-  REFERENCES technicians(id)
-  ON DELETE SET NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'fk_assigned_technician'
+  ) THEN
+    ALTER TABLE maintenance_actions
+      ADD CONSTRAINT fk_assigned_technician
+      FOREIGN KEY (assigned_technician_id)
+      REFERENCES technicians(id)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
 

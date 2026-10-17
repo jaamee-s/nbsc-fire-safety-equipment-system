@@ -1116,7 +1116,11 @@ function Dashboard({ profile, onLogout }) {
       })
 
     if (error) {
-      alert('Failed to update stock: ' + error.message)
+      if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
+        alert('Database table "equipment_stock" has not been created yet in Supabase.\n\nPlease run the SQL migration (001_outcome_stock_technicians.sql) in your Supabase SQL Editor.')
+      } else {
+        alert('Failed to update stock: ' + error.message)
+      }
     } else {
       setStockMessage(`Stock for ${TYPE_LABELS[type]} updated.`)
       setTimeout(() => setStockMessage(null), 3000)
@@ -1145,7 +1149,11 @@ function Dashboard({ profile, onLogout }) {
     ])
 
     if (error) {
-      setTechnicianError(error.message)
+      if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
+        setTechnicianError('Database table "technicians" has not been created yet in Supabase. Please run the SQL migration (001_outcome_stock_technicians.sql) in your Supabase SQL Editor.')
+      } else {
+        setTechnicianError(error.message)
+      }
     } else {
       setTechnicianForm({ full_name: '', contact_info: '' })
       setShowTechnicianForm(false)
