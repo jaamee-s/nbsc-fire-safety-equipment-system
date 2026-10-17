@@ -96,6 +96,23 @@ export const FINDINGS_BY_TYPE = {
 export const OTHER_FINDING = '__other__'
 
 // ---------------------------------------------------------------------------
+// Network errors. Signal inside concrete buildings is unreliable, and the
+// raw messages ("TypeError: Network request failed") mean nothing to an
+// inspector standing in a stairwell. Turn them into something actionable.
+// ---------------------------------------------------------------------------
+
+const NO_CONNECTION = 'No connection. Check your signal and try again.'
+
+function isNetworkMessage(message) {
+  return /network request failed|failed to fetch|network error|timed out/i.test(message || '')
+}
+
+function toError(prefix, err) {
+  const message = err?.message || String(err)
+  return new Error(isNetworkMessage(message) ? NO_CONNECTION : `${prefix}${message}`)
+}
+
+// ---------------------------------------------------------------------------
 // Inspector identity — asked once, stored on the device.
 // Identity without authentication: no login, but every record is attributable.
 // ---------------------------------------------------------------------------
@@ -131,17 +148,23 @@ export async function findEquipmentByQrCode(scannedValue) {
   const code = (scannedValue || '').trim()
   if (!code) throw new Error('Empty code.')
 
-  const { data, error } = await supabase
-    .from('equipment')
-    .select(`
-      id, equipment_code, equipment_type, exact_location,
-      current_status, expiration_date, description,
-      buildings ( building_name )
-    `)
-    .eq('qr_code', code)
-    .maybeSingle()
+  let result
+  try {
+    result = await supabase
+      .from('equipment')
+      .select(`
+        id, equipment_code, equipment_type, exact_location,
+        current_status, expiration_date, description,
+        buildings ( building_name )
+      `)
+      .eq('qr_code', code)
+      .maybeSingle()
+  } catch (err) {
+    throw toError('Lookup failed: ', err)
+  }
 
-  if (error) throw new Error('Lookup failed: ' + error.message)
+  const { data, error } = result
+  if (error) throw toError('Lookup failed: ', error)
   if (!data) throw new Error(`No equipment found for "${code}".`)
 
   return data
@@ -154,6 +177,9 @@ export async function findEquipmentByQrCode(scannedValue) {
 //   1. insert the inspection (server-side timestamp, inspector name)
 //   2. update equipment.current_status
 //   3. if defective, create a pending maintenance_action for GSO
+//
+// The database also refuses inspections on retired (no_longer_in_service)
+// equipment, so that rule holds even if this app's screen is stale.
 // ---------------------------------------------------------------------------
 
 export async function submitInspection({
@@ -178,18 +204,23 @@ export async function submitInspection({
   // p_recommended_action is passed as null on purpose. It duplicated
   // action_type in free text and the two could disagree. The database
   // falls back to findings for the maintenance action's description.
-  const { error } = await supabase.rpc('submit_inspector_inspection', {
-    p_equipment_id: equipmentId,
-    p_condition_status: conditionStatus,
-    p_findings: findings || null,
-    p_recommended_action: null,
-    p_inspection_notes: inspectionNotes || null,
-    p_action_type: actionType || 'other',
-    p_priority: priority || 'medium',
-    p_inspector_name: inspectorName.trim()
-  })
+  let result
+  try {
+    result = await supabase.rpc('submit_inspector_inspection', {
+      p_equipment_id: equipmentId,
+      p_condition_status: conditionStatus,
+      p_findings: (findings || '').trim() || null,
+      p_recommended_action: null,
+      p_inspection_notes: (inspectionNotes || '').trim() || null,
+      p_action_type: actionType || 'other',
+      p_priority: priority || 'medium',
+      p_inspector_name: inspectorName.trim()
+    })
+  } catch (err) {
+    throw toError('Submission failed: ', err)
+  }
 
-  if (error) throw new Error('Submission failed: ' + error.message)
+  if (result.error) throw toError('Submission failed: ', result.error)
   return { success: true }
 }
 
@@ -203,12 +234,17 @@ export async function submitInspection({
 // ---------------------------------------------------------------------------
 
 export async function getInspectorDashboard(inspectorName) {
-  const { data, error } = await supabase.rpc('get_inspector_dashboard', {
-    p_inspector_name: (inspectorName || '').trim()
-  })
+  let result
+  try {
+    result = await supabase.rpc('get_inspector_dashboard', {
+      p_inspector_name: (inspectorName || '').trim()
+    })
+  } catch (err) {
+    throw toError('Could not load dashboard: ', err)
+  }
 
-  if (error) throw new Error('Could not load dashboard: ' + error.message)
-  return data
+  if (result.error) throw toError('Could not load dashboard: ', result.error)
+  return result.data
 }
 
 // "3 days ago", "just now" — for dashboard lists.
@@ -223,14 +259,25 @@ export function relativeTime(dateString) {
   if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
   const months = Math.floor(days / 30)
   if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`
-  return `${Math.floor(months / 12)} year(s) ago`
+  const years = Math.floor(months / 12)
+  return `${years} year${years === 1 ? '' : 's'} ago`
 }
 
 // Days until expiry — negative means already expired.
+//
+// A bare 'YYYY-MM-DD' string is parsed by JavaScript as UTC midnight, which
+// in timezones behind UTC lands on the previous local day and makes every
+// expiry read one day early. Building the date from its parts keeps it on
+// the calendar day it was entered as, in any timezone.
 export function daysUntil(dateString) {
   if (!dateString) return null
-  const target = new Date(dateString)
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString)
+  const target = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(dateString)
   target.setHours(0, 0, 0, 0)
+
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   return Math.round((target - today) / 86400000)

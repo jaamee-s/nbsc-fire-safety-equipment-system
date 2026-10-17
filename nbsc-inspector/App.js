@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   ActivityIndicator,
+  Alert,
+  BackHandler,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   RefreshControl,
@@ -53,6 +56,11 @@ const C = {
   muted: '#64748B',
   white: '#FFFFFF'
 }
+
+// Statuses that mean "a problem is already reported on this unit and GSO
+// is (or will be) acting on it". Used to warn before creating a duplicate
+// action for the same unit.
+const OPEN_PROBLEM_STATUSES = ['defective', 'for_repair', 'for_replacement']
 
 // These only need to answer "does this fall in the same window the stat box
 // counted?" — used purely to filter the already-fetched recent-inspections
@@ -125,6 +133,26 @@ function RootApp() {
       setScreen(next)
     }
   }
+
+  // Android's hardware/gesture Back button used to close the whole app from
+  // any screen, throwing away a half-finished inspection. Now it steps back
+  // one screen like every other app, and only exits from Home / name setup.
+  useEffect(() => {
+    const onBack = () => {
+      if (screen === null) return true
+      if (screen === 'scan' || screen === 'manual' || screen === 'detail' || screen === 'done') {
+        goHome()
+        return true
+      }
+      if (screen === 'form') {
+        setScreen('detail')
+        return true
+      }
+      return false
+    }
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBack)
+    return () => sub.remove()
+  }, [screen])
 
   return (
     <SafeAreaView key={screen} style={s.safe} edges={['top', 'left', 'right', 'bottom']}>
@@ -271,6 +299,9 @@ function NameSetup({ onSaved }) {
 function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  // Separate from `loading` so pull-to-refresh actually shows its spinner
+  // while the reload runs (before, `loading` was never set back to true).
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState(null)
   // Which stat box's detail list is currently open, if any.
   const [openStat, setOpenStat] = useState(null)
@@ -289,7 +320,14 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
     load()
   }, [load])
 
+  async function onRefresh() {
+    setRefreshing(true)
+    await load()
+    setRefreshing(false)
+  }
+
   async function openFromDue(code) {
+    setError(null)
     try {
       onOpenEquipment(await findEquipmentByQrCode(code))
     } catch (err) {
@@ -297,10 +335,17 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
     }
   }
 
+  // Retired units are never "due" for anything. The database function is
+  // the real filter; this is a second guard so a retired unit can never
+  // sit at the top of an inspector's to-do list even if the function lags.
+  const dueList = ((data && data.due) || []).filter(
+    (d) => d.current_status !== 'no_longer_in_service'
+  )
+
   return (
     <ScrollView
       contentContainerStyle={s.scroll}
-      refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
       <Pressable style={s.scanCta} onPress={onScan}>
         <Text style={s.scanCtaIcon}>▣</Text>
@@ -422,33 +467,45 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
           <Text style={s.sectionTitle}>Due for inspection</Text>
           <Text style={s.sectionHint}>Longest since last check — start here.</Text>
           <View style={s.card}>
-            {(data.due || []).length === 0 ? (
+            {dueList.length === 0 ? (
               <Text style={s.muted}>No equipment registered yet.</Text>
             ) : (
-              data.due.map((d, i) => (
-                <Pressable
-                  key={d.id}
-                  style={[s.listRow, i === data.due.length - 1 && s.listRowLast]}
-                  onPress={() => openFromDue(d.equipment_code)}
-                >
-                  <View style={s.flex}>
-                    <Text style={s.listCode}>{d.equipment_code}</Text>
-                    <Text style={s.listMeta}>
-                      {TYPE_LABELS[d.equipment_type] || d.equipment_type}
-                      {d.building_name ? ` · ${d.building_name}` : ''}
-                    </Text>
-                    <Text style={s.listMeta}>{d.exact_location}</Text>
-                  </View>
-                  <Text
-                    style={[
-                      s.listWhen,
-                      !d.last_inspected && { color: C.red, fontWeight: '700' }
-                    ]}
+              dueList.map((d, i) => {
+                const needsAttention = d.current_status && d.current_status !== 'functional'
+                return (
+                  <Pressable
+                    key={d.id}
+                    style={[s.listRow, i === dueList.length - 1 && s.listRowLast]}
+                    onPress={() => openFromDue(d.equipment_code)}
                   >
-                    {relativeTime(d.last_inspected)}
-                  </Text>
-                </Pressable>
-              ))
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{d.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
+                        {d.building_name ? ` · ${d.building_name}` : ''}
+                      </Text>
+                      <Text style={s.listMeta}>{d.exact_location}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                      <Text
+                        style={[
+                          s.listWhen,
+                          !d.last_inspected && { color: C.red, fontWeight: '700' }
+                        ]}
+                      >
+                        {relativeTime(d.last_inspected)}
+                      </Text>
+                      {needsAttention && (
+                        <View style={[s.tag, s.tagRed]}>
+                          <Text style={[s.tagText, { color: C.red }]}>
+                            {STATUS_LABELS[d.current_status] || d.current_status}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </Pressable>
+                )
+              })
             )}
           </View>
 
@@ -554,6 +611,11 @@ function ScanScreen({ onFound, onCancel, onManual }) {
   }
 
   if (!permission.granted) {
+    // If the user chose "Don't ask again", requestPermission() silently does
+    // nothing, which left the old "Allow Camera" button dead. In that case
+    // the only way forward is the phone's own app settings.
+    const blocked = permission.canAskAgain === false
+
     return (
       <ScrollView
         contentContainerStyle={[s.scroll, { paddingBottom: insets.bottom + 16 }]}
@@ -563,10 +625,19 @@ function ScanScreen({ onFound, onCancel, onManual }) {
           <Text style={s.muted}>
             The app uses the camera only to read equipment QR stickers. No photos are
             taken or uploaded.
+            {blocked
+              ? ' Camera access was turned off for this app, so it has to be re-enabled in the phone\'s settings.'
+              : ''}
           </Text>
-          <Pressable style={[s.btn, s.btnPrimary]} onPress={requestPermission}>
-            <Text style={s.btnPrimaryText}>Allow Camera</Text>
-          </Pressable>
+          {blocked ? (
+            <Pressable style={[s.btn, s.btnPrimary]} onPress={() => Linking.openSettings()}>
+              <Text style={s.btnPrimaryText}>Open Settings</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={[s.btn, s.btnPrimary]} onPress={requestPermission}>
+              <Text style={s.btnPrimaryText}>Allow Camera</Text>
+            </Pressable>
+          )}
           <Pressable style={[s.btn, s.btnOutline]} onPress={onManual}>
             <Text style={s.btnOutlineText}>Enter code manually instead</Text>
           </Pressable>
@@ -719,14 +790,16 @@ function ManualEntry({ onFound, onCancel }) {
 
 function EquipmentDetail({ equipment, onInspect, onCancel }) {
   const left = daysUntil(equipment.expiration_date)
-  const expired = left !== null && left < 0
-  const expiringSoon = left !== null && left >= 0 && left <= 30
-  const isFunctional = equipment.current_status === 'functional'
   // Permanently retired equipment has nothing left to inspect — a disposed
   // fire extinguisher is physically gone, and anything else in this state
   // was already confirmed beyond repair. Blocking here also prevents a
   // stray inspection from silently reviving a status GSO deliberately set.
   const isRetired = equipment.current_status === 'no_longer_in_service'
+  // An expiry warning on a unit that's already been retired is noise.
+  const expired = !isRetired && left !== null && left < 0
+  const expiringSoon = !isRetired && left !== null && left >= 0 && left <= 30
+  const isFunctional = equipment.current_status === 'functional'
+  const alreadyReported = OPEN_PROBLEM_STATUSES.includes(equipment.current_status)
 
   return (
     <ScrollView contentContainerStyle={s.scroll}>
@@ -758,6 +831,15 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
           <View style={[s.banner, s.bannerAmber]}>
             <Text style={s.bannerAmberText}>
               {left === 0 ? 'Expires today.' : `Expires in ${left} days.`}
+            </Text>
+          </View>
+        )}
+
+        {alreadyReported && (
+          <View style={[s.banner, s.bannerAmber]}>
+            <Text style={s.bannerAmberText}>
+              A problem is already reported on this unit and GSO is handling it. Only
+              inspect again if its condition has changed.
             </Text>
           </View>
         )}
@@ -810,6 +892,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
 
   const defective = condition === 'defective'
   const isOther = selectedFinding === OTHER_FINDING
+  const alreadyReported = OPEN_PROBLEM_STATUSES.includes(equipment.current_status)
 
   // Choosing a finding sets what it implies. Both stay overridable, but the
   // override rows stay collapsed so the fast path is: finding, submit.
@@ -830,7 +913,11 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
       await submitInspection({
         equipmentId: equipment.id,
         conditionStatus: condition,
-        findings: findingsText,
+        // Only a defective inspection carries findings. Before, tapping
+        // Defective, picking a finding, then switching to Functional still
+        // submitted that finding — so GSO's history showed a "Functional"
+        // inspection with "Gauge in red zone" under it.
+        findings: defective ? findingsText : '',
         inspectionNotes: notes,
         actionType,
         priority,
@@ -841,6 +928,30 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
       setError(err.message)
     }
     setSaving(false)
+  }
+
+  // Each defective submission creates a new Priority Action on the web
+  // dashboard. If the unit is already defective / for repair / for
+  // replacement, submitting again would create a duplicate card for GSO,
+  // so confirm first. (Alert.alert does nothing on the web preview, so the
+  // browser gets window.confirm instead.)
+  function handleSubmitPress() {
+    if (defective && alreadyReported) {
+      const title = 'Already reported'
+      const message = `${equipment.equipment_code} already has a reported problem that GSO is handling. Submitting again creates a second action for the same unit.`
+
+      if (Platform.OS === 'web') {
+        if (window.confirm(`${title}\n\n${message}\n\nSubmit anyway?`)) submit()
+        return
+      }
+
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Submit anyway', style: 'destructive', onPress: submit }
+      ])
+      return
+    }
+    submit()
   }
 
   return (
@@ -985,7 +1096,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
 
           <Pressable
             style={[s.btn, s.btnPrimary, (saving || !canSubmit) && s.btnDisabled]}
-            onPress={submit}
+            onPress={handleSubmitPress}
             disabled={saving || !canSubmit}
           >
             <Text style={s.btnPrimaryText}>
@@ -1025,7 +1136,7 @@ function DoneScreen({ result, equipment, onNext, onHome }) {
           <Text style={defective ? s.bannerAmberText : s.bannerGreenText}>
             {defective
               ? 'GSO has been notified. This unit now appears in their Priority Actions.'
-              : 'No action needed. The unit is marked active.'}
+              : 'No action needed. The unit is marked Functional.'}
           </Text>
         </View>
 
