@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   BackHandler,
   KeyboardAvoidingView,
   Linking,
@@ -23,6 +24,7 @@ import {
 } from 'react-native-safe-area-context'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
+import SummaryScreen from './SummaryScreen'
 import {
   ACTION_TYPES,
   ACTION_TYPE_LABELS,
@@ -105,6 +107,22 @@ function isThisWeek(dateString) {
   return diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000
 }
 
+// Keeps a dashboard fresh without the user pulling down: refreshes every
+// 30 seconds and whenever the app comes back to the foreground. `load(true)`
+// is a silent refresh (no error flash if the signal drops).
+function useAutoRefresh(load, ms = 30000) {
+  useEffect(() => {
+    const id = setInterval(() => load(true), ms)
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') load(true)
+    })
+    return () => {
+      clearInterval(id)
+      sub.remove()
+    }
+  }, [load, ms])
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -118,7 +136,7 @@ function homeFor(role) {
 }
 
 function RootApp() {
-  // 'loading' | 'login' | 'home' (inspector) | 'techHome' | 'techJob'
+  // 'loading' | 'login' | 'home' (inspector) | 'techHome' | 'techJob' | 'summary'
   // | 'scan' | 'manual' | 'detail' | 'form' | 'done'
   const [screen, setScreen] = useState('loading')
   const [account, setAccount] = useState(null) // { id, full_name, role }
@@ -190,7 +208,8 @@ function RootApp() {
         screen === 'manual' ||
         screen === 'detail' ||
         screen === 'done' ||
-        screen === 'techJob'
+        screen === 'techJob' ||
+        screen === 'summary'
       ) {
         goHome()
         return true
@@ -249,6 +268,7 @@ function RootApp() {
           onScan={() => setScreen('scan')}
           onManual={() => setScreen('manual')}
           onOpenEquipment={handleFound}
+          onSummary={() => setScreen('summary')}
         />
       )}
 
@@ -258,7 +278,12 @@ function RootApp() {
             setJob(j)
             setScreen('techJob')
           }}
+          onSummary={() => setScreen('summary')}
         />
+      )}
+
+      {screen === 'summary' && account && (
+        <SummaryScreen role={account.role} account={account} onBack={goHome} />
       )}
 
       {screen === 'techJob' && job && (
@@ -394,7 +419,7 @@ function LoginScreen({ onSignedIn }) {
 /* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function HomeScreen({ onScan, onManual, onOpenEquipment }) {
+function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   // Separate from `loading` so pull-to-refresh actually shows its spinner
@@ -404,12 +429,14 @@ function HomeScreen({ onScan, onManual, onOpenEquipment }) {
   // Which stat box's detail list is currently open, if any.
   const [openStat, setOpenStat] = useState(null)
 
-  const load = useCallback(async () => {
-    setError(null)
+  // `silent` refreshes (auto-refresh) never flash an error if the signal drops.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setError(null)
     try {
       setData(await getInspectorDashboard())
+      if (silent) setError(null)
     } catch (err) {
-      setError(err.message)
+      if (!silent) setError(err.message)
     }
     setLoading(false)
   }, [])
@@ -417,6 +444,8 @@ function HomeScreen({ onScan, onManual, onOpenEquipment }) {
   useEffect(() => {
     load()
   }, [load])
+
+  useAutoRefresh(load)
 
   async function onRefresh() {
     setRefreshing(true)
@@ -456,6 +485,10 @@ function HomeScreen({ onScan, onManual, onOpenEquipment }) {
 
       <Pressable style={[s.btn, s.btnOutline]} onPress={onManual}>
         <Text style={s.btnOutlineText}>Enter code manually</Text>
+      </Pressable>
+
+      <Pressable style={[s.btn, s.btnOutline]} onPress={onSummary}>
+        <Text style={s.btnOutlineText}>📊 My Summary</Text>
       </Pressable>
 
       {error && (
@@ -703,18 +736,19 @@ function PriorityTag({ priority }) {
   )
 }
 
-function TechnicianHome({ onOpenJob }) {
+function TechnicianHome({ onOpenJob, onSummary }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState(null)
 
-  const load = useCallback(async () => {
-    setError(null)
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setError(null)
     try {
       setData(await getTechnicianDashboard())
+      if (silent) setError(null)
     } catch (err) {
-      setError(err.message)
+      if (!silent) setError(err.message)
     }
     setLoading(false)
   }, [])
@@ -722,6 +756,8 @@ function TechnicianHome({ onOpenJob }) {
   useEffect(() => {
     load()
   }, [load])
+
+  useAutoRefresh(load)
 
   async function onRefresh() {
     setRefreshing(true)
@@ -753,6 +789,13 @@ function TechnicianHome({ onOpenJob }) {
             <Stat value={data.awaiting_gso_count} label="Awaiting GSO" />
             <Stat value={data.done_count} label="Completed" />
           </View>
+
+          <Pressable
+            style={[s.btn, s.btnOutline, { marginTop: 0, marginBottom: 18 }]}
+            onPress={onSummary}
+          >
+            <Text style={s.btnOutlineText}>📊 My Summary</Text>
+          </Pressable>
 
           <Text style={s.sectionTitle}>Assigned to you</Text>
           <Text style={s.sectionHint}>Highest priority first. Tap a job to open it.</Text>
