@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
+import {
+  buildGsoNotifications,
+  NotificationBell,
+  SummaryModal,
+  InspectorsTab,
+  JobOrderRequestModal
+} from './GsoExtras'
 
 const EQUIPMENT_TYPES = [
   'fire_extinguisher',
