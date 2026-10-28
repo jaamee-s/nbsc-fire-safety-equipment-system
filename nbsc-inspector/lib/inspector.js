@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage'
 import { supabase } from './supabase'
 
 // These MUST match the database check constraints exactly — lowercase with
@@ -42,12 +41,25 @@ export const STATUS_LABELS = {
   no_longer_in_service: 'No Longer in Service'
 }
 
+export const ROLE_LABELS = {
+  inspector: 'Inspector',
+  technician: 'Technician'
+}
+
+export const REPAIR_STATUS_LABELS = {
+  assigned: 'Assigned',
+  working: 'Working on it',
+  repaired: 'Marked repaired'
+}
+
+// Equipment with one of these statuses has a reported defect that GSO has not
+// resolved yet. It cannot be inspected again until GSO records the outcome and
+// the unit is back to Functional. The database enforces the same rule.
+export const OPEN_PROBLEM_STATUSES = ['defective', 'for_repair', 'for_replacement']
+
 // Preset findings per equipment type, derived from the inspection flowcharts.
 // Each one carries what it implies, so choosing a finding also sets a sensible
 // action type and priority — the inspector can still override both.
-//
-// This replaces the old free-text "recommended action" field. That field
-// duplicated action_type in prose, and the two could contradict each other.
 export const FINDINGS_BY_TYPE = {
   fire_extinguisher: [
     { label: 'Gauge in red zone (low pressure)', action: 'refill', priority: 'high' },
@@ -96,9 +108,9 @@ export const FINDINGS_BY_TYPE = {
 export const OTHER_FINDING = '__other__'
 
 // ---------------------------------------------------------------------------
-// Network errors. Signal inside concrete buildings is unreliable, and the
-// raw messages ("TypeError: Network request failed") mean nothing to an
-// inspector standing in a stairwell. Turn them into something actionable.
+// Errors. Signal inside concrete buildings is unreliable, and the raw messages
+// ("TypeError: Network request failed") mean nothing to someone standing in a
+// stairwell. Turn them into something actionable.
 // ---------------------------------------------------------------------------
 
 const NO_CONNECTION = 'No connection. Check your signal and try again.'
@@ -113,35 +125,88 @@ function toError(prefix, err) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector identity — asked once, stored on the device.
-// Identity without authentication: no login, but every record is attributable.
+// Accounts. Inspectors and technicians sign in with an account created by the
+// GSO administrator. The role comes from the `profiles` table, the same table
+// the web app uses.
+//
+// Needs lib/supabase.js to create the client with session storage, so the
+// login survives closing the app (see the setup notes).
 // ---------------------------------------------------------------------------
 
-const INSPECTOR_NAME_KEY = 'nbsc_inspector_name'
+const MOBILE_ROLES = ['inspector', 'technician']
 
-export async function getStoredInspectorName() {
+async function loadAccount(userId) {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, full_name, role')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (error) throw toError('Could not load your account: ', error)
+  if (!data) throw new Error('Your account is not set up yet. Please contact the GSO.')
+  if (!MOBILE_ROLES.includes(data.role)) {
+    await supabase.auth.signOut()
+    throw new Error('This account is for the GSO web dashboard. Inspectors and technicians use the mobile app.')
+  }
+  return data
+}
+
+export async function signIn(email, password) {
+  const cleanEmail = (email || '').trim()
+  if (!cleanEmail || !password) throw new Error('Enter your email and password.')
+
+  let result
   try {
-    return await AsyncStorage.getItem(INSPECTOR_NAME_KEY)
+    result = await supabase.auth.signInWithPassword({ email: cleanEmail, password })
   } catch (err) {
-    console.error('Could not read inspector name:', err)
+    throw toError('Sign-in failed: ', err)
+  }
+
+  if (result.error) {
+    if (/invalid login credentials/i.test(result.error.message)) {
+      throw new Error('Wrong email or password.')
+    }
+    throw toError('Sign-in failed: ', result.error)
+  }
+  return loadAccount(result.data.user.id)
+}
+
+// Returns the signed-in account, or null when nobody is signed in.
+export async function restoreSession() {
+  let result
+  try {
+    result = await supabase.auth.getSession()
+  } catch (err) {
+    return null
+  }
+  const user = result?.data?.session?.user
+  if (!user) return null
+  try {
+    return await loadAccount(user.id)
+  } catch (err) {
     return null
   }
 }
 
-export async function saveInspectorName(name) {
-  const trimmed = (name || '').trim()
-  if (!trimmed) throw new Error('Please enter your name.')
-  await AsyncStorage.setItem(INSPECTOR_NAME_KEY, trimmed)
-  return trimmed
+export async function signOut() {
+  try {
+    await supabase.auth.signOut()
+  } catch (err) {
+    console.error('Sign-out failed:', err)
+  }
 }
 
-export async function clearInspectorName() {
-  await AsyncStorage.removeItem(INSPECTOR_NAME_KEY)
+export function onSignedOut(callback) {
+  const { data } = supabase.auth.onAuthStateChange((event) => {
+    if (event === 'SIGNED_OUT') callback()
+  })
+  return () => data.subscription.unsubscribe()
 }
 
 // ---------------------------------------------------------------------------
 // QR lookup. The scanned value is just the equipment code — the record is
 // fetched live, so a sticker stays correct after the unit moves or is refilled.
+// Every unit has its own unique code, so one sticker is always one unit.
 // ---------------------------------------------------------------------------
 
 export async function findEquipmentByQrCode(scannedValue) {
@@ -150,15 +215,7 @@ export async function findEquipmentByQrCode(scannedValue) {
 
   let result
   try {
-    result = await supabase
-      .from('equipment')
-      .select(`
-        id, equipment_code, equipment_type, exact_location,
-        current_status, expiration_date, description,
-        buildings ( building_name )
-      `)
-      .eq('qr_code', code)
-      .maybeSingle()
+    result = await supabase.rpc('lookup_equipment', { p_code: code })
   } catch (err) {
     throw toError('Lookup failed: ', err)
   }
@@ -171,15 +228,15 @@ export async function findEquipmentByQrCode(scannedValue) {
 }
 
 // ---------------------------------------------------------------------------
-// Submission — the single write path.
+// Inspection submission — the single write path for inspectors.
 //
 // The database function handles all three steps atomically:
-//   1. insert the inspection (server-side timestamp, inspector name)
+//   1. insert the inspection (server-side timestamp, signed-in inspector)
 //   2. update equipment.current_status
 //   3. if defective, create a pending maintenance_action for GSO
 //
-// The database also refuses inspections on retired (no_longer_in_service)
-// equipment, so that rule holds even if this app's screen is stale.
+// The database also refuses inspections on retired equipment and on equipment
+// with an unresolved defect, so those rules hold even if the screen is stale.
 // ---------------------------------------------------------------------------
 
 export async function submitInspection({
@@ -188,22 +245,15 @@ export async function submitInspection({
   findings,
   inspectionNotes,
   actionType,
-  priority,
-  inspectorName
+  priority
 }) {
   if (!CONDITION_OPTIONS.includes(conditionStatus)) {
     throw new Error('Select a condition first.')
-  }
-  if (!inspectorName || !inspectorName.trim()) {
-    throw new Error('Inspector name is missing.')
   }
   if (conditionStatus === 'defective' && !(findings || '').trim()) {
     throw new Error('Select what is wrong before submitting.')
   }
 
-  // p_recommended_action is passed as null on purpose. It duplicated
-  // action_type in free text and the two could disagree. The database
-  // falls back to findings for the maintenance action's description.
   let result
   try {
     result = await supabase.rpc('submit_inspector_inspection', {
@@ -213,8 +263,7 @@ export async function submitInspection({
       p_recommended_action: null,
       p_inspection_notes: (inspectionNotes || '').trim() || null,
       p_action_type: actionType || 'other',
-      p_priority: priority || 'medium',
-      p_inspector_name: inspectorName.trim()
+      p_priority: priority || 'medium'
     })
   } catch (err) {
     throw toError('Submission failed: ', err)
@@ -225,26 +274,47 @@ export async function submitInspection({
 }
 
 // ---------------------------------------------------------------------------
-// Inspector dashboard.
-//
-// The app runs anonymously, and the RLS policy on `inspections` requires an
-// authenticated user — so the table cannot be read directly. This function is
-// the read-side equivalent of submit_inspector_inspection(): one narrow,
-// validated door instead of opening the table to the anon key.
+// Dashboards. Both are read through one narrow database function each, scoped
+// to the signed-in account.
 // ---------------------------------------------------------------------------
 
-export async function getInspectorDashboard(inspectorName) {
+export async function getInspectorDashboard() {
   let result
   try {
-    result = await supabase.rpc('get_inspector_dashboard', {
-      p_inspector_name: (inspectorName || '').trim()
-    })
+    result = await supabase.rpc('get_inspector_dashboard')
   } catch (err) {
     throw toError('Could not load dashboard: ', err)
   }
-
   if (result.error) throw toError('Could not load dashboard: ', result.error)
   return result.data
+}
+
+export async function getTechnicianDashboard() {
+  let result
+  try {
+    result = await supabase.rpc('get_technician_dashboard')
+  } catch (err) {
+    throw toError('Could not load your jobs: ', err)
+  }
+  if (result.error) throw toError('Could not load your jobs: ', result.error)
+  return result.data
+}
+
+// Technician updates the repair status of an assigned job.
+// status: 'working' | 'repaired'. GSO verifies and records the final outcome.
+export async function updateRepairStatus(actionId, status, note) {
+  let result
+  try {
+    result = await supabase.rpc('update_repair_status', {
+      p_action_id: actionId,
+      p_repair_status: status,
+      p_note: (note || '').trim() || null
+    })
+  } catch (err) {
+    throw toError('Update failed: ', err)
+  }
+  if (result.error) throw toError('Update failed: ', result.error)
+  return { success: true }
 }
 
 // "3 days ago", "just now" — for dashboard lists.

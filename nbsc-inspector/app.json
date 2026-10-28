@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "nbsc-inspector",
+    "name": "FireSafety Tech&Inspect",
     "slug": "nbsc-inspector",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -12,9 +12,7 @@
     "android": {
       "package": "com.nbsc.firesafety",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0F2A4A"
       }
     },
@@ -25,7 +23,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "NBSC Fire Safety needs camera access to scan equipment QR codes."
+          "cameraPermission": "FireSafety Tech&Inspect needs camera access to scan equipment QR codes."
         }
       ]
     ],

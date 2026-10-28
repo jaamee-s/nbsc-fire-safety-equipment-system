@@ -27,17 +27,24 @@ import {
   ACTION_TYPES,
   ACTION_TYPE_LABELS,
   FINDINGS_BY_TYPE,
+  OPEN_PROBLEM_STATUSES,
   OTHER_FINDING,
   PRIORITY_OPTIONS,
+  REPAIR_STATUS_LABELS,
+  ROLE_LABELS,
   STATUS_LABELS,
   TYPE_LABELS,
   daysUntil,
   findEquipmentByQrCode,
   getInspectorDashboard,
-  getStoredInspectorName,
+  getTechnicianDashboard,
+  onSignedOut,
   relativeTime,
-  saveInspectorName,
-  submitInspection
+  restoreSession,
+  signIn,
+  signOut,
+  submitInspection,
+  updateRepairStatus
 } from './lib/inspector'
 
 const C = {
@@ -57,10 +64,25 @@ const C = {
   white: '#FFFFFF'
 }
 
-// Statuses that mean "a problem is already reported on this unit and GSO
-// is (or will be) acting on it". Used to warn before creating a duplicate
-// action for the same unit.
-const OPEN_PROBLEM_STATUSES = ['defective', 'for_repair', 'for_replacement']
+const PRIORITY_COLORS = {
+  critical: { bg: '#FDEEEE', fg: '#B91C1C' },
+  high: { bg: '#FFF1E6', fg: '#C2410C' },
+  medium: { bg: '#FFF8E8', fg: '#B45309' },
+  low: { bg: '#EAF1FF', fg: '#2563EB' }
+}
+
+// One confirmation helper for both the phone (Alert) and the web preview
+// (Alert.alert does nothing in the browser).
+function confirmAction(title, message, confirmText, onConfirm, destructive) {
+  if (Platform.OS === 'web') {
+    if (window.confirm(`${title}\n\n${message}`)) onConfirm()
+    return
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: confirmText, style: destructive ? 'destructive' : 'default', onPress: onConfirm }
+  ])
+}
 
 // These only need to answer "does this fall in the same window the stat box
 // counted?" — used purely to filter the already-fetched recent-inspections
@@ -91,21 +113,34 @@ export default function App() {
   )
 }
 
+function homeFor(role) {
+  return role === 'technician' ? 'techHome' : 'home'
+}
+
 function RootApp() {
-  // 'loading' | 'name' | 'home' | 'scan' | 'manual' | 'detail' | 'form' | 'done'
+  // 'loading' | 'login' | 'home' (inspector) | 'techHome' | 'techJob'
+  // | 'scan' | 'manual' | 'detail' | 'form' | 'done'
   const [screen, setScreen] = useState('loading')
-  const [inspectorName, setInspectorName] = useState('')
+  const [account, setAccount] = useState(null) // { id, full_name, role }
   const [equipment, setEquipment] = useState(null)
   const [lastResult, setLastResult] = useState(null)
+  const [job, setJob] = useState(null)
 
   useEffect(() => {
-    getStoredInspectorName().then((name) => {
-      if (name) {
-        setInspectorName(name)
-        setScreen('home')
+    restoreSession().then((acc) => {
+      if (acc) {
+        setAccount(acc)
+        setScreen(homeFor(acc.role))
       } else {
-        setScreen('name')
+        setScreen('login')
       }
+    })
+    // If the session ends (expired or revoked), go back to the login screen.
+    return onSignedOut(() => {
+      setAccount(null)
+      setEquipment(null)
+      setJob(null)
+      setScreen('login')
     })
   }, [])
 
@@ -117,7 +152,18 @@ function RootApp() {
   function goHome() {
     setEquipment(null)
     setLastResult(null)
-    goToScreen('home')
+    setJob(null)
+    goToScreen(account ? homeFor(account.role) : 'login')
+  }
+
+  function handleLogout() {
+    confirmAction('Log out', 'Sign out of this account on this phone?', 'Log out', async () => {
+      await signOut()
+      setAccount(null)
+      setEquipment(null)
+      setJob(null)
+      setScreen('login')
+    })
   }
 
   // The camera view is a special native surface that Android composites
@@ -134,13 +180,18 @@ function RootApp() {
     }
   }
 
-  // Android's hardware/gesture Back button used to close the whole app from
-  // any screen, throwing away a half-finished inspection. Now it steps back
-  // one screen like every other app, and only exits from Home / name setup.
+  // Android's hardware/gesture Back button steps back one screen instead of
+  // closing the app, and only exits from a home screen or the login screen.
   useEffect(() => {
     const onBack = () => {
       if (screen === null) return true
-      if (screen === 'scan' || screen === 'manual' || screen === 'detail' || screen === 'done') {
+      if (
+        screen === 'scan' ||
+        screen === 'manual' ||
+        screen === 'detail' ||
+        screen === 'done' ||
+        screen === 'techJob'
+      ) {
         goHome()
         return true
       }
@@ -152,7 +203,9 @@ function RootApp() {
     }
     const sub = BackHandler.addEventListener('hardwareBackPress', onBack)
     return () => sub.remove()
-  }, [screen])
+  }, [screen, account])
+
+  const roleLabel = account ? ROLE_LABELS[account.role] || account.role : ''
 
   return (
     <SafeAreaView key={screen} style={s.safe} edges={['top', 'left', 'right', 'bottom']}>
@@ -160,10 +213,17 @@ function RootApp() {
 
       {screen !== 'scan' && (
         <View style={s.header}>
-          <Text style={s.headerTitle}>NBSC Fire Safety</Text>
-          <Text style={s.headerSub}>
-            {inspectorName ? `Inspector: ${inspectorName}` : 'Equipment Inspection'}
-          </Text>
+          <View style={s.flex}>
+            <Text style={s.headerTitle}>FireSafety Tech&Inspect</Text>
+            <Text style={s.headerSub}>
+              {account ? `${roleLabel}: ${account.full_name}` : 'NBSC Fire Safety Equipment'}
+            </Text>
+          </View>
+          {account && screen !== 'loading' && screen !== 'login' && (
+            <Pressable onPress={handleLogout} style={s.logoutBtn} hitSlop={8}>
+              <Text style={s.logoutText}>Log out</Text>
+            </Pressable>
+          )}
         </View>
       )}
 
@@ -175,22 +235,34 @@ function RootApp() {
         </View>
       )}
 
-      {screen === 'name' && (
-        <NameSetup
-          onSaved={(name) => {
-            setInspectorName(name)
-            setScreen('home')
+      {screen === 'login' && (
+        <LoginScreen
+          onSignedIn={(acc) => {
+            setAccount(acc)
+            setScreen(homeFor(acc.role))
           }}
         />
       )}
 
       {screen === 'home' && (
         <HomeScreen
-          inspectorName={inspectorName}
           onScan={() => setScreen('scan')}
           onManual={() => setScreen('manual')}
           onOpenEquipment={handleFound}
         />
+      )}
+
+      {screen === 'techHome' && (
+        <TechnicianHome
+          onOpenJob={(j) => {
+            setJob(j)
+            setScreen('techJob')
+          }}
+        />
+      )}
+
+      {screen === 'techJob' && job && (
+        <TechnicianJob job={job} onBack={goHome} onUpdated={goHome} />
       )}
 
       {screen === 'scan' && (
@@ -214,7 +286,6 @@ function RootApp() {
       {screen === 'form' && (
         <InspectionForm
           equipment={equipment}
-          inspectorName={inspectorName}
           onSubmitted={(result) => {
             setLastResult(result)
             setScreen('done')
@@ -236,23 +307,26 @@ function RootApp() {
 }
 
 /* ------------------------------------------------------------------ */
-/* First launch                                                        */
+/* Login (inspector and technician accounts)                           */
 /* ------------------------------------------------------------------ */
 
-function NameSetup({ onSaved }) {
-  const [name, setName] = useState('')
+function LoginScreen({ onSignedIn }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState(null)
-  const [saving, setSaving] = useState(false)
+  const [busy, setBusy] = useState(false)
 
-  async function save() {
+  async function submit() {
+    if (busy) return
     setError(null)
-    setSaving(true)
+    setBusy(true)
     try {
-      onSaved(await saveInspectorName(name))
+      onSignedIn(await signIn(email, password))
     } catch (err) {
       setError(err.message)
+      setBusy(false)
     }
-    setSaving(false)
   }
 
   return (
@@ -260,32 +334,56 @@ function NameSetup({ onSaved }) {
       style={s.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView contentContainerStyle={s.scroll}>
+      <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
         <View style={s.card}>
-          <Text style={s.h1}>Welcome</Text>
+          <Text style={s.h1}>Sign in</Text>
           <Text style={s.muted}>
-            Enter your name once. It will be attached to every inspection you submit,
-            so GSO knows who checked each unit.
+            Use the account the GSO created for you. Inspectors scan and inspect equipment;
+            technicians see and update their assigned repairs.
           </Text>
 
-          <Text style={s.label}>Your full name</Text>
+          <Text style={s.label}>Email</Text>
           <TextInput
             style={s.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="e.g. Juan Dela Cruz"
-            autoCapitalize="words"
+            value={email}
+            onChangeText={setEmail}
+            placeholder="you@example.com"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            textContentType="username"
           />
+
+          <Text style={s.label}>Password</Text>
+          <TextInput
+            style={s.input}
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Password"
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry={!showPassword}
+            textContentType="password"
+            onSubmitEditing={submit}
+            returnKeyType="go"
+          />
+          <Pressable onPress={() => setShowPassword((v) => !v)}>
+            <Text style={s.autoChange}>{showPassword ? 'Hide password' : 'Show password'}</Text>
+          </Pressable>
 
           {error && <Text style={s.error}>{error}</Text>}
 
           <Pressable
-            style={[s.btn, s.btnPrimary, saving && s.btnDisabled]}
-            onPress={save}
-            disabled={saving}
+            style={[s.btn, s.btnPrimary, (busy || !email.trim() || !password) && s.btnDisabled]}
+            onPress={submit}
+            disabled={busy || !email.trim() || !password}
           >
-            <Text style={s.btnPrimaryText}>{saving ? 'Saving...' : 'Continue'}</Text>
+            <Text style={s.btnPrimaryText}>{busy ? 'Signing in...' : 'Sign in'}</Text>
           </Pressable>
+
+          <Text style={[s.muted, { marginTop: 16, fontSize: 12 }]}>
+            No account yet? Ask the General Services Office to create one for you.
+          </Text>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -296,7 +394,7 @@ function NameSetup({ onSaved }) {
 /* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
+function HomeScreen({ onScan, onManual, onOpenEquipment }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   // Separate from `loading` so pull-to-refresh actually shows its spinner
@@ -309,12 +407,12 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
   const load = useCallback(async () => {
     setError(null)
     try {
-      setData(await getInspectorDashboard(inspectorName))
+      setData(await getInspectorDashboard())
     } catch (err) {
       setError(err.message)
     }
     setLoading(false)
-  }, [inspectorName])
+  }, [])
 
   useEffect(() => {
     load()
@@ -339,8 +437,11 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
   // the real filter; this is a second guard so a retired unit can never
   // sit at the top of an inspector's to-do list even if the function lags.
   const dueList = ((data && data.due) || []).filter(
-    (d) => d.current_status !== 'no_longer_in_service'
+    (d) =>
+      d.current_status !== 'no_longer_in_service' &&
+      !OPEN_PROBLEM_STATUSES.includes(d.current_status)
   )
+  const onHoldList = (data && data.on_hold) || []
 
   return (
     <ScrollView
@@ -468,7 +569,7 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
           <Text style={s.sectionHint}>Longest since last check — start here.</Text>
           <View style={s.card}>
             {dueList.length === 0 ? (
-              <Text style={s.muted}>No equipment registered yet.</Text>
+              <Text style={s.muted}>Nothing due right now.</Text>
             ) : (
               dueList.map((d, i) => {
                 const needsAttention = d.current_status && d.current_status !== 'functional'
@@ -508,6 +609,38 @@ function HomeScreen({ inspectorName, onScan, onManual, onOpenEquipment }) {
               })
             )}
           </View>
+
+          {onHoldList.length > 0 && (
+            <>
+              <Text style={s.sectionTitle}>On hold — waiting for GSO</Text>
+              <Text style={s.sectionHint}>
+                A defect was reported on these. They can be inspected again once GSO records the outcome.
+              </Text>
+              <View style={s.card}>
+                {onHoldList.map((d, i) => (
+                  <Pressable
+                    key={d.id}
+                    style={[s.listRow, i === onHoldList.length - 1 && s.listRowLast]}
+                    onPress={() => openFromDue(d.equipment_code)}
+                  >
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{d.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
+                        {d.building_name ? ` · ${d.building_name}` : ''}
+                      </Text>
+                      <Text style={s.listMeta}>{d.exact_location}</Text>
+                    </View>
+                    <View style={[s.tag, s.tagRed]}>
+                      <Text style={[s.tagText, { color: C.red }]}>
+                        {STATUS_LABELS[d.current_status] || d.current_status}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            </>
+          )}
 
           <Text style={s.sectionTitle}>Your recent inspections</Text>
           <View style={[s.card, { marginTop: 8 }]}>
@@ -552,6 +685,237 @@ function Stat({ value, label, alert, active, onPress }) {
       </Text>
       <Text style={s.statLabel}>{label}</Text>
     </Pressable>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Technician dashboard and job                                        */
+/* ------------------------------------------------------------------ */
+
+function PriorityTag({ priority }) {
+  const c = PRIORITY_COLORS[priority] || PRIORITY_COLORS.medium
+  return (
+    <View style={[s.tag, { backgroundColor: c.bg }]}>
+      <Text style={[s.tagText, { color: c.fg }]}>
+        {(priority || 'medium').charAt(0).toUpperCase() + (priority || 'medium').slice(1)}
+      </Text>
+    </View>
+  )
+}
+
+function TechnicianHome({ onOpenJob }) {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      setData(await getTechnicianDashboard())
+    } catch (err) {
+      setError(err.message)
+    }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function onRefresh() {
+    setRefreshing(true)
+    await load()
+    setRefreshing(false)
+  }
+
+  const jobs = (data && data.assigned) || []
+
+  return (
+    <ScrollView
+      contentContainerStyle={s.scroll}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
+      {error && (
+        <View style={s.card}>
+          <Text style={s.error}>{error}</Text>
+        </View>
+      )}
+
+      {loading && !data ? (
+        <View style={[s.card, s.centerPad]}>
+          <ActivityIndicator color={C.blue} />
+        </View>
+      ) : data ? (
+        <>
+          <View style={[s.statRow, { marginTop: 0 }]}>
+            <Stat value={data.to_do_count} label="To do" alert />
+            <Stat value={data.awaiting_gso_count} label="Awaiting GSO" />
+            <Stat value={data.done_count} label="Completed" />
+          </View>
+
+          <Text style={s.sectionTitle}>Assigned to you</Text>
+          <Text style={s.sectionHint}>Highest priority first. Tap a job to open it.</Text>
+          <View style={s.card}>
+            {jobs.length === 0 ? (
+              <Text style={s.muted}>No repairs assigned right now. Pull down to refresh.</Text>
+            ) : (
+              jobs.map((j, i) => (
+                <Pressable
+                  key={j.id}
+                  style={[s.listRow, i === jobs.length - 1 && s.listRowLast]}
+                  onPress={() => onOpenJob(j)}
+                >
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{j.equipment_code}</Text>
+                    <Text style={s.listMeta}>
+                      {TYPE_LABELS[j.equipment_type] || j.equipment_type}
+                      {j.building_name ? ` · ${j.building_name}` : ''}
+                    </Text>
+                    <Text style={s.listMeta}>{j.exact_location}</Text>
+                    <Text style={[s.listMeta, { color: C.text }]}>{j.description}</Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                    <PriorityTag priority={j.priority} />
+                    <Text style={s.listWhen}>
+                      {REPAIR_STATUS_LABELS[j.repair_status] || j.repair_status}
+                    </Text>
+                  </View>
+                </Pressable>
+              ))
+            )}
+          </View>
+
+          <Text style={s.sectionTitle}>Recently completed</Text>
+          <View style={[s.card, { marginTop: 8 }]}>
+            {(data.recent_done || []).length === 0 ? (
+              <Text style={s.muted}>Nothing completed yet.</Text>
+            ) : (
+              data.recent_done.map((r, i) => (
+                <View
+                  key={r.id}
+                  style={[s.listRow, i === data.recent_done.length - 1 && s.listRowLast]}
+                >
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{r.equipment_code}</Text>
+                    <Text style={s.listMeta}>{r.description}</Text>
+                    <Text style={s.listMeta}>{relativeTime(r.completed_date)}</Text>
+                  </View>
+                  <View style={[s.tag, s.tagGreen]}>
+                    <Text style={[s.tagText, { color: C.green }]}>Done</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        </>
+      ) : null}
+    </ScrollView>
+  )
+}
+
+function TechnicianJob({ job, onBack, onUpdated }) {
+  const [note, setNote] = useState(job.repair_note || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const repaired = job.repair_status === 'repaired'
+  const working = job.repair_status === 'working'
+
+  async function apply(status) {
+    setError(null)
+    setSaving(true)
+    try {
+      await updateRepairStatus(job.id, status, note)
+      onUpdated()
+    } catch (err) {
+      setError(err.message)
+      setSaving(false)
+    }
+  }
+
+  function markRepaired() {
+    confirmAction(
+      'Mark as repaired?',
+      `Confirm that ${job.equipment_code} has been repaired. GSO will be notified and will verify the unit before closing the job.`,
+      'Mark repaired',
+      () => apply('repaired')
+    )
+  }
+
+  return (
+    <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
+      <View style={s.card}>
+        <Text style={s.code}>{job.equipment_code}</Text>
+        <Text style={s.type}>{TYPE_LABELS[job.equipment_type] || job.equipment_type}</Text>
+
+        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
+          <PriorityTag priority={job.priority} />
+          <View style={[s.tag, repaired ? s.tagGreen : { backgroundColor: C.blueBg }]}>
+            <Text style={[s.tagText, { color: repaired ? C.green : C.blue }]}>
+              {REPAIR_STATUS_LABELS[job.repair_status] || job.repair_status}
+            </Text>
+          </View>
+        </View>
+
+        <Row label="Building" value={job.building_name ?? '—'} />
+        <Row label="Location" value={job.exact_location ?? '—'} />
+        <Row label="Problem" value={job.description} />
+        <Row label="Work type" value={ACTION_TYPE_LABELS[job.action_type] || job.action_type} />
+        {job.job_order_remarks ? <Row label="GSO notes" value={job.job_order_remarks} /> : null}
+        {job.decided_at ? <Row label="Job order" value={relativeTime(job.decided_at)} /> : null}
+
+        {repaired && (
+          <View style={[s.banner, s.bannerGreen]}>
+            <Text style={s.bannerGreenText}>
+              Marked as repaired. Waiting for GSO to verify the unit and close the job.
+            </Text>
+          </View>
+        )}
+
+        <Text style={s.label}>Note for GSO (optional)</Text>
+        <TextInput
+          style={[s.input, s.textarea]}
+          value={note}
+          onChangeText={setNote}
+          placeholder="e.g. Replaced the battery and tested the unit"
+          multiline
+        />
+
+        {error && <Text style={s.error}>{error}</Text>}
+
+        {!repaired && !working && (
+          <Pressable
+            style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
+            onPress={() => apply('working')}
+            disabled={saving}
+          >
+            <Text style={s.btnOutlineText}>Start working</Text>
+          </Pressable>
+        )}
+
+        {!repaired ? (
+          <Pressable
+            style={[s.btn, { backgroundColor: C.green }, saving && s.btnDisabled]}
+            onPress={markRepaired}
+            disabled={saving}
+          >
+            <Text style={s.btnPrimaryText}>{saving ? 'Saving...' : 'Mark as repaired'}</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
+            onPress={() => apply('working')}
+            disabled={saving}
+          >
+            <Text style={s.btnOutlineText}>Not fixed yet — back to working</Text>
+          </Pressable>
+        )}
+
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onBack} disabled={saving}>
+          <Text style={s.btnGhostText}>Back</Text>
+        </Pressable>
+      </View>
+    </ScrollView>
   )
 }
 
@@ -799,7 +1163,9 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
   const expired = !isRetired && left !== null && left < 0
   const expiringSoon = !isRetired && left !== null && left >= 0 && left <= 30
   const isFunctional = equipment.current_status === 'functional'
-  const alreadyReported = OPEN_PROBLEM_STATUSES.includes(equipment.current_status)
+  // A reported defect must be handled by GSO first. Until GSO records the
+  // outcome and the unit is Functional again, inspection stays on hold.
+  const onHold = OPEN_PROBLEM_STATUSES.includes(equipment.current_status)
 
   return (
     <ScrollView contentContainerStyle={s.scroll}>
@@ -835,11 +1201,11 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
           </View>
         )}
 
-        {alreadyReported && (
+        {onHold && !isRetired && (
           <View style={[s.banner, s.bannerAmber]}>
             <Text style={s.bannerAmberText}>
-              A problem is already reported on this unit and GSO is handling it. Only
-              inspect again if its condition has changed.
+              Inspection is on hold. A defect was reported on this unit and GSO has not
+              recorded the outcome yet. It can be inspected again once it is back to Functional.
             </Text>
           </View>
         )}
@@ -851,7 +1217,11 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
             </Text>
           </View>
         ) : (
-          <Pressable style={[s.btn, s.btnPrimary]} onPress={onInspect}>
+          <Pressable
+            style={[s.btn, s.btnPrimary, onHold && s.btnDisabled]}
+            onPress={onInspect}
+            disabled={onHold}
+          >
             <Text style={s.btnPrimaryText}>Start Inspection</Text>
           </Pressable>
         )}
@@ -877,7 +1247,7 @@ function Row({ label, value }) {
 /* The inspection itself                                               */
 /* ------------------------------------------------------------------ */
 
-function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
+function InspectionForm({ equipment, onSubmitted, onCancel }) {
   const presets = FINDINGS_BY_TYPE[equipment.equipment_type] || []
 
   const [condition, setCondition] = useState(null)
@@ -892,7 +1262,6 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
 
   const defective = condition === 'defective'
   const isOther = selectedFinding === OTHER_FINDING
-  const alreadyReported = OPEN_PROBLEM_STATUSES.includes(equipment.current_status)
 
   // Choosing a finding sets what it implies. Both stay overridable, but the
   // override rows stay collapsed so the fast path is: finding, submit.
@@ -920,38 +1289,13 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
         findings: defective ? findingsText : '',
         inspectionNotes: notes,
         actionType,
-        priority,
-        inspectorName
+        priority
       })
       onSubmitted({ condition })
     } catch (err) {
       setError(err.message)
     }
     setSaving(false)
-  }
-
-  // Each defective submission creates a new Priority Action on the web
-  // dashboard. If the unit is already defective / for repair / for
-  // replacement, submitting again would create a duplicate card for GSO,
-  // so confirm first. (Alert.alert does nothing on the web preview, so the
-  // browser gets window.confirm instead.)
-  function handleSubmitPress() {
-    if (defective && alreadyReported) {
-      const title = 'Already reported'
-      const message = `${equipment.equipment_code} already has a reported problem that GSO is handling. Submitting again creates a second action for the same unit.`
-
-      if (Platform.OS === 'web') {
-        if (window.confirm(`${title}\n\n${message}\n\nSubmit anyway?`)) submit()
-        return
-      }
-
-      Alert.alert(title, message, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Submit anyway', style: 'destructive', onPress: submit }
-      ])
-      return
-    }
-    submit()
   }
 
   return (
@@ -1096,7 +1440,7 @@ function InspectionForm({ equipment, inspectorName, onSubmitted, onCancel }) {
 
           <Pressable
             style={[s.btn, s.btnPrimary, (saving || !canSubmit) && s.btnDisabled]}
-            onPress={handleSubmitPress}
+            onPress={submit}
             disabled={saving || !canSubmit}
           >
             <Text style={s.btnPrimaryText}>
@@ -1135,7 +1479,7 @@ function DoneScreen({ result, equipment, onNext, onHome }) {
         <View style={[s.banner, defective ? s.bannerAmber : s.bannerGreen]}>
           <Text style={defective ? s.bannerAmberText : s.bannerGreenText}>
             {defective
-              ? 'GSO has been notified. This unit now appears in their Priority Actions.'
+              ? 'GSO has been notified. This unit now appears in their Priority Actions, and it cannot be inspected again until GSO resolves it.'
               : 'No action needed. The unit is marked Functional.'}
           </Text>
         </View>
@@ -1161,7 +1505,22 @@ const s = StyleSheet.create({
   centerPad: { alignItems: 'center', paddingVertical: 26 },
   scroll: { padding: 16, paddingBottom: 40 },
 
-  header: { backgroundColor: C.navy, paddingHorizontal: 18, paddingVertical: 14 },
+  header: {
+    backgroundColor: C.navy,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12
+  },
+  logoutBtn: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.4)',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6
+  },
+  logoutText: { color: C.white, fontSize: 12, fontWeight: '700' },
   headerTitle: { color: C.white, fontSize: 18, fontWeight: '700' },
   headerSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
 
