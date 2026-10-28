@@ -394,6 +394,9 @@ function Dashboard({ profile, onLogout }) {
   // Priority Actions filter ('all', 'pending', 'in_progress', 'unresolved')
   const [priorityFilter, setPriorityFilter] = useState('all')
 
+  // Summary view (header button)
+  const [showSummary, setShowSummary] = useState(false)
+
   // Back to Top button state and listener
   const [showBackToTop, setShowBackToTop] = useState(false)
 
@@ -1396,6 +1399,20 @@ function Dashboard({ profile, onLogout }) {
 
   const expiredCount = expiringEquipment.filter((item) => item.daysLeft < 0).length
 
+  // Notifications shown in the header bell
+  const gsoNotifications = buildGsoNotifications({
+    actions: sortedActions,
+    expiring: expiringEquipment
+  })
+
+  function handleNotificationNavigate(target) {
+    setActiveTab('dashboard')
+    const id = target === 'expiry' ? 'expiration-alerts-section' : 'priority-actions-section'
+    setTimeout(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+    }, 50)
+  }
+
   const filteredEquipment = equipment.filter((item) => {
     const term = searchTerm.trim().toLowerCase()
     const matchesSearch =
@@ -1474,6 +1491,17 @@ function Dashboard({ profile, onLogout }) {
             <span className={`status-dot ${needsActionCount > 0 ? 'alert' : ''}`}></span>
             {needsActionCount > 0 ? `${needsActionCount} need attention` : 'All operational'}
           </span>
+          <button
+            className="logout-btn"
+            style={{ marginRight: '6px' }}
+            onClick={() => setShowSummary(true)}
+          >
+            📋 Summary
+          </button>
+          <NotificationBell
+            notifications={gsoNotifications}
+            onNavigate={handleNotificationNavigate}
+          />
           <span className="user-role-tag">{profile.full_name} · {profile.role}</span>
           <button className="logout-btn" onClick={onLogout}>Log out</button>
         </div>
@@ -1491,18 +1519,12 @@ function Dashboard({ profile, onLogout }) {
               <span className="sidebar-text">Dashboard</span>
             </button>
             <button
-              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
-              onClick={() => {
-                setFilterStatus('')
-                setFilterType('')
-                setFilterBuilding('')
-                setSearchTerm('')
-                setActiveTab('equipment')
-              }}
-              title="Equipment"
+              className={`sidebar-item ${activeTab === 'inspectors' ? 'active' : ''}`}
+              onClick={() => setActiveTab('inspectors')}
+              title="Inspectors"
             >
-              <span className="sidebar-icon">🧯</span>
-              <span className="sidebar-text">Equipment</span>
+              <span className="sidebar-icon">🔍</span>
+              <span className="sidebar-text">Inspectors</span>
             </button>
             <button
               className={`sidebar-item ${activeTab === 'buildings' ? 'active' : ''}`}
@@ -2686,6 +2708,11 @@ function Dashboard({ profile, onLogout }) {
         </div>
         )}
 
+        {/* ===================== INSPECTORS TAB ===================== */}
+        {activeTab === 'inspectors' && (
+          <InspectorsTab inspections={inspections} equipment={equipment} />
+        )}
+
         {/* ===================== STOCK TAB ===================== */}
         {activeTab === 'stock' && (
           <div>
@@ -3036,75 +3063,22 @@ function Dashboard({ profile, onLogout }) {
         </div>
       )}
 
-      {/* ===================== JOB ORDER REQUEST MODAL ===================== */}
+      {/* ===================== JOB ORDER REQUEST FORM ===================== */}
       {techAssignModal && (
-        <div className="modal-overlay">
-          <div className="modal-box" style={{ maxWidth: '480px' }}>
-            <div className="modal-title">
-              {techAssignModal.isReassign ? 'Reassign Technician' : 'Job Order Request'}
-            </div>
-
-            {!techAssignModal.isReassign && (
-              <div style={{ background: 'var(--bg, #f6f8fb)', border: '1px solid var(--border)', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', fontSize: '0.88rem', lineHeight: 1.6 }}>
-                <div><strong>Equipment:</strong> {techAssignModal.equipmentCode} ({TYPE_LABELS[techAssignModal.equipmentType] || techAssignModal.equipmentType})</div>
-                <div><strong>Location:</strong> {techAssignModal.location}</div>
-                <div><strong>Reported defect:</strong> {techAssignModal.finding} <span style={{ color: 'var(--text-muted)' }}>({techAssignModal.actionType})</span></div>
-                <div><strong>Priority:</strong> <span style={{ textTransform: 'capitalize' }}>{techAssignModal.priority}</span></div>
-                <div><strong>Date reported:</strong> {formatTimestamp(techAssignModal.reportedDate)}</div>
-                <div><strong>Requested by:</strong> {profile.full_name} ({profile.role})</div>
-                {techAssignModal.isFireExtinguisher && (
-                  <div style={{ color: 'var(--amber)' }}>
-                    <strong>Fire extinguisher stock:</strong> {(stock.find((x) => x.equipment_type === 'fire_extinguisher')?.quantity_available) ?? 0} available for replacement
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div style={{ marginBottom: '14px' }}>
-              <label className="field-label">Assign Technician</label>
-              <select
-                value={selectedTechnicianId}
-                onChange={(e) => setSelectedTechnicianId(e.target.value)}
-              >
-                <option value="">-- Select technician --</option>
-                {technicians.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.profile_id ? '· 📱 app' : ''}
-                  </option>
-                ))}
-              </select>
-              {technicians.length === 0 && (
-                <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
-                  No technicians listed yet. Add one in the Technicians tab first.
-                </p>
-              )}
-            </div>
-
-            {!techAssignModal.isReassign && (
-              <div style={{ marginBottom: '14px' }}>
-                <label className="field-label">Remarks / instructions (optional)</label>
-                <textarea
-                  rows={3}
-                  placeholder="e.g. Check the alarm wiring in the corridor first"
-                  value={jobOrderRemarks}
-                  onChange={(e) => setJobOrderRemarks(e.target.value)}
-                />
-                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '6px 0 0 0' }}>
-                  Fields will be aligned with the official GSO Job Order form once the template is provided.
-                </p>
-              </div>
-            )}
-
-            <div className="modal-actions" style={{ gap: '8px' }}>
-              <button className="btn btn-secondary" onClick={() => setTechAssignModal(null)}>
-                Cancel
-              </button>
-              <button className="btn btn-primary" onClick={handleConfirmStartWork}>
-                {techAssignModal.isReassign ? 'Save Assignment' : 'Submit Job Order'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <JobOrderRequestModal
+          modal={techAssignModal}
+          profile={profile}
+          technicians={technicians}
+          fireExtinguisherStock={
+            stock.find((x) => x.equipment_type === 'fire_extinguisher')?.quantity_available ?? 0
+          }
+          selectedTechnicianId={selectedTechnicianId}
+          onSelectTechnician={setSelectedTechnicianId}
+          remarks={jobOrderRemarks}
+          onRemarksChange={setJobOrderRemarks}
+          onCancel={() => setTechAssignModal(null)}
+          onSubmit={handleConfirmStartWork}
+        />
       )}
 
       {replacementPrompt && (
@@ -3127,6 +3101,18 @@ function Dashboard({ profile, onLogout }) {
             </div>
           </div>
         </div>
+      )}
+
+      {showSummary && (
+        <SummaryModal
+          equipment={equipment}
+          actions={sortedActions}
+          inspections={inspections}
+          technicians={technicians}
+          stock={stock}
+          expiring={expiringEquipment}
+          onClose={() => setShowSummary(false)}
+        />
       )}
 
       {showBackToTop && (
