@@ -84,11 +84,13 @@ async function generateEquipmentCode(supabase, equipmentType) {
   return `${prefix}-${String(nextNumber).padStart(3, '0')}`
 }
 
+// Never negative: a device clock slightly behind the server used to produce
+// "Reported -1 days ago".
 function daysAgo(dateString) {
   if (!dateString) return null
   const then = new Date(dateString)
   const now = new Date()
-  return Math.floor((now - then) / (1000 * 60 * 60 * 24))
+  return Math.max(0, Math.floor((now - then) / (1000 * 60 * 60 * 24)))
 }
 
 // Full date + clock time, in the viewer's local timezone.
@@ -424,6 +426,10 @@ function Dashboard({ profile, onLogout }) {
 
   // Real-time updates: when a technician marks a repair or an inspector
   // submits a defect, the GSO dashboard refreshes by itself.
+  // Realtime only works when the tables are in the Supabase publication and
+  // can silently stop on a flaky connection, so a 30-second refresh and a
+  // refresh when the tab becomes visible again back it up. Stock is not
+  // polled on purpose: it would overwrite quantities someone is typing.
   useEffect(() => {
     const channel = supabase
       .channel('gso-live')
@@ -436,13 +442,29 @@ function Dashboard({ profile, onLogout }) {
         getEquipment()
       })
       .subscribe()
+
+    const refreshAll = () => {
+      getMaintenanceActions()
+      getEquipment()
+      getInspections()
+      getTechnicians()
+    }
+    const timer = setInterval(refreshAll, 30000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshAll()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
     return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
       supabase.removeChannel(channel)
     }
   }, [])
 
   async function getEquipment() {
-    setLoading(true)
+    // `loading` starts true, so only the first load shows "Loading..."; live
+    // refreshes no longer flash the list.
     const { data, error } = await supabase
       .from('equipment')
       .select(`
@@ -1103,7 +1125,9 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(null)
   }
 
-  // Reassess an unresolved action: resets status to pending and clears repair_path
+  // Reassess an unresolved action: sends it back to pending and clears the
+  // old job order, technician and outcome so the card doesn't keep showing
+  // stale "Outcome: UNRESOLVED" / "Decided by" / "Assigned to" lines.
   async function reassessAction(actionId) {
     if (!window.confirm('Reassess this action?\n\nThis sends it back to Pending so a new Job Order Request can be made (for example with a different technician).')) return
 
@@ -1116,7 +1140,15 @@ function Dashboard({ profile, onLogout }) {
         budget_status: 'not_applicable',
         repair_status: null,
         repair_note: null,
-        repaired_at: null
+        repaired_at: null,
+        outcome: null,
+        outcome_reason: null,
+        outcome_by: null,
+        outcome_at: null,
+        decided_by: null,
+        decided_at: null,
+        job_order_remarks: null,
+        assigned_technician_id: null
       })
       .eq('id', actionId)
 
@@ -1385,14 +1417,23 @@ function Dashboard({ profile, onLogout }) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
+  // A bare 'YYYY-MM-DD' string is parsed as UTC midnight, which lands on the
+  // previous local day in timezones behind UTC. Building the date from its
+  // parts keeps it on the calendar day it was entered as.
   function daysUntil(dateString) {
     if (!dateString) return null
-    const target = new Date(dateString)
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString)
+    const target = m
+      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      : new Date(dateString)
     target.setHours(0, 0, 0, 0)
-    return Math.floor((target - today) / (1000 * 60 * 60 * 24))
+    return Math.round((target - today) / (1000 * 60 * 60 * 24))
   }
 
+  // Retired units are excluded: an expiry warning on a unit that is already
+  // out of service is noise (and used to inflate the bell and sidebar counts).
   const expiringEquipment = equipment
+    .filter((item) => item.current_status !== 'no_longer_in_service')
     .map((item) => ({ ...item, daysLeft: daysUntil(item.expiration_date) }))
     .filter((item) => item.daysLeft !== null && item.daysLeft <= 30)
     .sort((a, b) => a.daysLeft - b.daysLeft)
@@ -1517,6 +1558,14 @@ function Dashboard({ profile, onLogout }) {
             >
               <span className="sidebar-icon">📊</span>
               <span className="sidebar-text">Dashboard</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
+              onClick={() => jumpToEquipment('')}
+              title="Equipment"
+            >
+              <span className="sidebar-icon">🧯</span>
+              <span className="sidebar-text">Equipment</span>
             </button>
             <button
               className={`sidebar-item ${activeTab === 'inspectors' ? 'active' : ''}`}
