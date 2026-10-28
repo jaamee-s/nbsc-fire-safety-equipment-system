@@ -47,9 +47,9 @@ const CODE_PREFIXES = {
   smoke_detector: 'SD'
 }
 
-// Purchase-need for non-extinguisher equipment is now an explicit GSO
-// decision (see setRepairPath / needsRepairPathChoice below) rather than
-// guessed from action_type — GSO knows the actual damage, the system doesn't.
+// GSO's only action on a reported defect is a Job Order Request (see the
+// Job Order Request modal). Purchase requests and ordering new stock are
+// handled by the Supply Office and are outside this system's scope.
 
 async function generateEquipmentCode(supabase, equipmentType) {
   const prefix = CODE_PREFIXES[equipmentType] || 'EQ'
@@ -236,16 +236,17 @@ function App() {
     )
   }
 
-  if (profile.role === 'inspector') {
+  if (profile.role === 'inspector' || profile.role === 'technician') {
     return (
       <>
         {successModal}
         <div className="login-wrap">
           <div className="login-card">
-            <h1>Inspector Account</h1>
+            <h1>{profile.role === 'technician' ? 'Technician Account' : 'Inspector Account'}</h1>
             <p className="login-subtitle">
-              Inspections are performed through the NBSC Fire Safety mobile app.
-              Please use the Android app to scan equipment and submit inspections.
+              {profile.role === 'technician'
+                ? 'Repair work is handled in the FireSafety Tech&Inspect mobile app. Please sign in there to see your assigned equipment and update repair status.'
+                : 'Inspections are performed in the FireSafety Tech&Inspect mobile app. Please sign in there to scan equipment and submit inspections.'}
             </p>
             <button className="btn btn-secondary" style={{ marginTop: '16px' }} onClick={handleLogout}>
               Log out
@@ -375,13 +376,15 @@ function Dashboard({ profile, onLogout }) {
 
   // Technician assignment modal state (when starting a job order)
   const [techAssignModal, setTechAssignModal] = useState(null)
+  // Free-text remarks that go on the Job Order Request form
+  const [jobOrderRemarks, setJobOrderRemarks] = useState('')
   const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
 
   // Add Equipment form: cascading location picker state
   const [formFloor, setFormFloor] = useState('')
   const [formLocationChoice, setFormLocationChoice] = useState('')
 
-  // Priority Actions filter ('all', 'pending', 'in_progress', 'procurement', 'unresolved')
+  // Priority Actions filter ('all', 'pending', 'in_progress', 'unresolved')
   const [priorityFilter, setPriorityFilter] = useState('all')
 
   // Back to Top button state and listener
@@ -407,6 +410,25 @@ function Dashboard({ profile, onLogout }) {
     getInspections()
     getStock()
     getTechnicians()
+  }, [])
+
+  // Real-time updates: when a technician marks a repair or an inspector
+  // submits a defect, the GSO dashboard refreshes by itself.
+  useEffect(() => {
+    const channel = supabase
+      .channel('gso-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_actions' }, () => {
+        getMaintenanceActions()
+        getEquipment()
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inspections' }, () => {
+        getInspections()
+        getEquipment()
+      })
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function getEquipment() {
@@ -674,6 +696,7 @@ function Dashboard({ profile, onLogout }) {
         disposition, budget_status, repair_path,
         decided_by, decided_at, completed_by,
         outcome, outcome_reason, outcome_by, outcome_at, assigned_technician_id,
+        repair_status, repair_note, repaired_at, job_order_remarks,
         equipment ( id, equipment_code, equipment_type, exact_location, building_id,
           buildings ( building_name )
         )
@@ -727,7 +750,7 @@ function Dashboard({ profile, onLogout }) {
   async function getTechnicians() {
     const { data, error } = await supabase
       .from('technicians')
-      .select('id, full_name, contact_info, is_available')
+      .select('id, full_name, contact_info, is_available, profile_id')
       .order('full_name', { ascending: true })
 
     if (error) {
@@ -1072,7 +1095,7 @@ function Dashboard({ profile, onLogout }) {
 
   // Reassess an unresolved action: resets status to pending and clears repair_path
   async function reassessAction(actionId) {
-    if (!window.confirm('Reassess this action?\n\nThis will reset its decision path so GSO can choose a new route (such as Purchase Request or assigning a different technician).')) return
+    if (!window.confirm('Reassess this action?\n\nThis sends it back to Pending so a new Job Order Request can be made (for example with a different technician).')) return
 
     setActionUpdatingId(actionId)
     const { error } = await supabase
@@ -1080,7 +1103,10 @@ function Dashboard({ profile, onLogout }) {
       .update({
         status: 'pending',
         repair_path: null,
-        budget_status: 'not_applicable'
+        budget_status: 'not_applicable',
+        repair_status: null,
+        repair_note: null,
+        repaired_at: null
       })
       .eq('id', actionId)
 
@@ -1092,45 +1118,54 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(null)
   }
 
-  // Start Job Order / Replacement with technician assignment
+  // Submit the Job Order Request: records the request, assigns the technician
+  // and starts the work in one step. The technician sees it in their mobile
+  // dashboard; GSO verifies and records the outcome after they mark it repaired.
   async function handleConfirmStartWork() {
     if (!techAssignModal) return
-    const { actionId, isFireExtinguisher, equipmentCode, isReassign } = techAssignModal
+    const { actionId, equipmentCode, isReassign } = techAssignModal
 
-    // Reassigning only changes who is on the job, so it needs no extra pause.
-    // Starting work is the real commitment, so it states what it does first.
+    if (!selectedTechnicianId) {
+      alert('Please select a technician for this Job Order.')
+      return
+    }
+
+    const tech = technicians.find((t) => t.id === selectedTechnicianId)
     if (!isReassign) {
-      const tech = technicians.find((t) => t.id === selectedTechnicianId)
-      const techLine = tech
-        ? `Assigned technician: ${tech.full_name}${tech.is_available ? '' : ' (currently marked Unavailable)'}.`
-        : 'No technician is selected, so this will be started unassigned.'
-
-      const message = isFireExtinguisher
-        ? `Start replacement of ${equipmentCode}?\n\n${techLine}\n\nThe action will be marked In Progress.`
-        : `Start Job Order for ${equipmentCode}?\n\n${techLine}\n\nThe action will be marked In Progress.`
-
+      const message =
+        `Submit Job Order Request for ${equipmentCode}?\n\n` +
+        `Assigned technician: ${tech?.full_name}${tech?.is_available ? '' : ' (currently marked Unavailable)'}.` +
+        `${tech?.profile_id ? '' : '\n\nNote: this technician has no mobile app account, so they cannot update the repair status themselves.'}` +
+        `\n\nThe action will be marked In Progress.`
       if (!window.confirm(message)) return
     }
 
     setActionUpdatingId(actionId)
-    const payload = {
-      status: 'in_progress',
-      assigned_technician_id: selectedTechnicianId || null
-    }
+    const payload = isReassign
+      ? { assigned_technician_id: selectedTechnicianId, repair_status: 'assigned', repair_note: null, repaired_at: null }
+      : {
+          repair_path: 'job_order',
+          decided_by: `${profile.full_name} (${profile.role})`,
+          decided_at: new Date().toISOString(),
+          job_order_remarks: jobOrderRemarks.trim() || null,
+          status: 'in_progress',
+          assigned_technician_id: selectedTechnicianId,
+          repair_status: 'assigned'
+        }
 
     const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
     if (error) {
-      alert('Failed to start work: ' + error.message)
+      alert('Failed to submit Job Order: ' + error.message)
     } else {
       getMaintenanceActions()
     }
 
     setTechAssignModal(null)
     setSelectedTechnicianId('')
+    setJobOrderRemarks('')
     setActionUpdatingId(null)
   }
 
-  // Stock management handlers
   async function handleSaveStock(type) {
     const qty = parseInt(stockEdits[type], 10)
     if (isNaN(qty) || qty < 0) {
@@ -1299,84 +1334,6 @@ function Dashboard({ profile, onLogout }) {
     }
   }
 
-  // GSO decides, for any equipment type including fire extinguishers: can
-  // this be handled with what's already on hand (Job Order — a technician
-  // repairs it, or for fire extinguishers, swapped from existing stock), or
-  // does it need budget/materials/outside procurement (Purchase Request)?
-  // These decisions route an action down a path that isn't reversible from
-  // the UI, so each one states plainly what it commits to before writing.
-  async function setRepairPath(actionId, repairPath, equipmentCode, isFireExtinguisher) {
-    const message =
-      repairPath === 'job_order'
-        ? isFireExtinguisher
-          ? `Replace ${equipmentCode} from existing stock?\n\nThis records a Job Order. When you later mark it completed, ${equipmentCode} is permanently retired and you'll be prompted to add its replacement.`
-          : `Record a Job Order for ${equipmentCode}?\n\nThis means your own technician will repair it — no purchase request needed.`
-        : isFireExtinguisher
-        ? `Order new stock for ${equipmentCode}?\n\nThis creates a Purchase Request and sends it to procurement. ${equipmentCode} stays out of service until the replacement arrives.`
-        : `Create a Purchase Request for ${equipmentCode}?\n\nThis means the repair needs budget, materials, or outside expertise, and will go to procurement.`
-
-    if (!window.confirm(message)) return
-
-    setActionUpdatingId(actionId)
-
-    const { error } = await supabase
-      .from('maintenance_actions')
-      .update({
-        repair_path: repairPath,
-        decided_by: `${profile.full_name} (${profile.role})`,
-        decided_at: new Date().toISOString()
-      })
-      .eq('id', actionId)
-
-    if (error) {
-      console.error('Error setting repair path:', error)
-      alert('Failed to update: ' + error.message)
-    } else {
-      getMaintenanceActions()
-    }
-
-    setActionUpdatingId(null)
-  }
-
-  // Applies only to actions that require a purchase:
-  // a fire extinguisher refill, or a replacement part on any other equipment.
-  async function setBudgetStatus(actionId, budgetStatus) {
-    setActionUpdatingId(actionId)
-
-    const payload = { budget_status: budgetStatus }
-    payload.status = budgetStatus === 'available' ? 'in_progress' : 'delayed'
-
-    const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
-
-    if (error) {
-      console.error('Error setting budget status:', error)
-      alert('Failed to update: ' + error.message)
-    } else {
-      getMaintenanceActions()
-    }
-
-    setActionUpdatingId(null)
-  }
-
-  // A delayed item can be re-checked once budget might have freed up
-  async function recheckBudget(actionId) {
-    setActionUpdatingId(actionId)
-
-    const { error } = await supabase
-      .from('maintenance_actions')
-      .update({ budget_status: 'not_applicable', status: 'pending' })
-      .eq('id', actionId)
-
-    if (error) {
-      console.error('Error rechecking budget:', error)
-      alert('Failed to update: ' + error.message)
-    } else {
-      getMaintenanceActions()
-    }
-
-    setActionUpdatingId(null)
-  }
-
   const sortedActions = [...maintenanceActions].sort((a, b) => {
     const pa = PRIORITY_ORDER[a.priority] || 5
     const pb = PRIORITY_ORDER[b.priority] || 5
@@ -1404,15 +1361,13 @@ function Dashboard({ profile, onLogout }) {
   const pendingActionsCount = sortedActions.length
 
   // Priority Actions counts by stage
-  const pendingCount = sortedActions.filter((a) => a.status === 'pending' && a.repair_path !== 'purchase_request').length
+  const pendingCount = sortedActions.filter((a) => a.status === 'pending').length
   const inProgressCount = sortedActions.filter((a) => a.status === 'in_progress').length
-  const procurementCount = sortedActions.filter((a) => a.repair_path === 'purchase_request' && a.status === 'pending').length
   const unresolvedCount = sortedActions.filter((a) => a.status === 'unresolved').length
 
   const displayedActions = sortedActions.filter((a) => {
-    if (priorityFilter === 'pending') return a.status === 'pending' && a.repair_path !== 'purchase_request'
+    if (priorityFilter === 'pending') return a.status === 'pending'
     if (priorityFilter === 'in_progress') return a.status === 'in_progress'
-    if (priorityFilter === 'procurement') return a.repair_path === 'purchase_request' && a.status === 'pending'
     if (priorityFilter === 'unresolved') return a.status === 'unresolved'
     return true
   })
@@ -1672,19 +1627,13 @@ function Dashboard({ profile, onLogout }) {
             className={`filter-chip ${priorityFilter === 'pending' ? 'active' : ''}`}
             onClick={() => setPriorityFilter('pending')}
           >
-            ⏳ Pending Decision <span className="chip-count">{pendingCount}</span>
+            ⏳ Needs Job Order <span className="chip-count">{pendingCount}</span>
           </button>
           <button
             className={`filter-chip ${priorityFilter === 'in_progress' ? 'active' : ''}`}
             onClick={() => setPriorityFilter('in_progress')}
           >
             🔧 In Progress <span className="chip-count">{inProgressCount}</span>
-          </button>
-          <button
-            className={`filter-chip ${priorityFilter === 'procurement' ? 'active' : ''}`}
-            onClick={() => setPriorityFilter('procurement')}
-          >
-            📦 Procurement <span className="chip-count">{procurementCount}</span>
           </button>
           <button
             className={`filter-chip ${priorityFilter === 'unresolved' ? 'active' : ''}`}
@@ -1706,34 +1655,14 @@ function Dashboard({ profile, onLogout }) {
             const isOverdue = age !== null && age >= 7
             const isFireExtinguisher = action.equipment?.equipment_type === 'fire_extinguisher'
 
-            // Stage 1 — fire extinguisher only: dispose or refill?
-            // GSO's decision: can this be handled with what's already on
-            // hand (Job Order), or does it need procurement (Purchase
-            // Request)? Applies to every equipment type the same way now —
-            // fire extinguishers are never repaired in place, they're always
-            // swapped for a whole new unit, but that's still either "swap
-            // from existing stock" (Job Order) or "need to order more
-            // stock first" (Purchase Request) — same shape as any repair.
-            const needsRepairPathChoice = !action.repair_path && action.status === 'pending'
-
-            const needsPurchase = action.repair_path === 'purchase_request'
-
-            // Stage 2 — budget check, only when a purchase request is involved
-            const needsBudgetCheck =
-              !needsRepairPathChoice &&
-              action.status === 'pending' &&
-              action.budget_status === 'not_applicable' &&
-              needsPurchase
-
-            // Stage 2b — Job Order path: GSO just starts the work directly
-            const needsStartWork =
-              !needsRepairPathChoice && !needsBudgetCheck && action.status === 'pending'
+            // Single GSO action: file a Job Order Request. It records the request,
+            // assigns a technician and starts the work. Purchase requests and
+            // ordering new stock are handled by the Supply Office, not here.
+            const needsJobOrder = action.status === 'pending'
 
             let cardStyle = isOverdue ? 'overdue' : 'warning'
-            if (action.status === 'delayed' || action.status === 'unresolved') cardStyle = 'overdue'
+            if (action.status === 'unresolved') cardStyle = 'overdue'
 
-            const feStockObj = stock.find((s) => s.equipment_type === 'fire_extinguisher')
-            const feStockCount = feStockObj ? feStockObj.quantity_available : 0
             const assignedTech = technicians.find((t) => t.id === action.assigned_technician_id)
 
             return (
@@ -1742,7 +1671,6 @@ function Dashboard({ profile, onLogout }) {
                   ⚠ {action.equipment?.equipment_code} —{' '}
                   {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
                   {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
-                  {action.status === 'delayed' && <span className="overdue-tag">DELAYED</span>}
                   {action.status === 'unresolved' && <span className="overdue-tag" style={{ background: '#b91c1c' }}>UNRESOLVED</span>}
                 </div>
                 <p>
@@ -1754,33 +1682,16 @@ function Dashboard({ profile, onLogout }) {
                   &nbsp;·&nbsp; Status: <strong style={{ textTransform: 'capitalize' }}>{action.status.replace('_', ' ')}</strong>
                 </p>
 
-                {(action.repair_path || action.budget_status !== 'not_applicable') && (
+                {(action.repair_path === 'job_order' || isFireExtinguisher) && (
                   <p style={{ color: 'var(--text-muted)' }}>
-                    {action.repair_path && (
-                      <>
-                        Decision:{' '}
-                        <strong>
-                          {action.repair_path === 'job_order'
-                            ? isFireExtinguisher
-                              ? 'Replace from Stock'
-                              : 'Job Order'
-                            : isFireExtinguisher
-                            ? 'Order New Stock'
-                            : 'Purchase Request'}
-                        </strong>
-                      </>
+                    {action.repair_path === 'job_order' && (
+                      <>Job Order filed{action.job_order_remarks ? <> — "{action.job_order_remarks}"</> : null}</>
                     )}
-                    {action.repair_path && action.budget_status !== 'not_applicable' && ' · '}
-                    {action.budget_status !== 'not_applicable' && (
-                      <>Budget: <strong>{action.budget_status === 'available' ? 'Available' : 'Not available'}</strong></>
-                    )}
+                    {action.repair_path === 'job_order' && isFireExtinguisher && ' · '}
                     {isFireExtinguisher && (
-                      <>
-                        {' · '}
-                        <span style={{ fontStyle: 'italic' }}>
-                          this unit retires once complete — the replacement gets its own new entry
-                        </span>
-                      </>
+                      <span style={{ fontStyle: 'italic' }}>
+                        this unit retires once complete — the replacement gets its own new entry
+                      </span>
                     )}
                   </p>
                 )}
@@ -1864,147 +1775,53 @@ function Dashboard({ profile, onLogout }) {
                   )
                 })()}
 
-                {/* Job Order vs Purchase Request — same decision for every equipment type */}
-                {needsRepairPathChoice && (
+                {/* One GSO action: Job Order Request (opens the request form) */}
+                {needsJobOrder && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      {isFireExtinguisher
-                        ? `Decision needed: replace from existing stock (${feStockCount} available), or order new stock first?`
-                        : 'Decision needed: can this be fixed in-house, or does it need a purchase request?'}
-                    </p>
-                    <div className="action-buttons">
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => {
-                          if (isFireExtinguisher && feStockCount === 0) {
-                            const proceed = window.confirm(
-                              `⚠ Warning: There are 0 fire extinguishers in stock.\n\nIf you choose "Replace from Stock", you will need to replenish stock before the replacement unit is available.\n\nProceed anyway?`
-                            )
-                            if (!proceed) return
-                          }
-                          setRepairPath(
-                            action.id,
-                            'job_order',
-                            action.equipment?.equipment_code,
-                            isFireExtinguisher
-                          )
-                        }}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        {isFireExtinguisher
-                          ? `Replace from Stock (Job Order) — ${feStockCount} in stock`
-                          : 'Job Order (technician repairs)'}
-                      </button>
-                      <button
-                        className="btn btn-outline-red btn-sm"
-                        onClick={() =>
-                          setRepairPath(
-                            action.id,
-                            'purchase_request',
-                            action.equipment?.equipment_code,
-                            isFireExtinguisher
-                          )
-                        }
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        {isFireExtinguisher
-                          ? 'Order New Stock (Purchase Request)'
-                          : 'Purchase Request (needs budget/materials)'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Purchase workflow: procurement with arrival & reassessment actions */}
-                {needsBudgetCheck && (
-                  <div
-                    style={{
-                      marginTop: '10px',
-                      background: 'var(--amber-bg)',
-                      border: '1px solid var(--amber-border)',
-                      borderRadius: '8px',
-                      padding: '12px 14px'
-                    }}
-                  >
-                    <p style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--amber)', margin: 0 }}>
-                      Pending for procurement
-                    </p>
-                    <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 10px 0' }}>
-                      Awaiting Supply Office delivery of materials or replacement units.
+                      Action required: file a Job Order Request so this defect can be repaired.
                     </p>
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
                         onClick={() => {
                           setSelectedTechnicianId('')
+                          setJobOrderRemarks('')
                           setTechAssignModal({
                             actionId: action.id,
                             isFireExtinguisher,
-                            equipmentCode: action.equipment?.equipment_code
+                            equipmentCode: action.equipment?.equipment_code,
+                            equipmentType: action.equipment?.equipment_type,
+                            location: `${action.equipment?.buildings?.building_name ?? 'N/A'} — ${action.equipment?.exact_location ?? ''}`,
+                            finding: action.description,
+                            actionType: action.action_type,
+                            priority: action.priority,
+                            reportedDate: action.reported_date
                           })
                         }}
                         disabled={actionUpdatingId === action.id}
                       >
-                        📦 Stock / Materials Arrived — Start Work
-                      </button>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => reassessAction(action.id)}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        🔄 Cancel / Reassess Route
+                        📝 Job Order Request
                       </button>
                     </div>
-                  </div>
-                )}
-
-                {/* Job Order — start work with technician assignment */}
-                {needsStartWork && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
-                      Ready to assign technician and start work.
-                    </p>
-                    <div className="action-buttons">
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => {
-                          setSelectedTechnicianId('')
-                          setTechAssignModal({
-                            actionId: action.id,
-                            isFireExtinguisher,
-                            equipmentCode: action.equipment?.equipment_code
-                          })
-                        }}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        {isFireExtinguisher ? 'Start Replacement & Assign' : 'Start Job Order & Assign'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Stage: Delayed — waiting on budget */}
-                {action.status === 'delayed' && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--red)', margin: '0 0 8px 0' }}>
-                      Delayed — budget was not available. Re-check once funds may be free.
-                    </p>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => recheckBudget(action.id)}
-                      disabled={actionUpdatingId === action.id}
-                    >
-                      Re-check Budget
-                    </button>
                   </div>
                 )}
 
                 {/* Stage: In progress — close with outcome tracking or reassign technician */}
                 {action.status === 'in_progress' && (
                   <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--blue)', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      Work is currently in progress.
+                    <p style={{ fontSize: '0.85rem', color: action.repair_status === 'repaired' ? 'var(--green)' : 'var(--blue)', fontWeight: 600, margin: '0 0 8px 0' }}>
+                      {action.repair_status === 'repaired'
+                        ? `✓ Technician marked this as repaired${action.repaired_at ? ' ' + relativeTime(action.repaired_at) : ''}. Verify the unit, then record the outcome.`
+                        : action.repair_status === 'working'
+                        ? '🔧 Technician is working on it.'
+                        : 'Work is in progress. Waiting for the technician to start.'}
                     </p>
+                    {action.repair_note && (
+                      <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '0 0 8px 0' }}>
+                        Technician note: <em>"{action.repair_note}"</em>
+                      </p>
+                    )}
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
@@ -3038,7 +2855,12 @@ function Dashboard({ profile, onLogout }) {
                       <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                           <div>
-                            <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>{t.full_name}</div>
+                            <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>
+                              {t.full_name}
+                              {t.profile_id && (
+                                <span style={{ marginLeft: '8px', fontSize: '0.72rem', fontWeight: 600, color: 'var(--blue)' }}>📱 App account</span>
+                              )}
+                            </div>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                               {t.contact_info || 'No contact provided'}
                             </div>
@@ -3207,56 +3029,73 @@ function Dashboard({ profile, onLogout }) {
         </div>
       )}
 
-      {/* ===================== TECHNICIAN ASSIGNMENT MODAL (Feature 3) ===================== */}
+      {/* ===================== JOB ORDER REQUEST MODAL ===================== */}
       {techAssignModal && (
         <div className="modal-overlay">
-          <div className="modal-box" style={{ maxWidth: '420px' }}>
+          <div className="modal-box" style={{ maxWidth: '480px' }}>
             <div className="modal-title">
-              {techAssignModal.isReassign ? 'Reassign Technician' : techAssignModal.isFireExtinguisher ? 'Start Replacement' : 'Start Job Order'}
+              {techAssignModal.isReassign ? 'Reassign Technician' : 'Job Order Request'}
             </div>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', margin: '0 0 16px 0' }}>
-              Assign an in-house technician to work on <strong>{techAssignModal.equipmentCode}</strong>:
-            </p>
 
-            <div style={{ marginBottom: '16px' }}>
-              <label className="field-label">Select Technician</label>
+            {!techAssignModal.isReassign && (
+              <div style={{ background: 'var(--bg, #f6f8fb)', border: '1px solid var(--border)', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px', fontSize: '0.88rem', lineHeight: 1.6 }}>
+                <div><strong>Equipment:</strong> {techAssignModal.equipmentCode} ({TYPE_LABELS[techAssignModal.equipmentType] || techAssignModal.equipmentType})</div>
+                <div><strong>Location:</strong> {techAssignModal.location}</div>
+                <div><strong>Reported defect:</strong> {techAssignModal.finding} <span style={{ color: 'var(--text-muted)' }}>({techAssignModal.actionType})</span></div>
+                <div><strong>Priority:</strong> <span style={{ textTransform: 'capitalize' }}>{techAssignModal.priority}</span></div>
+                <div><strong>Date reported:</strong> {formatTimestamp(techAssignModal.reportedDate)}</div>
+                <div><strong>Requested by:</strong> {profile.full_name} ({profile.role})</div>
+                {techAssignModal.isFireExtinguisher && (
+                  <div style={{ color: 'var(--amber)' }}>
+                    <strong>Fire extinguisher stock:</strong> {(stock.find((x) => x.equipment_type === 'fire_extinguisher')?.quantity_available) ?? 0} available for replacement
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ marginBottom: '14px' }}>
+              <label className="field-label">Assign Technician</label>
               <select
                 value={selectedTechnicianId}
                 onChange={(e) => setSelectedTechnicianId(e.target.value)}
               >
-                <option value="">-- Unassigned / Not specified --</option>
+                <option value="">-- Select technician --</option>
                 {technicians.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.contact_info ? `· ${t.contact_info}` : ''}
+                    {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.profile_id ? '· 📱 app' : ''}
                   </option>
                 ))}
               </select>
               {technicians.length === 0 && (
                 <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
-                  No technicians listed yet. You can add technicians anytime in the Technicians tab.
+                  No technicians listed yet. Add one in the Technicians tab first.
                 </p>
               )}
             </div>
+
+            {!techAssignModal.isReassign && (
+              <div style={{ marginBottom: '14px' }}>
+                <label className="field-label">Remarks / instructions (optional)</label>
+                <textarea
+                  rows={3}
+                  placeholder="e.g. Check the alarm wiring in the corridor first"
+                  value={jobOrderRemarks}
+                  onChange={(e) => setJobOrderRemarks(e.target.value)}
+                />
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '6px 0 0 0' }}>
+                  Fields will be aligned with the official GSO Job Order form once the template is provided.
+                </p>
+              </div>
+            )}
 
             <div className="modal-actions" style={{ gap: '8px' }}>
               <button className="btn btn-secondary" onClick={() => setTechAssignModal(null)}>
                 Cancel
               </button>
               <button className="btn btn-primary" onClick={handleConfirmStartWork}>
-                {techAssignModal.isReassign ? 'Save Assignment' : 'Start Work'}
+                {techAssignModal.isReassign ? 'Save Assignment' : 'Submit Job Order'}
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {qrPrintItems.length > 0 && (
-        <div className="qr-print-area">
-          <h2 className="qr-print-title">NBSC Fire Safety Equipment — QR Labels</h2>
-          <div className="qr-print-grid">
-            {qrPrintItems.map((item) => (
-              <QrLabel key={item.id} item={item} />
-            ))}
           </div>
         </div>
       )}
