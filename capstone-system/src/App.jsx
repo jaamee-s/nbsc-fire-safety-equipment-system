@@ -276,6 +276,8 @@ function Dashboard({ profile, onLogout }) {
   const [equipment, setEquipment] = useState([])
   const [buildings, setBuildings] = useState([])
   const [maintenanceActions, setMaintenanceActions] = useState([])
+  // Completed (closed) jobs, loaded separately so they can appear in the Summary.
+  const [completedActions, setCompletedActions] = useState([])
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState(null)
@@ -420,6 +422,7 @@ function Dashboard({ profile, onLogout }) {
     getInspections()
     getStock()
     getTechnicians()
+    getCompletedActions()
   }, [])
 
   // Real-time updates: when a technician marks a repair or an inspector
@@ -429,6 +432,7 @@ function Dashboard({ profile, onLogout }) {
       .channel('gso-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_actions' }, () => {
         getMaintenanceActions()
+        getCompletedActions()
         getEquipment()
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inspections' }, () => {
@@ -738,6 +742,27 @@ function Dashboard({ profile, onLogout }) {
     } else {
       setMaintenanceActions(data || [])
     }
+  }
+
+  // Closed jobs (including ones the system closed automatically when the
+  // technician marked them repaired). Feeds the "Completed repairs" section
+  // of the Summary.
+  async function getCompletedActions() {
+    const { data, error } = await supabase
+      .from('maintenance_actions')
+      .select(`
+        id, action_type, description, priority, status,
+        completed_date, completed_by, outcome_reason,
+        equipment ( equipment_code, equipment_type, exact_location,
+          buildings ( building_name )
+        )
+      `)
+      .eq('status', 'completed')
+      .order('completed_date', { ascending: false })
+      .limit(100)
+
+    if (error) console.error('Error fetching completed actions:', error)
+    else setCompletedActions(data || [])
   }
 
   async function getStock() {
@@ -3111,6 +3136,7 @@ function Dashboard({ profile, onLogout }) {
           technicians={technicians}
           stock={stock}
           expiring={expiringEquipment}
+          completed={completedActions}
           onClose={() => setShowSummary(false)}
         />
       )}
