@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './supabaseClient'
 
-/* =====================================================================
-   GsoExtras.jsx  —  new web-app pieces (put this file in src/ next to App.jsx)
-
+/* 
    Exports:
      buildGsoNotifications   builds the GSO notification list
      NotificationBell        bell button + dropdown for the header
@@ -389,6 +387,7 @@ export function SummaryModal({
   technicians = [],
   stock = [],
   expiring = [],
+  completed = [],
   onClose
 }) {
   const now = new Date()
@@ -424,6 +423,13 @@ export function SummaryModal({
 
   const expiredCount = expiring.filter((e) => e.daysLeft < 0).length
   const soonCount = expiring.length - expiredCount
+
+  const doneToday = completed.filter(
+    (a) => a.completed_date && sameDay(new Date(a.completed_date), now)
+  ).length
+  const doneWeek = completed.filter(
+    (a) => a.completed_date && now - new Date(a.completed_date) <= 7 * 24 * 60 * 60 * 1000
+  ).length
 
   const th = { textAlign: 'left', fontSize: '0.78rem', color: '#64748b', padding: '6px 8px', borderBottom: '1px solid #e3e8ef' }
   const td = { fontSize: '0.86rem', padding: '6px 8px', borderBottom: '1px solid #f1f5f9' }
@@ -485,6 +491,38 @@ export function SummaryModal({
             By priority — Critical: <strong>{prio('critical')}</strong> · High: <strong>{prio('high')}</strong> ·
             Medium: <strong>{prio('medium')}</strong> · Low: <strong>{prio('low')}</strong>
           </div>
+        </SummarySection>
+
+        <SummarySection title="Completed repairs">
+          <div style={tileGrid}>
+            <Tile label="Total completed" value={completed.length} color="#15803d" />
+            <Tile label="Today" value={doneToday} />
+            <Tile label="Last 7 days" value={doneWeek} />
+          </div>
+          {completed.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '12px' }}>
+              <thead>
+                <tr>
+                  <th style={th}>Equipment</th>
+                  <th style={th}>Work</th>
+                  <th style={th}>Completed by</th>
+                  <th style={th}>When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {completed.slice(0, 8).map((a) => (
+                  <tr key={a.id}>
+                    <td style={td}>
+                      {a.equipment?.equipment_code} — {TYPE_LABELS[a.equipment?.equipment_type] || ''}
+                    </td>
+                    <td style={td}>{a.description}</td>
+                    <td style={td}>{a.completed_by || '—'}</td>
+                    <td style={td}>{ago(a.completed_date)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </SummarySection>
 
         <SummarySection title="Inspections">

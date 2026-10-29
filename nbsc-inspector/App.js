@@ -879,7 +879,7 @@ function TechnicianJob({ job, onBack, onUpdated }) {
   function markRepaired() {
     confirmAction(
       'Mark as repaired?',
-      `Confirm that ${job.equipment_code} has been repaired. GSO will be notified and will verify the unit before closing the job.`,
+      `Confirm that ${job.equipment_code} has been repaired. The job will be closed and recorded in your summary automatically.`,
       'Mark repaired',
       () => apply('repaired')
     )
@@ -910,7 +910,7 @@ function TechnicianJob({ job, onBack, onUpdated }) {
         {repaired && (
           <View style={[s.banner, s.bannerGreen]}>
             <Text style={s.bannerGreenText}>
-              Marked as repaired. Waiting for GSO to verify the unit and close the job.
+              Marked as repaired. This job has been completed automatically.
             </Text>
           </View>
         )}
