@@ -1496,7 +1496,7 @@ function Dashboard({ profile, onLogout }) {
             style={{ marginRight: '6px' }}
             onClick={() => setShowSummary(true)}
           >
-            📋 Summary
+            Summary
           </button>
           <NotificationBell
             notifications={gsoNotifications}
