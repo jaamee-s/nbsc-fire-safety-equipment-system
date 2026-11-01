@@ -1855,7 +1855,7 @@ function Dashboard({ profile, onLogout }) {
                         }}
                         disabled={actionUpdatingId === action.id}
                       >
-                        📝 Job Order Request
+                        Job Order Request
                       </button>
                     </div>
                   </div>
@@ -1924,7 +1924,7 @@ function Dashboard({ profile, onLogout }) {
                       onClick={() => reassessAction(action.id)}
                       disabled={actionUpdatingId === action.id}
                     >
-                      🔄 Reassess Action
+                      Reassess Action
                     </button>
                   </div>
                 )}
