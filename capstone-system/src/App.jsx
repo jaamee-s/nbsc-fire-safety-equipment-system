@@ -1565,14 +1565,6 @@ function Dashboard({ profile, onLogout }) {
               <span className="sidebar-text">Dashboard</span>
             </button>
             <button
-              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
-              onClick={() => setActiveTab('equipment')}
-              title="Equipment"
-            >
-              <span className="sidebar-icon">🧯</span>
-              <span className="sidebar-text">Equipment</span>
-            </button>
-            <button
               className={`sidebar-item ${activeTab === 'inspectors' ? 'active' : ''}`}
               onClick={() => setActiveTab('inspectors')}
               title="Inspectors"
