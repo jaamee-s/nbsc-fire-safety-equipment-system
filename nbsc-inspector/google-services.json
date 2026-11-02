@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "855540487441",
+    "project_id": "nbsc-firesafety",
+    "storage_bucket": "nbsc-firesafety.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:855540487441:android:877063f095471d41c8e8b0",
+        "android_client_info": {
+          "package_name": "com.nbsc.firesafety"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCyPTtYok5KHt3ZLJ4WGQOh9gLR2gbi5mc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
