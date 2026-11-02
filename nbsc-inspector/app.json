@@ -25,6 +25,13 @@
         {
           "cameraPermission": "FireSafety Tech&Inspect needs camera access to scan equipment QR codes."
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#0F2A4A",
+          "defaultChannel": "default"
+        }
       ]
     ],
     "extra": {
