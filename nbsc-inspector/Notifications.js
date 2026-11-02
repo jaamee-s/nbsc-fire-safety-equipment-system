@@ -5,14 +5,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { TYPE_LABELS, STATUS_LABELS, relativeTime } from './lib/inspector'
 
 /* =====================================================================
-   Notifications.js  (put this file next to App.js in the mobile project)
+   Notifications.js
 
    Exports:
-     useNotifications      builds the list + tracks read/unread per account
+     useNotifications      builds the to-do list + tracks read/unread per account
      NotificationBell      bell button for the header
-     NotificationsScreen   the full notifications screen
+     NotificationsScreen   the full notifications screen (alert history from
+                           the database + the to-do list)
      InspectorSummary      summary card for the inspector dashboard
      TechnicianSummary     summary card for the technician dashboard
+
+   Phone (push) notifications live in lib/push.js.
    ===================================================================== */
 
 const C = {
@@ -63,9 +66,9 @@ function buildTechnicianNotifications(data) {
       title = `In progress: ${j.equipment_code}`
       next = 'When the repair is finished, tap "Mark as repaired" so GSO can verify it.'
     } else {
-      title = `Waiting for GSO: ${j.equipment_code}`
+      title = `Marked repaired: ${j.equipment_code}`
       next =
-        'Nothing more to do for now. GSO will verify the unit and close the job. If it is sent back to you, it will appear here again.'
+        'Nothing more to do for now. The job is being closed. If it is sent back to you, it will appear here again.'
       tone = 'green'
     }
 
@@ -236,9 +239,29 @@ export function NotificationBell({ count, onPress }) {
   )
 }
 
-export function NotificationsScreen({ role, items, onOpen, onMarkAll, onBack }) {
+// Tone for a row from the `notifications` table, by event kind.
+const HISTORY_TONES = {
+  new_defect: 'red',
+  job_assigned: 'amber',
+  job_reassigned: 'blue',
+  repair_working: 'blue',
+  repair_done: 'green',
+  job_closed: 'green',
+  job_unresolved: 'red'
+}
+
+export function NotificationsScreen({
+  role,
+  items,
+  history = [],
+  onOpen,
+  onOpenHistory,
+  onMarkAll,
+  onBack
+}) {
   const [error, setError] = useState(null)
-  const unread = items.filter((i) => i.unread).length
+  const unread =
+    items.filter((i) => i.unread).length + history.filter((h) => !h.read_at).length
 
   async function open(item) {
     setError(null)
@@ -264,6 +287,35 @@ export function NotificationsScreen({ role, items, onOpen, onMarkAll, onBack }) 
       </Text>
 
       {error && <Text style={n.error}>{error}</Text>}
+
+      {history.length > 0 && (
+        <>
+          <Text style={n.groupTitle}>Recent alerts</Text>
+          {history.map((h) => {
+            const tone = TONES[HISTORY_TONES[h.kind]] || TONES.blue
+            const isUnread = !h.read_at
+            return (
+              <Pressable
+                key={h.id}
+                onPress={() => onOpenHistory && onOpenHistory(h)}
+                style={[
+                  n.card,
+                  { borderLeftWidth: 5, borderLeftColor: tone.bar },
+                  isUnread && { backgroundColor: tone.bg }
+                ]}
+              >
+                <View style={n.titleRow}>
+                  <Text style={[n.title, isUnread && { fontWeight: '800' }]}>{h.title}</Text>
+                  {isUnread && <View style={[n.dot, { backgroundColor: tone.bar }]} />}
+                </View>
+                {h.body ? <Text style={n.detail}>{h.body}</Text> : null}
+                <Text style={n.time}>{relativeTime(h.created_at)}</Text>
+              </Pressable>
+            )
+          })}
+          <Text style={n.groupTitle}>To do</Text>
+        </>
+      )}
 
       {items.length === 0 ? (
         <View style={n.card}>
@@ -464,6 +516,7 @@ const n = StyleSheet.create({
   h1: { fontSize: 20, fontWeight: '700', color: C.text },
   link: { fontSize: 13, color: C.blue, fontWeight: '600' },
   hint: { fontSize: 12, color: C.muted, marginTop: 2, marginBottom: 12 },
+  groupTitle: { fontSize: 13, fontWeight: '800', color: C.muted, marginTop: 4, marginBottom: 8, letterSpacing: 0.4 },
   error: { color: C.red, fontSize: 14, marginBottom: 10 },
   muted: { fontSize: 14, color: C.muted, lineHeight: 20 },
 

@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabaseClient'
+import { playNotificationSound } from './gsoNotifications'
 
-/* 
+/* =====================================================================
    Exports:
-     buildGsoNotifications   builds the GSO notification list
-     NotificationBell        bell button + dropdown for the header
+     NotificationBell        bell button + dropdown + sound and pop-ups
+     PriorityActionsSummary  Job Order / Purchase Request summary ("All" view)
      SummaryModal            the "Summary" view
      InspectorsTab           the Inspectors sidebar page
      JobOrderRequestModal    the Job Order Request form
+
+   The notification list itself is built in gsoNotifications.js.
    ===================================================================== */
 
 const TYPE_LABELS = {
@@ -65,88 +68,6 @@ function sameDay(a, b) {
 /* Notifications                                                       */
 /* ------------------------------------------------------------------ */
 
-// Everything here is derived from data the dashboard already loads, so no
-// database change is needed. Ids include the stage, so when something moves
-// to a new stage (e.g. technician marks it repaired) it shows up as unread again.
-export function buildGsoNotifications({ actions = [], expiring = [] }) {
-  const list = []
-
-  actions.forEach((a) => {
-    const code = a.equipment?.equipment_code || 'Equipment'
-    const where = `${a.equipment?.buildings?.building_name ?? 'N/A'} — ${a.equipment?.exact_location ?? ''}`
-
-    if (a.status === 'pending') {
-      list.push({
-        id: `pending-${a.id}`,
-        tone: a.priority === 'critical' || a.priority === 'high' ? 'red' : 'amber',
-        title: `New defect reported: ${code}`,
-        detail: `${a.description} (${a.priority} priority) · ${where}`,
-        next: 'File a Job Order Request so a technician can be assigned.',
-        time: a.reported_date,
-        target: 'priority'
-      })
-    }
-
-    if (a.status === 'in_progress' && a.repair_status === 'repaired') {
-      list.push({
-        id: `repaired-${a.id}`,
-        tone: 'green',
-        title: `Technician marked ${code} as repaired`,
-        detail: a.repair_note ? `Technician note: "${a.repair_note}"` : where,
-        next: 'Verify the unit, then open Record Outcome / Close Work.',
-        time: a.repaired_at || a.reported_date,
-        target: 'priority'
-      })
-    }
-
-    if (a.status === 'in_progress' && a.repair_status === 'working') {
-      list.push({
-        id: `working-${a.id}`,
-        tone: 'blue',
-        title: `Technician started working on ${code}`,
-        detail: where,
-        next: 'No action needed yet. You will be notified when it is marked repaired.',
-        time: a.decided_at || a.reported_date,
-        target: 'priority'
-      })
-    }
-
-    if (a.status === 'unresolved') {
-      list.push({
-        id: `unresolved-${a.id}`,
-        tone: 'red',
-        title: `${code} is marked Unresolved`,
-        detail: a.outcome_reason ? `Reason: "${a.outcome_reason}"` : where,
-        next: 'Reassess the action to try a different repair route.',
-        time: a.outcome_at || a.reported_date,
-        target: 'priority'
-      })
-    }
-  })
-
-  expiring.forEach((item) => {
-    const expired = item.daysLeft < 0
-    list.push({
-      id: `expiry-${item.id}-${item.expiration_date}`,
-      tone: expired ? 'red' : 'amber',
-      title: expired
-        ? `${item.equipment_code} has expired`
-        : `${item.equipment_code} expires ${item.daysLeft === 0 ? 'today' : `in ${item.daysLeft} day${item.daysLeft === 1 ? '' : 's'}`}`,
-      detail: `${TYPE_LABELS[item.equipment_type] || item.equipment_type} · ${item.buildings?.building_name ?? 'N/A'} — ${item.exact_location ?? ''}`,
-      next: 'Arrange a replacement or refill with the Supply Office.',
-      time: item.expiration_date,
-      target: 'expiry'
-    })
-  })
-
-  return list.sort((x, y) => {
-    if (!x.time && !y.time) return 0
-    if (!x.time) return 1
-    if (!y.time) return -1
-    return new Date(y.time) - new Date(x.time)
-  })
-}
-
 const TONE = {
   red: { bar: '#dc2626', bg: '#fef2f2' },
   amber: { bar: '#d97706', bg: '#fffbeb' },
@@ -155,12 +76,14 @@ const TONE = {
 }
 
 const SEEN_KEY = 'gso-seen-notifications'
+const SOUND_KEY = 'gso-notification-sound'
+const TOAST_MS = 7000
 
 function loadSeen() {
   try {
     const raw = localStorage.getItem(SEEN_KEY)
     return raw ? JSON.parse(raw) : []
-  } catch (e) {
+  } catch {
     return []
   }
 }
@@ -168,17 +91,89 @@ function loadSeen() {
 function saveSeen(list) {
   try {
     localStorage.setItem(SEEN_KEY, JSON.stringify(list.slice(-500)))
-  } catch (e) {
+  } catch {
     /* storage unavailable — read state just won't persist */
   }
 }
 
-export function NotificationBell({ notifications, onNavigate }) {
+function loadSoundOn() {
+  try {
+    return localStorage.getItem(SOUND_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+
+function desktopSupported() {
+  return typeof window !== 'undefined' && 'Notification' in window
+}
+
+// `ready` is false until the dashboard's first load has finished, so the
+// notifications that already existed when the page opened don't all ding
+// at once. After that, every NEW unread notification plays the sound and
+// pops up in the corner (like Facebook), and — when this tab is in the
+// background — also shows as a desktop notification.
+export function NotificationBell({ notifications, onNavigate, ready = true }) {
   const [open, setOpen] = useState(false)
   const [seen, setSeen] = useState(loadSeen)
+  const [soundOn, setSoundOn] = useState(loadSoundOn)
+  const [toasts, setToasts] = useState([])
+  const [desktopPermission, setDesktopPermission] = useState(
+    desktopSupported() ? Notification.permission : 'unsupported'
+  )
+  const knownIdsRef = useRef(null)
 
   const seenSet = useMemo(() => new Set(seen), [seen])
   const unread = notifications.filter((n) => !seenSet.has(n.id)).length
+
+  const soundOnRef = useRef(soundOn)
+  const onNavigateRef = useRef(onNavigate)
+  useEffect(() => {
+    soundOnRef.current = soundOn
+    onNavigateRef.current = onNavigate
+  })
+
+  useEffect(() => {
+    if (!ready) return
+    if (knownIdsRef.current === null) {
+      knownIdsRef.current = new Set(notifications.map((n) => n.id))
+      return
+    }
+    const fresh = notifications.filter(
+      (n) => !knownIdsRef.current.has(n.id) && !seenSet.has(n.id)
+    )
+    notifications.forEach((n) => knownIdsRef.current.add(n.id))
+    if (fresh.length === 0) return
+
+    if (soundOnRef.current) playNotificationSound()
+    setToasts((prev) => [...fresh.slice(0, 3), ...prev].slice(0, 4))
+
+    if (
+      desktopSupported() &&
+      Notification.permission === 'granted' &&
+      document.visibilityState === 'hidden'
+    ) {
+      fresh.slice(0, 3).forEach((n) => {
+        try {
+          const d = new Notification(n.title, { body: n.detail, tag: n.id })
+          d.onclick = () => {
+            window.focus()
+            onNavigateRef.current && onNavigateRef.current(n)
+            d.close()
+          }
+        } catch {
+          /* some browsers only allow this from a service worker */
+        }
+      })
+    }
+  }, [notifications, ready, seenSet])
+
+  // Each popup closes by itself after a few seconds.
+  useEffect(() => {
+    if (toasts.length === 0) return
+    const timer = setTimeout(() => setToasts((prev) => prev.slice(0, -1)), TOAST_MS)
+    return () => clearTimeout(timer)
+  }, [toasts])
 
   function markSeen(id) {
     if (seenSet.has(id)) return
@@ -191,6 +186,29 @@ export function NotificationBell({ notifications, onNavigate }) {
     const next = [...new Set([...seen, ...notifications.map((n) => n.id)])]
     setSeen(next)
     saveSeen(next)
+  }
+
+  function toggleSound() {
+    const next = !soundOn
+    setSoundOn(next)
+    try {
+      localStorage.setItem(SOUND_KEY, next ? 'on' : 'off')
+    } catch {
+      /* ignore */
+    }
+    if (next) playNotificationSound()
+  }
+
+  function enableDesktop() {
+    if (!desktopSupported()) return
+    Notification.requestPermission().then(setDesktopPermission).catch(() => {})
+  }
+
+  function openItem(n) {
+    markSeen(n.id)
+    setOpen(false)
+    setToasts((prev) => prev.filter((t) => t.id !== n.id))
+    onNavigate && onNavigate(n)
   }
 
   return (
@@ -252,24 +270,39 @@ export function NotificationBell({ notifications, onNavigate }) {
           >
             <div
               style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
                 padding: '12px 14px',
                 borderBottom: '1px solid #e3e8ef',
                 position: 'sticky',
                 top: 0,
-                background: '#fff'
+                background: '#fff',
+                zIndex: 1
               }}
             >
-              <strong style={{ fontSize: '0.95rem' }}>Notifications</strong>
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={markAll}
-                disabled={unread === 0}
-              >
-                Mark all as read
-              </button>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <strong style={{ fontSize: '0.95rem' }}>Notifications</strong>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={markAll}
+                  disabled={unread === 0}
+                >
+                  Mark all as read
+                </button>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' }}>
+                <button className="btn btn-secondary btn-sm" onClick={toggleSound}>
+                  {soundOn ? '🔊 Sound on' : '🔇 Sound off'}
+                </button>
+                {desktopPermission === 'default' && (
+                  <button className="btn btn-secondary btn-sm" onClick={enableDesktop}>
+                    Enable desktop alerts
+                  </button>
+                )}
+                {desktopPermission === 'denied' && (
+                  <span style={{ fontSize: '0.74rem', color: '#64748b', alignSelf: 'center' }}>
+                    Desktop alerts are blocked in this browser&apos;s settings.
+                  </span>
+                )}
+              </div>
             </div>
 
             {notifications.length === 0 ? (
@@ -283,11 +316,7 @@ export function NotificationBell({ notifications, onNavigate }) {
                 return (
                   <div
                     key={n.id}
-                    onClick={() => {
-                      markSeen(n.id)
-                      setOpen(false)
-                      onNavigate && onNavigate(n.target)
-                    }}
+                    onClick={() => openItem(n)}
                     style={{
                       cursor: 'pointer',
                       padding: '11px 14px',
@@ -331,6 +360,274 @@ export function NotificationBell({ notifications, onNavigate }) {
           </div>
         </>
       )}
+
+      {/* Pop-up notifications, bottom-left corner */}
+      {toasts.length > 0 && (
+        <div
+          style={{
+            position: 'fixed',
+            left: '18px',
+            bottom: '18px',
+            display: 'flex',
+            flexDirection: 'column-reverse',
+            gap: '10px',
+            zIndex: 2000,
+            width: '340px',
+            maxWidth: 'calc(100vw - 36px)',
+            textAlign: 'left'
+          }}
+        >
+          {toasts.map((n) => {
+            const tone = TONE[n.tone] || TONE.blue
+            return (
+              <div
+                key={n.id}
+                className="gso-toast"
+                role="status"
+                onClick={() => openItem(n)}
+                style={{
+                  cursor: 'pointer',
+                  background: '#fff',
+                  color: '#1e293b',
+                  border: '1px solid #e3e8ef',
+                  borderLeft: `5px solid ${tone.bar}`,
+                  borderRadius: '12px',
+                  boxShadow: '0 10px 28px rgba(15,42,74,0.28)',
+                  padding: '12px 14px',
+                  display: 'flex',
+                  gap: '10px'
+                }}
+              >
+                <div
+                  style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '50%',
+                    background: tone.bg,
+                    color: tone.bar,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    fontSize: '1rem'
+                  }}
+                >
+                  🔔
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{n.title}</div>
+                  <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '2px' }}>
+                    {n.detail}
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: '#2563eb', marginTop: '4px', fontWeight: 600 }}>
+                    Click to open
+                  </div>
+                </div>
+                <button
+                  aria-label="Dismiss"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setToasts((prev) => prev.filter((t) => t.id !== n.id))
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#94a3b8',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                    alignSelf: 'flex-start',
+                    padding: 0
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Priority Actions — "All" view summary                               */
+/* ------------------------------------------------------------------ */
+
+const PRIORITY_TAG = {
+  critical: { bg: '#fef2f2', fg: '#b91c1c' },
+  high: { bg: '#fff1e6', fg: '#c2410c' },
+  medium: { bg: '#fffbeb', fg: '#b45309' },
+  low: { bg: '#eff6ff', fg: '#2563eb' }
+}
+
+const PR_STATUS_LABELS = {
+  pending: 'Needs Job Order',
+  in_progress: 'Job Order in progress',
+  unresolved: 'Unresolved',
+  delayed: 'Delayed',
+  for_disposal: 'For disposal',
+  expired: 'Expired — no job yet'
+}
+
+function SmallTag({ children, bg, fg }) {
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        background: bg,
+        color: fg,
+        fontSize: '0.7rem',
+        fontWeight: 700,
+        padding: '2px 8px',
+        borderRadius: '999px',
+        whiteSpace: 'nowrap',
+        textTransform: 'capitalize'
+      }}
+    >
+      {children}
+    </span>
+  )
+}
+
+function SummaryColumn({ title, hint, count, accent, children }) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border)',
+        borderTop: `4px solid ${accent}`,
+        borderRadius: '10px',
+        background: '#fff',
+        padding: '14px 16px',
+        minWidth: 0
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+        <div style={{ fontWeight: 700, fontSize: '0.98rem' }}>{title}</div>
+        <span style={{ fontSize: '1.4rem', fontWeight: 800, color: count ? accent : 'var(--text-muted)' }}>
+          {count}
+        </span>
+      </div>
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '2px 0 10px 0' }}>{hint}</div>
+      {children}
+    </div>
+  )
+}
+
+function SummaryRow({ onClick, title, tag, lines }) {
+  return (
+    <div
+      onClick={onClick}
+      title="Click to open"
+      style={{
+        cursor: onClick ? 'pointer' : 'default',
+        padding: '9px 0',
+        borderTop: '1px solid #eef1f5'
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+        <span style={{ fontWeight: 700, fontSize: '0.88rem' }}>{title}</span>
+        {tag}
+      </div>
+      {lines.filter(Boolean).map((l, i) => (
+        <div key={i} style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+          {l}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// Shown at the top of Priority Actions when the filter is "All". It gathers,
+// in one place, every unit that needs a Job Order Request and every unit
+// that needs a Purchase Request. Clicking a row opens it in its own filter,
+// where the action buttons are.
+export function PriorityActionsSummary({ jobOrderActions = [], purchaseItems = [], onOpenAction, onOpenExpiry }) {
+  const qtyByType = {}
+  purchaseItems.forEach((p) => {
+    qtyByType[p.type] = (qtyByType[p.type] || 0) + 1
+  })
+
+  return (
+    <div
+      className="panel"
+      style={{ marginBottom: '18px', background: 'var(--gray-bg, #f8fafc)' }}
+    >
+      <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: '2px' }}>Summary of required requests</div>
+      <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '14px' }}>
+        All equipment that needs a Job Order Request or a Purchase Request, gathered in one place.
+        Click an item to open it.
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: '14px'
+        }}
+      >
+        <SummaryColumn
+          title="Needs Job Order Request"
+          hint="Reported defects with no technician assigned yet."
+          count={jobOrderActions.length}
+          accent="#d97706"
+        >
+          {jobOrderActions.length === 0 ? (
+            <div style={{ fontSize: '0.85rem', color: 'var(--green)' }}>✓ None — every defect has a Job Order.</div>
+          ) : (
+            jobOrderActions.map((a) => {
+              const p = PRIORITY_TAG[a.priority] || PRIORITY_TAG.medium
+              return (
+                <SummaryRow
+                  key={a.id}
+                  onClick={() => onOpenAction(a)}
+                  title={`${a.equipment?.equipment_code ?? '—'} — ${TYPE_LABELS[a.equipment?.equipment_type] || a.equipment?.equipment_type || ''}`}
+                  tag={<SmallTag bg={p.bg} fg={p.fg}>{a.priority}</SmallTag>}
+                  lines={[
+                    `${a.equipment?.buildings?.building_name ?? 'N/A'} — ${a.equipment?.exact_location ?? ''}`,
+                    a.description,
+                    `Reported ${ago(a.reported_date)}`
+                  ]}
+                />
+              )
+            })
+          )}
+        </SummaryColumn>
+
+        <SummaryColumn
+          title="Needs Purchase Request"
+          hint="Units that need a replacement, with no stock on hand to cover them."
+          count={purchaseItems.length}
+          accent="#b91c1c"
+        >
+          {purchaseItems.length === 0 ? (
+            <div style={{ fontSize: '0.85rem', color: 'var(--green)' }}>✓ None — stock covers every replacement.</div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                {Object.entries(qtyByType).map(([type, qty]) => (
+                  <SmallTag key={type} bg="#fef2f2" fg="#b91c1c">
+                    {TYPE_LABELS[type] || type} × {qty}
+                  </SmallTag>
+                ))}
+              </div>
+              {purchaseItems.map((p) => (
+                <SummaryRow
+                  key={p.key}
+                  onClick={() => (p.actionId ? onOpenAction({ id: p.actionId, status: p.status }) : onOpenExpiry())}
+                  title={`${p.code ?? '—'} — ${TYPE_LABELS[p.type] || p.type || ''}`}
+                  tag={<SmallTag bg="#f1f5f9" fg="#475569">{PR_STATUS_LABELS[p.status] || p.status}</SmallTag>}
+                  lines={[
+                    `${p.building ?? 'N/A'} — ${p.location ?? ''}`,
+                    p.reason,
+                    `Stock on hand: ${p.stockOnHand}`
+                  ]}
+                />
+              ))}
+            </>
+          )}
+        </SummaryColumn>
+      </div>
     </div>
   )
 }
@@ -388,6 +685,7 @@ export function SummaryModal({
   stock = [],
   expiring = [],
   completed = [],
+  purchaseItems = [],
   onClose
 }) {
   const now = new Date()
@@ -491,6 +789,35 @@ export function SummaryModal({
             By priority — Critical: <strong>{prio('critical')}</strong> · High: <strong>{prio('high')}</strong> ·
             Medium: <strong>{prio('medium')}</strong> · Low: <strong>{prio('low')}</strong>
           </div>
+        </SummarySection>
+
+        <SummarySection title="Requests needed">
+          <div style={tileGrid}>
+            <Tile label="Needs Job Order Request" value={pending} color={pending ? '#b45309' : undefined} />
+            <Tile label="Needs Purchase Request" value={purchaseItems.length} color={purchaseItems.length ? '#b91c1c' : undefined} />
+          </div>
+          {purchaseItems.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '12px' }}>
+              <thead>
+                <tr>
+                  <th style={th}>Equipment (Purchase Request)</th>
+                  <th style={th}>Location</th>
+                  <th style={th}>Reason</th>
+                  <th style={th}>Stock on hand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {purchaseItems.map((p) => (
+                  <tr key={p.key}>
+                    <td style={td}>{p.code} — {TYPE_LABELS[p.type] || p.type}</td>
+                    <td style={td}>{p.building ?? 'N/A'} — {p.location ?? ''}</td>
+                    <td style={td}>{p.reason}</td>
+                    <td style={{ ...td, color: '#b91c1c', fontWeight: 600 }}>{p.stockOnHand}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </SummarySection>
 
         <SummarySection title="Completed repairs">
@@ -885,6 +1212,9 @@ export function JobOrderRequestModal({
           {modal.isFireExtinguisher && (
             <FormCell label="Replacement stock on hand" span={2}>
               {fireExtinguisherStock} fire extinguisher{fireExtinguisherStock === 1 ? '' : 's'} available
+              {fireExtinguisherStock === 0 && (
+                <span style={{ color: '#b91c1c' }}> — no unit on hand, a Purchase Request is also needed</span>
+              )}
             </FormCell>
           )}
         </div>

@@ -3,12 +3,13 @@ import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
 import {
-  buildGsoNotifications,
   NotificationBell,
+  PriorityActionsSummary,
   SummaryModal,
   InspectorsTab,
   JobOrderRequestModal
 } from './GsoExtras'
+import { buildGsoNotifications, findPurchaseRequestItems } from './gsoNotifications'
 
 const EQUIPMENT_TYPES = [
   'fire_extinguisher',
@@ -54,9 +55,11 @@ const CODE_PREFIXES = {
   smoke_detector: 'SD'
 }
 
-// GSO's only action on a reported defect is a Job Order Request (see the
-// Job Order Request modal). Purchase requests and ordering new stock are
-// handled by the Supply Office and are outside this system's scope.
+// GSO's action on a reported defect is a Job Order Request (see the Job
+// Order Request modal). When the fix needs a replacement unit that the
+// storeroom doesn't have, the unit also needs a Purchase Request; the
+// Supply Office processes it, and the dashboard lists every such unit in the
+// Priority Actions summary (see findPurchaseRequestItems).
 
 async function generateEquipmentCode(supabase, equipmentType) {
   const prefix = CODE_PREFIXES[equipmentType] || 'EQ'
@@ -153,6 +156,31 @@ function App() {
   const [showLoginSuccess, setShowLoginSuccess] = useState(false)
 
   useEffect(() => {
+    // Supabase also fires an auth event on every token refresh (about hourly)
+    // and when the tab regains focus. Reloading the profile then would flash
+    // the loading screen and remount the dashboard, wiping the GSO's open
+    // tab and half-filled forms — so only load when the user actually changes.
+    let loadedFor = null
+
+    async function loadProfile(userId) {
+      if (loadedFor === userId) return
+      loadedFor = userId
+      setAuthLoading(true)
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, role')
+        .eq('id', userId)
+        .single()
+
+      if (error) {
+        console.error('Error loading profile:', error)
+        loadedFor = null // allow a retry on the next auth event
+      } else {
+        setProfile(data)
+      }
+      setAuthLoading(false)
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) loadProfile(session.user.id)
@@ -163,6 +191,7 @@ function App() {
       setSession(session)
       if (session) loadProfile(session.user.id)
       else {
+        loadedFor = null
         setProfile(null)
         setAuthLoading(false)
       }
@@ -170,22 +199,6 @@ function App() {
 
     return () => listener.subscription.unsubscribe()
   }, [])
-
-  async function loadProfile(userId) {
-    setAuthLoading(true)
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, full_name, role')
-      .eq('id', userId)
-      .single()
-
-    if (error) {
-      console.error('Error loading profile:', error)
-    } else {
-      setProfile(data)
-    }
-    setAuthLoading(false)
-  }
 
   async function handleLogout() {
     await supabase.auth.signOut()
@@ -414,15 +427,22 @@ function Dashboard({ profile, onLogout }) {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  // True once the first load of everything has finished. Until then the
+  // notification bell stays quiet, so what already existed when the page
+  // opened doesn't ding — only what arrives afterwards does.
+  const [initialLoaded, setInitialLoaded] = useState(false)
+
   useEffect(() => {
-    getEquipment()
-    getBuildings()
-    getMaintenanceActions()
-    getBuildingLocations()
-    getInspections()
-    getStock()
-    getTechnicians()
-    getCompletedActions()
+    Promise.allSettled([
+      getEquipment(),
+      getBuildings(),
+      getMaintenanceActions(),
+      getBuildingLocations(),
+      getInspections(),
+      getStock(),
+      getTechnicians(),
+      getCompletedActions()
+    ]).then(() => setInitialLoaded(true))
   }, [])
 
   // Real-time updates: when a technician marks a repair or an inspector
@@ -856,9 +876,14 @@ function Dashboard({ profile, onLogout }) {
     }))
   }
 
+  // The Buildings section only renders on its own tab, so switch tabs first
+  // (before, this only scrolled — to a section that wasn't on the page).
   function jumpToBuildingSetup(buildingId) {
     setExpandedLocationsBuildingId(buildingId)
-    document.getElementById('buildings-section')?.scrollIntoView({ behavior: 'smooth' })
+    setActiveTab('buildings')
+    setTimeout(() => {
+      document.getElementById('buildings-section')?.scrollIntoView({ behavior: 'smooth' })
+    }, 50)
   }
 
   async function handleSubmit(e) {
@@ -978,68 +1003,6 @@ function Dashboard({ profile, onLogout }) {
     setEditSaving(false)
   }
 
-  async function updateActionStatus(actionId, newStatus, equipmentId, equipmentType) {
-    setActionUpdatingId(actionId)
-
-    const payload = { status: newStatus }
-    if (newStatus === 'completed') {
-      payload.completed_date = new Date().toISOString()
-      payload.completed_by = `${profile.full_name} (${profile.role})`
-      payload.outcome = 'resolved'
-      payload.outcome_by = `${profile.full_name} (${profile.role})`
-      payload.outcome_at = new Date().toISOString()
-    }
-
-    const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
-
-    if (error) {
-      console.error('Error updating maintenance action:', error)
-      alert('Failed to update action: ' + error.message)
-      setActionUpdatingId(null)
-      return
-    }
-
-    if (newStatus === 'completed' && equipmentId) {
-      const { data: remainingActions, error: remainingError } = await supabase
-        .from('maintenance_actions')
-        .select('id')
-        .eq('equipment_id', equipmentId)
-        .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
-
-      if (remainingError) {
-        console.error('Error checking remaining actions:', remainingError)
-      } else if (remainingActions.length === 0) {
-        const finalStatus = equipmentType === 'fire_extinguisher' ? 'no_longer_in_service' : 'functional'
-        const { error: revertError } = await supabase
-          .from('equipment')
-          .update({ current_status: finalStatus })
-          .eq('id', equipmentId)
-        if (revertError) console.error('Error updating equipment status:', revertError)
-      }
-
-      // Auto-decrement stock on successful fire extinguisher replacement
-      if (equipmentType === 'fire_extinguisher') {
-        const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
-        if (currentStock && currentStock.quantity_available > 0) {
-          const newQty = Math.max(0, currentStock.quantity_available - 1)
-          await supabase
-            .from('equipment_stock')
-            .update({
-              quantity_available: newQty,
-              updated_at: new Date().toISOString(),
-              updated_by: `${profile.full_name} (${profile.role})`
-            })
-            .eq('equipment_type', 'fire_extinguisher')
-          getStock()
-        }
-      }
-    }
-
-    getMaintenanceActions()
-    getEquipment()
-    setActionUpdatingId(null)
-  }
-
   // Work outcome handler: either Resolved (success) or Unresolved (failed / cannot complete)
   async function handleRecordOutcome(action, choice, reason) {
     if (!action) return
@@ -1080,19 +1043,26 @@ function Dashboard({ profile, onLogout }) {
         }
 
         if (isFE) {
-          // Decrement stock
-          const currentStock = stock.find((s) => s.equipment_type === 'fire_extinguisher')
+          // Decrement stock. Read the current count from the database rather
+          // than the copy on screen, which can be out of date if stock was
+          // changed elsewhere since the page loaded.
+          const { data: currentStock } = await supabase
+            .from('equipment_stock')
+            .select('quantity_available')
+            .eq('equipment_type', 'fire_extinguisher')
+            .maybeSingle()
           if (currentStock && currentStock.quantity_available > 0) {
-            await supabase
+            const { error: stockError } = await supabase
               .from('equipment_stock')
               .update({
-                quantity_available: Math.max(0, currentStock.quantity_available - 1),
+                quantity_available: currentStock.quantity_available - 1,
                 updated_at: new Date().toISOString(),
                 updated_by: `${profile.full_name} (${profile.role})`
               })
               .eq('equipment_type', 'fire_extinguisher')
-            getStock()
+            if (stockError) console.error('Error deducting stock:', stockError)
           }
+          getStock()
 
           setReplacementPrompt({
             oldCode: eq.equipment_code,
@@ -1124,6 +1094,7 @@ function Dashboard({ profile, onLogout }) {
     setOutcomeReason('')
     setOutcomeChoice('resolved')
     getMaintenanceActions()
+    getCompletedActions()
     getEquipment()
     setActionUpdatingId(null)
   }
@@ -1410,32 +1381,81 @@ function Dashboard({ profile, onLogout }) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
+  // A bare 'YYYY-MM-DD' is parsed by JavaScript as UTC midnight, which in
+  // timezones behind UTC lands on the previous day. Build it from its parts
+  // so the expiry stays on the calendar day it was entered as (same as the
+  // mobile app).
   function daysUntil(dateString) {
     if (!dateString) return null
-    const target = new Date(dateString)
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString)
+    const target = match
+      ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+      : new Date(dateString)
     target.setHours(0, 0, 0, 0)
-    return Math.floor((target - today) / (1000 * 60 * 60 * 24))
+    return Math.round((target - today) / (1000 * 60 * 60 * 24))
   }
 
+  // Retired units no longer need an expiry warning.
   const expiringEquipment = equipment
+    .filter((item) => item.current_status !== 'no_longer_in_service')
     .map((item) => ({ ...item, daysLeft: daysUntil(item.expiration_date) }))
     .filter((item) => item.daysLeft !== null && item.daysLeft <= 30)
     .sort((a, b) => a.daysLeft - b.daysLeft)
 
-  const expiredCount = expiringEquipment.filter((item) => item.daysLeft < 0).length
+  // Priority Actions summary: what needs a Job Order Request and what needs
+  // a Purchase Request (replacement needed, not enough stock on hand).
+  const jobOrderActions = sortedActions.filter((a) => a.status === 'pending')
+  const purchaseRequestItems = findPurchaseRequestItems({
+    actions: sortedActions,
+    expiring: expiringEquipment,
+    stock
+  })
 
   // Notifications shown in the header bell
   const gsoNotifications = buildGsoNotifications({
     actions: sortedActions,
-    expiring: expiringEquipment
+    expiring: expiringEquipment,
+    completed: completedActions,
+    purchaseRequests: purchaseRequestItems
   })
 
-  function handleNotificationNavigate(target) {
-    setActiveTab('dashboard')
-    const id = target === 'expiry' ? 'expiration-alerts-section' : 'priority-actions-section'
+  function scrollToId(id) {
     setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
-    }, 50)
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 60)
+  }
+
+  // Opens one Priority Action in the filter where its action buttons are,
+  // and scrolls to its card.
+  function openActionInFilter(action) {
+    const filter =
+      action.status === 'pending' ? 'pending'
+        : action.status === 'in_progress' ? 'in_progress'
+        : action.status === 'unresolved' ? 'unresolved'
+        : 'all'
+    setActiveTab('dashboard')
+    setPriorityFilter(filter)
+    scrollToId(`action-card-${action.id}`)
+  }
+
+  function handleNotificationNavigate(n) {
+    if (n.target === 'summary') {
+      setShowSummary(true)
+      return
+    }
+    setActiveTab('dashboard')
+    if (n.target === 'expiry') {
+      scrollToId('expiration-alerts-section')
+      return
+    }
+    if (n.target === 'purchase') {
+      setPriorityFilter('all')
+      scrollToId('priority-actions-section')
+      return
+    }
+    const action = sortedActions.find((a) => a.id === n.actionId)
+    if (action) openActionInFilter(action)
+    else scrollToId('priority-actions-section')
   }
 
   const filteredEquipment = equipment.filter((item) => {
@@ -1526,6 +1546,7 @@ function Dashboard({ profile, onLogout }) {
           <NotificationBell
             notifications={gsoNotifications}
             onNavigate={handleNotificationNavigate}
+            ready={initialLoaded}
           />
           <span className="user-role-tag">{profile.full_name} · {profile.role}</span>
           <button className="logout-btn" onClick={onLogout}>Log out</button>
@@ -1542,6 +1563,14 @@ function Dashboard({ profile, onLogout }) {
             >
               <span className="sidebar-icon">📊</span>
               <span className="sidebar-text">Dashboard</span>
+            </button>
+            <button
+              className={`sidebar-item ${activeTab === 'equipment' ? 'active' : ''}`}
+              onClick={() => setActiveTab('equipment')}
+              title="Equipment"
+            >
+              <span className="sidebar-icon">🧯</span>
+              <span className="sidebar-text">Equipment</span>
             </button>
             <button
               className={`sidebar-item ${activeTab === 'inspectors' ? 'active' : ''}`}
@@ -1697,6 +1726,19 @@ function Dashboard({ profile, onLogout }) {
           </button>
         </div>
 
+        {/* "All" is an overview: the action buttons live in the stage filters
+            (Needs Job Order / In Progress / Unresolved). Here, everything that
+            needs a Job Order Request or a Purchase Request is gathered into
+            one summary instead. */}
+        {priorityFilter === 'all' && (
+          <PriorityActionsSummary
+            jobOrderActions={jobOrderActions}
+            purchaseItems={purchaseRequestItems}
+            onOpenAction={openActionInFilter}
+            onOpenExpiry={() => scrollToId('expiration-alerts-section')}
+          />
+        )}
+
         {displayedActions.length === 0 ? (
           <div className="all-clear-banner">
             {sortedActions.length === 0
@@ -1709,10 +1751,12 @@ function Dashboard({ profile, onLogout }) {
             const isOverdue = age !== null && age >= 7
             const isFireExtinguisher = action.equipment?.equipment_type === 'fire_extinguisher'
 
-            // Single GSO action: file a Job Order Request. It records the request,
-            // assigns a technician and starts the work. Purchase requests and
-            // ordering new stock are handled by the Supply Office, not here.
+            // GSO action: file a Job Order Request. It records the request,
+            // assigns a technician and starts the work.
             const needsJobOrder = action.status === 'pending'
+            // In the "All" overview the cards are read-only (no buttons).
+            const readOnly = priorityFilter === 'all'
+            const needsPurchase = purchaseRequestItems.some((p) => p.actionId === action.id)
 
             let cardStyle = isOverdue ? 'overdue' : 'warning'
             if (action.status === 'unresolved') cardStyle = 'overdue'
@@ -1720,12 +1764,18 @@ function Dashboard({ profile, onLogout }) {
             const assignedTech = technicians.find((t) => t.id === action.assigned_technician_id)
 
             return (
-              <div key={action.id} className={`action-card ${cardStyle}`}>
+              <div
+                key={action.id}
+                id={`action-card-${action.id}`}
+                className={`action-card ${cardStyle}`}
+                style={{ scrollMarginTop: '90px' }}
+              >
                 <div className="action-title">
                   ⚠ {action.equipment?.equipment_code} —{' '}
                   {TYPE_LABELS[action.equipment?.equipment_type] || action.equipment?.equipment_type}
                   {isOverdue && action.status === 'pending' && <span className="overdue-tag">OVERDUE</span>}
                   {action.status === 'unresolved' && <span className="overdue-tag" style={{ background: '#b91c1c' }}>UNRESOLVED</span>}
+                  {needsPurchase && <span className="overdue-tag" style={{ background: '#b45309' }}>NEEDS PURCHASE REQUEST</span>}
                 </div>
                 <p>
                   {action.equipment?.buildings?.building_name ?? 'N/A'} — {action.equipment?.exact_location}
@@ -1783,6 +1833,7 @@ function Dashboard({ profile, onLogout }) {
                 {(() => {
                   const history = inspectionsByEquipment[action.equipment?.id] || []
                   const isExpanded = expandedActionId === action.id
+                  if (readOnly) return null
                   return (
                     <>
                       <button
@@ -1829,8 +1880,14 @@ function Dashboard({ profile, onLogout }) {
                   )
                 })()}
 
+                {needsJobOrder && readOnly && (
+                  <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--amber)', margin: '10px 0 0 0' }}>
+                    Needs a Job Order Request — listed in the summary above.
+                  </p>
+                )}
+
                 {/* One GSO action: Job Order Request (opens the request form) */}
-                {needsJobOrder && (
+                {needsJobOrder && !readOnly && (
                   <div style={{ marginTop: '10px' }}>
                     <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
                       Action required: file a Job Order Request so this defect can be repaired.
@@ -1876,6 +1933,7 @@ function Dashboard({ profile, onLogout }) {
                         Technician note: <em>"{action.repair_note}"</em>
                       </p>
                     )}
+                    {!readOnly && (
                     <div className="action-buttons">
                       <button
                         className="btn btn-primary btn-sm"
@@ -1904,6 +1962,7 @@ function Dashboard({ profile, onLogout }) {
                         Reassign Technician
                       </button>
                     </div>
+                    )}
                   </div>
                 )}
 
@@ -1916,16 +1975,18 @@ function Dashboard({ profile, onLogout }) {
                     <p style={{ fontSize: '0.85rem', margin: '4px 0 8px 0' }}>
                       Reason: <em>"{action.outcome_reason || 'No reason provided'}"</em>
                     </p>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 10px 0' }}>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: readOnly ? 0 : '0 0 10px 0' }}>
                       The equipment remains in defective status. You can reassess to try a different repair route.
                     </p>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => reassessAction(action.id)}
-                      disabled={actionUpdatingId === action.id}
-                    >
-                      Reassess Action
-                    </button>
+                    {!readOnly && (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => reassessAction(action.id)}
+                        disabled={actionUpdatingId === action.id}
+                      >
+                        Reassess Action
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -2750,9 +2811,9 @@ function Dashboard({ profile, onLogout }) {
 
             <div className="panel" style={{ marginBottom: '16px' }}>
               <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                Track available replacement units kept in the GSO storeroom. When GSO staff choose
-                "Replace from Stock" on a defective fire extinguisher, the system checks this count and warns if zero.
-                Completing a stock replacement automatically deducts 1 unit.
+                Track available replacement units kept in the GSO storeroom. Closing a fire
+                extinguisher job as Resolved automatically deducts 1 unit. Any replacement this
+                stock cannot cover is listed under "Needs Purchase Request" in Priority Actions.
               </p>
             </div>
 
@@ -3137,6 +3198,7 @@ function Dashboard({ profile, onLogout }) {
           stock={stock}
           expiring={expiringEquipment}
           completed={completedActions}
+          purchaseItems={purchaseRequestItems}
           onClose={() => setShowSummary(false)}
         />
       )}
