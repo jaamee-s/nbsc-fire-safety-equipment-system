@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +25,7 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import SummaryScreen from './SummaryScreen'
+import { NotificationBell, NotificationsScreen, useNotifications } from './Notifications'
 import {
   ACTION_TYPES,
   ACTION_TYPE_LABELS,
@@ -48,6 +49,15 @@ import {
   submitInspection,
   updateRepairStatus
 } from './lib/inspector'
+import {
+  getMyNotifications,
+  markNotificationsRead,
+  onNotificationTap,
+  registerForPush,
+  showLocalNotification,
+  subscribeToMyNotifications,
+  unregisterPush
+} from './lib/push'
 
 const C = {
   navy: '#0F2A4A',
@@ -107,6 +117,22 @@ function isThisWeek(dateString) {
   return diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000
 }
 
+function greeting() {
+  const h = new Date().getHours()
+  if (h < 12) return 'Good morning'
+  if (h < 18) return 'Good afternoon'
+  return 'Good evening'
+}
+
+function todayLabel() {
+  return new Date().toLocaleDateString(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric'
+  })
+}
+
 // Keeps a dashboard fresh without the user pulling down: refreshes every
 // 30 seconds and whenever the app comes back to the foreground. `load(true)`
 // is a silent refresh (no error flash if the signal drops).
@@ -123,6 +149,44 @@ function useAutoRefresh(load, ms = 30000) {
   }, [load, ms])
 }
 
+// The signed-in account's dashboard data. Loaded once here (not per screen)
+// so the dashboard, the notification bell and the notifications screen all
+// show the same, current numbers.
+function useDashboard(account) {
+  const role = account ? account.role : null
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const load = useCallback(
+    async (silent = false) => {
+      if (!role) return
+      if (!silent) setError(null)
+      try {
+        setData(role === 'technician' ? await getTechnicianDashboard() : await getInspectorDashboard())
+        if (silent) setError(null)
+      } catch (err) {
+        if (!silent) setError(err.message)
+      }
+      setLoading(false)
+    },
+    [role]
+  )
+
+  useEffect(() => {
+    setData(null)
+    setError(null)
+    if (role) {
+      setLoading(true)
+      load()
+    }
+  }, [role, load])
+
+  useAutoRefresh(load)
+
+  return { data, loading, error, reload: load }
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -135,14 +199,28 @@ function homeFor(role) {
   return role === 'technician' ? 'techHome' : 'home'
 }
 
+// Screens that show the bottom navigation bar.
+const TAB_SCREENS = ['home', 'techHome', 'notifications', 'summary']
+
 function RootApp() {
   // 'loading' | 'login' | 'home' (inspector) | 'techHome' | 'techJob' | 'summary'
-  // | 'scan' | 'manual' | 'detail' | 'form' | 'done'
+  // | 'notifications' | 'scan' | 'manual' | 'detail' | 'form' | 'done'
   const [screen, setScreen] = useState('loading')
   const [account, setAccount] = useState(null) // { id, full_name, role }
   const [equipment, setEquipment] = useState(null)
   const [lastResult, setLastResult] = useState(null)
   const [job, setJob] = useState(null)
+  // Rows from the `notifications` table (what was pushed to this phone).
+  const [history, setHistory] = useState([])
+
+  const dashboard = useDashboard(account)
+  const notif = useNotifications(account, dashboard.data)
+  const historyUnread = history.filter((h) => !h.read_at)
+  const unreadCount = notif.unread + historyUnread.length
+
+  const pushTokenRef = useRef(null)
+  const reloadRef = useRef(dashboard.reload)
+  reloadRef.current = dashboard.reload
 
   useEffect(() => {
     restoreSession().then((acc) => {
@@ -158,9 +236,54 @@ function RootApp() {
       setAccount(null)
       setEquipment(null)
       setJob(null)
+      setHistory([])
       setScreen('login')
     })
   }, [])
+
+  // Once signed in: register this phone for push notifications and listen
+  // for new notifications live. Every new one refreshes the dashboard.
+  const accountId = account ? account.id : null
+  useEffect(() => {
+    if (!accountId) return
+    let active = true
+
+    registerForPush().then((token) => {
+      if (active) pushTokenRef.current = token
+    })
+    getMyNotifications().then((rows) => {
+      if (active) setHistory(rows)
+    })
+
+    const unsubscribe = subscribeToMyNotifications(accountId, (row) => {
+      setHistory((prev) => [row, ...prev.filter((p) => p.id !== row.id)].slice(0, 30))
+      reloadRef.current(true)
+      // With a real push token the phone already shows the pushed message.
+      // Without one (e.g. Expo Go) show it locally so nothing is missed.
+      if (!pushTokenRef.current) {
+        showLocalNotification(row.title, row.body, { notification_id: row.id, kind: row.kind })
+      }
+    })
+
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [accountId])
+
+  // Tapping a notification in the phone's tray opens the Notifications screen.
+  const goToScreenRef = useRef(null)
+  const handledTapRef = useRef(null)
+  useEffect(() => {
+    if (!accountId) return
+    return onNotificationTap((data, id) => {
+      if (id && handledTapRef.current === id) return
+      handledTapRef.current = id
+      reloadRef.current(true)
+      getMyNotifications().then(setHistory)
+      if (goToScreenRef.current) goToScreenRef.current('notifications')
+    })
+  }, [accountId])
 
   function handleFound(item) {
     setEquipment(item)
@@ -171,15 +294,19 @@ function RootApp() {
     setEquipment(null)
     setLastResult(null)
     setJob(null)
+    dashboard.reload(true)
     goToScreen(account ? homeFor(account.role) : 'login')
   }
 
   function handleLogout() {
     confirmAction('Log out', 'Sign out of this account on this phone?', 'Log out', async () => {
+      await unregisterPush(pushTokenRef.current)
+      pushTokenRef.current = null
       await signOut()
       setAccount(null)
       setEquipment(null)
       setJob(null)
+      setHistory([])
       setScreen('login')
     })
   }
@@ -197,6 +324,47 @@ function RootApp() {
       setScreen(next)
     }
   }
+  goToScreenRef.current = goToScreen
+
+  // Notifications: open what the notification is about.
+  async function openNotification(item) {
+    notif.markSeen(item.id)
+    if (item.kind === 'job') {
+      const j = ((dashboard.data && dashboard.data.assigned) || []).find((x) => x.id === item.jobId)
+      if (j) {
+        setJob(j)
+        goToScreen('techJob')
+      }
+      return
+    }
+    if (item.kind === 'due' || item.kind === 'hold' || item.kind === 'report') {
+      handleFound(await findEquipmentByQrCode(item.code))
+    }
+  }
+
+  function openHistory(row) {
+    if (!row.read_at) {
+      markNotificationsRead([row.id]).catch(() => {})
+      setHistory((prev) =>
+        prev.map((h) => (h.id === row.id ? { ...h, read_at: new Date().toISOString() } : h))
+      )
+    }
+    const j = ((dashboard.data && dashboard.data.assigned) || []).find((x) => x.id === row.action_id)
+    if (j) {
+      setJob(j)
+      goToScreen('techJob')
+    }
+  }
+
+  function markAllRead() {
+    notif.markAllSeen()
+    const ids = historyUnread.map((h) => h.id)
+    if (ids.length) {
+      markNotificationsRead(ids).catch(() => {})
+      const now = new Date().toISOString()
+      setHistory((prev) => prev.map((h) => (h.read_at ? h : { ...h, read_at: now })))
+    }
+  }
 
   // Android's hardware/gesture Back button steps back one screen instead of
   // closing the app, and only exits from a home screen or the login screen.
@@ -209,7 +377,8 @@ function RootApp() {
         screen === 'detail' ||
         screen === 'done' ||
         screen === 'techJob' ||
-        screen === 'summary'
+        screen === 'summary' ||
+        screen === 'notifications'
       ) {
         goHome()
         return true
@@ -225,6 +394,8 @@ function RootApp() {
   }, [screen, account])
 
   const roleLabel = account ? ROLE_LABELS[account.role] || account.role : ''
+  const signedIn = account && screen !== 'loading' && screen !== 'login'
+  const showTabs = signedIn && TAB_SCREENS.includes(screen)
 
   return (
     <SafeAreaView key={screen} style={s.safe} edges={['top', 'left', 'right', 'bottom']}>
@@ -238,7 +409,10 @@ function RootApp() {
               {account ? `${roleLabel}: ${account.full_name}` : 'NBSC Fire Safety Equipment'}
             </Text>
           </View>
-          {account && screen !== 'loading' && screen !== 'login' && (
+          {signedIn && (
+            <NotificationBell count={unreadCount} onPress={() => goToScreen('notifications')} />
+          )}
+          {signedIn && (
             <Pressable onPress={handleLogout} style={s.logoutBtn} hitSlop={8}>
               <Text style={s.logoutText}>Log out</Text>
             </Pressable>
@@ -265,20 +439,34 @@ function RootApp() {
 
       {screen === 'home' && (
         <HomeScreen
+          account={account}
+          dashboard={dashboard}
           onScan={() => setScreen('scan')}
           onManual={() => setScreen('manual')}
           onOpenEquipment={handleFound}
-          onSummary={() => setScreen('summary')}
         />
       )}
 
       {screen === 'techHome' && (
         <TechnicianHome
+          account={account}
+          dashboard={dashboard}
           onOpenJob={(j) => {
             setJob(j)
             setScreen('techJob')
           }}
-          onSummary={() => setScreen('summary')}
+        />
+      )}
+
+      {screen === 'notifications' && account && (
+        <NotificationsScreen
+          role={account.role}
+          items={notif.items}
+          history={history}
+          onOpen={openNotification}
+          onOpenHistory={openHistory}
+          onMarkAll={markAllRead}
+          onBack={goHome}
         />
       )}
 
@@ -313,6 +501,7 @@ function RootApp() {
           equipment={equipment}
           onSubmitted={(result) => {
             setLastResult(result)
+            dashboard.reload(true)
             setScreen('done')
           }}
           onCancel={() => setScreen('detail')}
@@ -327,7 +516,60 @@ function RootApp() {
           onHome={goHome}
         />
       )}
+
+      {showTabs && (
+        <BottomTabs
+          role={account.role}
+          screen={screen}
+          unread={unreadCount}
+          onNavigate={(next) => {
+            if (next === 'home' || next === 'techHome') goHome()
+            else goToScreen(next)
+          }}
+        />
+      )}
     </SafeAreaView>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Bottom navigation                                                   */
+/* ------------------------------------------------------------------ */
+
+function BottomTabs({ role, screen, unread, onNavigate }) {
+  const tabs =
+    role === 'technician'
+      ? [
+          { key: 'techHome', icon: '▦', label: 'Dashboard' },
+          { key: 'notifications', icon: '🔔', label: 'Notifications', badge: unread },
+          { key: 'summary', icon: '📊', label: 'Summary' }
+        ]
+      : [
+          { key: 'home', icon: '▦', label: 'Dashboard' },
+          { key: 'scan', icon: '▣', label: 'Scan' },
+          { key: 'notifications', icon: '🔔', label: 'Notifications', badge: unread },
+          { key: 'summary', icon: '📊', label: 'Summary' }
+        ]
+
+  return (
+    <View style={s.tabBar}>
+      {tabs.map((t) => {
+        const active = screen === t.key
+        return (
+          <Pressable key={t.key} style={s.tab} onPress={() => onNavigate(t.key)}>
+            <View>
+              <Text style={[s.tabIcon, active && { color: C.blue }]}>{t.icon}</Text>
+              {t.badge > 0 && (
+                <View style={s.tabBadge}>
+                  <Text style={s.tabBadgeText}>{t.badge > 9 ? '9+' : t.badge}</Text>
+                </View>
+              )}
+            </View>
+            <Text style={[s.tabLabel, active && s.tabLabelActive]}>{t.label}</Text>
+          </Pressable>
+        )
+      })}
+    </View>
   )
 }
 
@@ -416,49 +658,79 @@ function LoginScreen({ onSignedIn }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Dashboard building blocks                                           */
+/* ------------------------------------------------------------------ */
+
+function DashHero({ name, line }) {
+  return (
+    <View style={s.hero}>
+      <Text style={s.heroGreeting}>{greeting()},</Text>
+      <Text style={s.heroName}>{name}</Text>
+      <Text style={s.heroDate}>{todayLabel()}</Text>
+      {line ? <Text style={s.heroLine}>{line}</Text> : null}
+    </View>
+  )
+}
+
+// One KPI box on the dashboard grid. Tappable when `onPress` is given.
+function DashTile({ value, label, tone, active, onPress }) {
+  const color =
+    tone === 'red' ? C.red : tone === 'amber' ? C.amber : tone === 'green' ? C.green : tone === 'blue' ? C.blue : C.text
+  const Box = onPress ? Pressable : View
+  return (
+    <Box style={[s.dashTile, active && s.statActive]} onPress={onPress}>
+      <Text style={[s.dashTileValue, { color }]} numberOfLines={1} adjustsFontSizeToFit>
+        {value ?? 0}
+      </Text>
+      <Text style={s.dashTileLabel}>{label}</Text>
+    </Box>
+  )
+}
+
+// A two-colour bar: green part vs red/grey part.
+function SplitBar({ good, bad, badColor = C.red }) {
+  if (good + bad === 0) return null
+  return (
+    <View style={s.splitBar}>
+      {good > 0 && <View style={{ flex: good, backgroundColor: C.green }} />}
+      {bad > 0 && <View style={{ flex: bad, backgroundColor: badColor }} />}
+    </View>
+  )
+}
+
+function ErrorCard({ error }) {
+  if (!error) return null
+  return (
+    <View style={[s.card, { backgroundColor: C.redBg, borderColor: '#F5C2C2' }]}>
+      <Text style={[s.error, { marginTop: 0 }]}>{error}</Text>
+    </View>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  // Separate from `loading` so pull-to-refresh actually shows its spinner
-  // while the reload runs (before, `loading` was never set back to true).
+function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
+  const { data, loading, error, reload } = dashboard
+  // Separate from `loading` so pull-to-refresh actually shows its spinner.
   const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState(null)
+  const [openError, setOpenError] = useState(null)
   // Which stat box's detail list is currently open, if any.
   const [openStat, setOpenStat] = useState(null)
 
-  // `silent` refreshes (auto-refresh) never flash an error if the signal drops.
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setError(null)
-    try {
-      setData(await getInspectorDashboard())
-      if (silent) setError(null)
-    } catch (err) {
-      if (!silent) setError(err.message)
-    }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
-
-  useAutoRefresh(load)
-
   async function onRefresh() {
     setRefreshing(true)
-    await load()
+    await reload()
     setRefreshing(false)
   }
 
   async function openFromDue(code) {
-    setError(null)
+    setOpenError(null)
     try {
       onOpenEquipment(await findEquipmentByQrCode(code))
     } catch (err) {
-      setError(err.message)
+      setOpenError(err.message)
     }
   }
 
@@ -471,63 +743,60 @@ function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
       !OPEN_PROBLEM_STATUSES.includes(d.current_status)
   )
   const onHoldList = (data && data.on_hold) || []
+  const recent = (data && data.recent) || []
+  const recentBad = recent.filter((r) => r.condition_status === 'defective').length
+  const recentGood = recent.length - recentBad
+  const neverInspected = dueList.filter((d) => !d.last_inspected).length
+  const lastInspection = recent[0] ? recent[0].inspection_date : null
+
+  const toggle = (key) => setOpenStat(openStat === key ? null : key)
 
   return (
     <ScrollView
       contentContainerStyle={s.scroll}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      <Pressable style={s.scanCta} onPress={onScan}>
-        <Text style={s.scanCtaIcon}>▣</Text>
-        <Text style={s.scanCtaText}>Scan QR Code</Text>
-        <Text style={s.scanCtaSub}>Point the camera at the sticker</Text>
-      </Pressable>
+      <DashHero
+        name={account.full_name}
+        line={
+          data
+            ? `${dueList.length} unit${dueList.length === 1 ? '' : 's'} due for inspection · ${onHoldList.length} on hold`
+            : null
+        }
+      />
 
-      <Pressable style={[s.btn, s.btnOutline]} onPress={onManual}>
-        <Text style={s.btnOutlineText}>Enter code manually</Text>
-      </Pressable>
+      <View style={s.quickRow}>
+        <Pressable style={[s.quickBtn, { backgroundColor: C.blue }]} onPress={onScan}>
+          <Text style={s.quickIcon}>▣</Text>
+          <Text style={s.quickText}>Scan QR Code</Text>
+        </Pressable>
+        <Pressable style={[s.quickBtn, s.quickBtnOutline]} onPress={onManual}>
+          <Text style={[s.quickIcon, { color: C.navy }]}>⌨</Text>
+          <Text style={[s.quickText, { color: C.navy }]}>Enter code</Text>
+        </Pressable>
+      </View>
 
-      <Pressable style={[s.btn, s.btnOutline]} onPress={onSummary}>
-        <Text style={s.btnOutlineText}>📊 My Summary</Text>
-      </Pressable>
-
-      {error && (
-        <View style={[s.card, { marginTop: 14 }]}>
-          <Text style={s.error}>{error}</Text>
-        </View>
-      )}
+      <ErrorCard error={error || openError} />
 
       {loading && !data ? (
-        <View style={[s.card, s.centerPad, { marginTop: 18 }]}>
+        <View style={[s.card, s.centerPad]}>
           <ActivityIndicator color={C.blue} />
         </View>
       ) : data ? (
         <>
-          <View style={s.statRow}>
-            <Stat
-              value={data.today_count}
-              label="Today"
-              active={openStat === 'today'}
-              onPress={() => setOpenStat(openStat === 'today' ? null : 'today')}
-            />
-            <Stat
-              value={data.week_count}
-              label="This week"
-              active={openStat === 'week'}
-              onPress={() => setOpenStat(openStat === 'week' ? null : 'week')}
-            />
-            <Stat
-              value={data.defect_count}
-              label="Defects found"
-              alert
-              active={openStat === 'defects'}
-              onPress={() => setOpenStat(openStat === 'defects' ? null : 'defects')}
-            />
+          <Text style={s.sectionTitle}>Overview</Text>
+          <Text style={s.sectionHint}>Tap Today, This week or Defects to see the list.</Text>
+          <View style={s.dashGrid}>
+            <DashTile value={data.today_count} label="Inspected today" tone="blue" active={openStat === 'today'} onPress={() => toggle('today')} />
+            <DashTile value={data.week_count} label="This week" active={openStat === 'week'} onPress={() => toggle('week')} />
+            <DashTile value={data.defect_count} label="Defects found" tone={data.defect_count > 0 ? 'red' : undefined} active={openStat === 'defects'} onPress={() => toggle('defects')} />
+            <DashTile value={dueList.length} label="Due for inspection" tone={dueList.length > 0 ? 'amber' : 'green'} />
+            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} />
+            <DashTile value={onHoldList.length} label="On hold (GSO)" tone={onHoldList.length > 0 ? 'amber' : undefined} />
           </View>
 
           {openStat &&
             (() => {
-              const recent = data.recent || []
               const filtered =
                 openStat === 'today'
                   ? recent.filter((r) => isToday(r.inspection_date))
@@ -560,7 +829,7 @@ function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
                   {filtered.length === 0 ? (
                     <Text style={s.muted}>
                       {totalForStat > 0
-                        ? "None of these are in your recent list — check your full inspection history."
+                        ? 'None of these are in your recent list — check your full inspection history.'
                         : 'Nothing here yet.'}
                     </Text>
                   ) : (
@@ -597,6 +866,20 @@ function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
                 </View>
               )
             })()}
+
+          {recent.length > 0 && (
+            <View style={s.card}>
+              <Text style={s.sectionTitle}>Results of your last {recent.length} inspections</Text>
+              <SplitBar good={recentGood} bad={recentBad} />
+              <View style={s.legendRow}>
+                <Text style={[s.legend, { color: C.green }]}>{recentGood} functional</Text>
+                <Text style={[s.legend, { color: C.red }]}>{recentBad} defective</Text>
+              </View>
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                Last inspection: {lastInspection ? relativeTime(lastInspection) : 'none yet'}
+              </Text>
+            </View>
+          )}
 
           <Text style={s.sectionTitle}>Due for inspection</Text>
           <Text style={s.sectionHint}>Longest since last check — start here.</Text>
@@ -677,15 +960,15 @@ function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
 
           <Text style={s.sectionTitle}>Your recent inspections</Text>
           <View style={[s.card, { marginTop: 8 }]}>
-            {(data.recent || []).length === 0 ? (
+            {recent.length === 0 ? (
               <Text style={s.muted}>Nothing submitted yet.</Text>
             ) : (
-              data.recent.map((r, i) => {
+              recent.map((r, i) => {
                 const bad = r.condition_status === 'defective'
                 return (
                   <View
                     key={r.id}
-                    style={[s.listRow, i === data.recent.length - 1 && s.listRowLast]}
+                    style={[s.listRow, i === recent.length - 1 && s.listRowLast]}
                   >
                     <View style={s.flex}>
                       <Text style={s.listCode}>{r.equipment_code}</Text>
@@ -710,17 +993,6 @@ function HomeScreen({ onScan, onManual, onOpenEquipment, onSummary }) {
   )
 }
 
-function Stat({ value, label, alert, active, onPress }) {
-  return (
-    <Pressable style={[s.stat, active && s.statActive]} onPress={onPress}>
-      <Text style={[s.statValue, alert && value > 0 && { color: C.red }]}>
-        {value ?? 0}
-      </Text>
-      <Text style={s.statLabel}>{label}</Text>
-    </Pressable>
-  )
-}
-
 /* ------------------------------------------------------------------ */
 /* Technician dashboard and job                                        */
 /* ------------------------------------------------------------------ */
@@ -736,47 +1008,45 @@ function PriorityTag({ priority }) {
   )
 }
 
-function TechnicianHome({ onOpenJob, onSummary }) {
-  const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
+function TechnicianHome({ account, dashboard, onOpenJob }) {
+  const { data, loading, error, reload } = dashboard
   const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState(null)
-
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setError(null)
-    try {
-      setData(await getTechnicianDashboard())
-      if (silent) setError(null)
-    } catch (err) {
-      if (!silent) setError(err.message)
-    }
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    load()
-  }, [load])
-
-  useAutoRefresh(load)
 
   async function onRefresh() {
     setRefreshing(true)
-    await load()
+    await reload()
     setRefreshing(false)
   }
 
   const jobs = (data && data.assigned) || []
+  const todo = (data && data.to_do_count) || 0
+  const awaiting = (data && data.awaiting_gso_count) || 0
+  const done = (data && data.done_count) || 0
+  const working = jobs.filter((j) => j.repair_status === 'working').length
+  const notStarted = jobs.filter((j) => (j.repair_status || 'assigned') === 'assigned').length
+  const urgent = jobs.filter((j) => j.priority === 'critical' || j.priority === 'high').length
+  const total = todo + awaiting + done
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  // The database returns assigned jobs highest priority first.
+  const nextJob = jobs.find((j) => j.repair_status !== 'repaired')
 
   return (
     <ScrollView
       contentContainerStyle={s.scroll}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      {error && (
-        <View style={s.card}>
-          <Text style={s.error}>{error}</Text>
-        </View>
-      )}
+      <DashHero
+        name={account.full_name}
+        line={
+          data
+            ? todo > 0
+              ? `You have ${todo} job${todo === 1 ? '' : 's'} to do${urgent > 0 ? ` · ${urgent} urgent` : ''}`
+              : 'No open jobs right now.'
+            : null
+        }
+      />
+
+      <ErrorCard error={error} />
 
       {loading && !data ? (
         <View style={[s.card, s.centerPad]}>
@@ -784,18 +1054,42 @@ function TechnicianHome({ onOpenJob, onSummary }) {
         </View>
       ) : data ? (
         <>
-          <View style={[s.statRow, { marginTop: 0 }]}>
-            <Stat value={data.to_do_count} label="To do" alert />
-            <Stat value={data.awaiting_gso_count} label="Awaiting GSO" />
-            <Stat value={data.done_count} label="Completed" />
+          <Text style={s.sectionTitle}>Overview</Text>
+          <View style={[s.dashGrid, { marginTop: 8 }]}>
+            <DashTile value={todo} label="To do" tone={todo > 0 ? 'red' : undefined} />
+            <DashTile value={notStarted} label="Not started" tone={notStarted > 0 ? 'amber' : undefined} />
+            <DashTile value={working} label="Working on it" tone={working > 0 ? 'blue' : undefined} />
+            <DashTile value={urgent} label="High / critical" tone={urgent > 0 ? 'red' : undefined} />
+            <DashTile value={awaiting} label="Awaiting GSO" />
+            <DashTile value={done} label="Completed" tone="green" />
           </View>
 
-          <Pressable
-            style={[s.btn, s.btnOutline, { marginTop: 0, marginBottom: 18 }]}
-            onPress={onSummary}
-          >
-            <Text style={s.btnOutlineText}>📊 My Summary</Text>
-          </Pressable>
+          {total > 0 && (
+            <View style={s.card}>
+              <Text style={s.sectionTitle}>Your progress</Text>
+              <SplitBar good={done} bad={total - done} badColor={C.border} />
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                {pct}% of the {total} job{total === 1 ? '' : 's'} assigned to you are completed.
+              </Text>
+            </View>
+          )}
+
+          {nextJob && (
+            <Pressable style={[s.card, s.nextJob]} onPress={() => onOpenJob(nextJob)}>
+              <Text style={s.nextJobLabel}>NEXT UP</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                <Text style={[s.listCode, { fontSize: 18 }]}>{nextJob.equipment_code}</Text>
+                <PriorityTag priority={nextJob.priority} />
+              </View>
+              <Text style={s.listMeta}>
+                {TYPE_LABELS[nextJob.equipment_type] || nextJob.equipment_type}
+                {nextJob.building_name ? ` · ${nextJob.building_name}` : ''}
+                {nextJob.exact_location ? ` · ${nextJob.exact_location}` : ''}
+              </Text>
+              <Text style={[s.listMeta, { color: C.text, marginTop: 4 }]}>{nextJob.description}</Text>
+              <Text style={s.nextJobLink}>Open job →</Text>
+            </Pressable>
+          )}
 
           <Text style={s.sectionTitle}>Assigned to you</Text>
           <Text style={s.sectionHint}>Highest priority first. Tap a job to open it.</Text>
@@ -1620,30 +1914,88 @@ const s = StyleSheet.create({
   btnDisabled: { opacity: 0.5 },
 
   /* dashboard */
-  scanCta: {
+  hero: {
     backgroundColor: C.navy,
     borderRadius: 14,
-    paddingVertical: 30,
-    alignItems: 'center',
-    marginBottom: 12
+    padding: 18,
+    marginBottom: 14
   },
-  scanCtaIcon: { fontSize: 34, color: C.white, marginBottom: 6 },
-  scanCtaText: { color: C.white, fontSize: 19, fontWeight: '700' },
-  scanCtaSub: { color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 3 },
+  heroGreeting: { color: 'rgba(255,255,255,0.75)', fontSize: 14 },
+  heroName: { color: C.white, fontSize: 22, fontWeight: '800', marginTop: 2 },
+  heroDate: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 4 },
+  heroLine: {
+    color: C.white,
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.15)'
+  },
 
-  statRow: { flexDirection: 'row', gap: 10, marginTop: 18, marginBottom: 20 },
-  stat: {
-    flex: 1,
+  quickRow: { flexDirection: 'row', gap: 10, marginBottom: 18 },
+  quickBtn: { flex: 1, borderRadius: 12, paddingVertical: 18, alignItems: 'center' },
+  quickBtnOutline: { backgroundColor: C.white, borderWidth: 1, borderColor: C.border },
+  quickIcon: { fontSize: 24, color: C.white, marginBottom: 4 },
+  quickText: { color: C.white, fontSize: 15, fontWeight: '700' },
+
+  dashGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
+  dashTile: {
+    flexBasis: '30%',
+    flexGrow: 1,
     backgroundColor: C.white,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: C.border,
     paddingVertical: 14,
+    paddingHorizontal: 6,
     alignItems: 'center'
   },
-  statValue: { fontSize: 24, fontWeight: '800', color: C.text },
-  statLabel: { fontSize: 11, color: C.muted, marginTop: 3, textAlign: 'center' },
+  dashTileValue: { fontSize: 24, fontWeight: '800', color: C.text },
+  dashTileLabel: { fontSize: 11, color: C.muted, marginTop: 3, textAlign: 'center' },
   statActive: { borderColor: C.blue, borderWidth: 2, backgroundColor: C.blueBg },
+
+  splitBar: {
+    flexDirection: 'row',
+    height: 12,
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: C.border,
+    marginTop: 8
+  },
+  legendRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  legend: { fontSize: 12, fontWeight: '700' },
+
+  nextJob: { borderLeftWidth: 5, borderLeftColor: C.blue },
+  nextJobLabel: { fontSize: 11, fontWeight: '800', color: C.blue, letterSpacing: 0.6 },
+  nextJobLink: { fontSize: 14, fontWeight: '700', color: C.blue, marginTop: 10 },
+
+  /* bottom navigation */
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: C.white,
+    borderTopWidth: 1,
+    borderTopColor: C.border,
+    paddingTop: 8,
+    paddingBottom: 6
+  },
+  tab: { flex: 1, alignItems: 'center' },
+  tabIcon: { fontSize: 20, color: C.muted, textAlign: 'center' },
+  tabLabel: { fontSize: 11, color: C.muted, marginTop: 2, fontWeight: '600' },
+  tabLabelActive: { color: C.blue, fontWeight: '800' },
+  tabBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -12,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#EF4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4
+  },
+  tabBadgeText: { color: C.white, fontSize: 10, fontWeight: '800' },
 
   statPanelHead: {
     flexDirection: 'row',
