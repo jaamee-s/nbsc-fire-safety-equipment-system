@@ -151,9 +151,14 @@ async function loadAccount(userId) {
   return data
 }
 
-export async function signIn(email, password) {
-  const cleanEmail = (email || '').trim()
-  if (!cleanEmail || !password) throw new Error('Enter your email and password.')
+// Accounts the admin creates in the web app sign in with a username; it is
+// stored as <username>@nbsc-firesafety.local (see migration 005).
+const USERNAME_DOMAIN = '@nbsc-firesafety.local'
+
+export async function signIn(login, password) {
+  const typed = (login || '').trim()
+  if (!typed || !password) throw new Error('Enter your username and password.')
+  const cleanEmail = typed.includes('@') ? typed : typed.toLowerCase() + USERNAME_DOMAIN
 
   let result
   try {
@@ -164,7 +169,7 @@ export async function signIn(email, password) {
 
   if (result.error) {
     if (/invalid login credentials/i.test(result.error.message)) {
-      throw new Error('Wrong email or password.')
+      throw new Error('Wrong username or password.')
     }
     throw toError('Sign-in failed: ', result.error)
   }
@@ -331,6 +336,19 @@ export function relativeTime(dateString) {
   if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`
   const years = Math.floor(months / 12)
   return `${years} year${years === 1 ? '' : 's'} ago`
+}
+
+// "Nov 4, 2026, 3:45 PM" — full date and time, for places where the exact
+// moment matters more than "3 days ago".
+export function formatDateTime(dateString) {
+  if (!dateString) return ''
+  return new Date(dateString).toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  })
 }
 
 // Days until expiry — negative means already expired.

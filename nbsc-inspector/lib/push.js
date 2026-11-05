@@ -110,7 +110,11 @@ export function onNotificationTap(onTap) {
   if (Platform.OS === 'web') return () => {}
   const handle = (response) => {
     const request = response?.notification?.request
-    if (request) onTap(request.content?.data || {}, request.identifier)
+    if (!request) return
+    // Clear it once handled, so the same old tap isn't replayed the next
+    // time the app opens or someone signs in.
+    Notifications.clearLastNotificationResponseAsync().catch(() => {})
+    onTap(request.content?.data || {}, request.identifier)
   }
   const sub = Notifications.addNotificationResponseReceivedListener(handle)
   Notifications.getLastNotificationResponseAsync()
