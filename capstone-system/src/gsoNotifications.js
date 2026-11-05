@@ -15,6 +15,18 @@ const TYPE_LABELS = {
   smoke_detector: 'Smoke Detector'
 }
 
+// 'YYYY-MM-DD' -> "Sep 22, 2026". Built from its parts so it stays on the
+// calendar day it was entered as (a bare date string is read as UTC).
+function formatDateOnly(dateString) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateString || '')
+  if (!m) return dateString || '—'
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
 /* ------------------------------------------------------------------ */
 /* Purchase Requests                                                   */
 /* ------------------------------------------------------------------ */
@@ -65,7 +77,6 @@ export function findPurchaseRequestItems({ actions = [], expiring = [], stock = 
       (e) => e.daysLeft < 0 && e.current_status !== 'no_longer_in_service' && !withOpenJob.has(e.id)
     )
     .forEach((e) => {
-      const days = Math.abs(e.daysLeft)
       demand.push({
         key: `expired-${e.id}`,
         actionId: null,
@@ -75,7 +86,7 @@ export function findPurchaseRequestItems({ actions = [], expiring = [], stock = 
         type: e.equipment_type,
         building: e.buildings?.building_name,
         location: e.exact_location,
-        reason: `Expired ${days} day${days === 1 ? '' : 's'} ago — needs a replacement unit`,
+        reason: `Expired on ${formatDateOnly(e.expiration_date)} — needs a replacement unit`,
         priority: 'high',
         date: e.expiration_date
       })
