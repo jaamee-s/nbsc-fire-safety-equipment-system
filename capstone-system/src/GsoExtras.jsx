@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabaseClient'
 import { playNotificationSound } from './gsoNotifications'
+import { accountErrorMessage, checkAccountFields, checkUsername, USERNAME_HINT } from './staffAccounts'
 
 /* =====================================================================
    Exports:
@@ -32,6 +33,12 @@ const ACTION_TYPE_LABELS = {
 
 function fmtDateTime(d) {
   if (!d) return '—'
+  // A date with no time (YYYY-MM-DD) shows the date only, not a made-up time.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d))
+  if (dateOnly) {
+    return new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+      .toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  }
   return new Date(d).toLocaleString(undefined, {
     year: 'numeric',
     month: 'short',
@@ -65,6 +72,148 @@ function sameDay(a, b) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Password field with a show / hide button (same as the login page)   */
+/* ------------------------------------------------------------------ */
+
+export function PasswordInput({ value, onChange, placeholder }) {
+  const [show, setShow] = useState(false)
+  return (
+    <div className="password-field-wrap">
+      <input
+        type={show ? 'text' : 'password'}
+        autoComplete="new-password"
+        placeholder={placeholder}
+        value={value}
+        onChange={onChange}
+      />
+      <button
+        type="button"
+        className="password-toggle-btn"
+        onClick={() => setShow((v) => !v)}
+        aria-label={show ? 'Hide password' : 'Show password'}
+        title={show ? 'Hide password' : 'Show password'}
+      >
+        {show ? (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+            <line x1="1" y1="1" x2="23" y2="23" />
+          </svg>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        )}
+      </button>
+    </div>
+  )
+}
+
+const hintStyle = { fontSize: '0.78rem', color: 'var(--text-muted)', margin: '5px 0 0 0' }
+
+// Outline bell (no fill), drawn in the surrounding text colour.
+function BellIcon({ size = 18 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ display: 'block' }}
+    >
+      <path d="M10.5 3.2a1.5 1.5 0 0 1 3 0" />
+      <path d="M6 9a6 6 0 0 1 12 0c0 6.5 2.5 8.5 2.5 8.5h-17S6 15.5 6 9" />
+      <path d="M9.8 20.5a2.4 2.4 0 0 0 4.4 0" />
+    </svg>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Account settings: change a staff login's username / password        */
+/* ------------------------------------------------------------------ */
+
+// `account`: { id, full_name, username }. The current password is never
+// shown (it is stored encrypted); a forgotten one is replaced.
+export function AccountSettingsModal({ account, onClose, onSaved }) {
+  const [username, setUsername] = useState(account.username || '')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState(null)
+  const [saving, setSaving] = useState(false)
+
+  async function save() {
+    setError(null)
+    const problem = checkUsername(username)
+    if (problem) {
+      setError(problem)
+      return
+    }
+    if (password && password.length < 6) {
+      setError('Password must be at least 6 characters.')
+      return
+    }
+    setSaving(true)
+    const { data, error: rpcError } = await supabase.rpc('update_staff_account', {
+      p_user_id: account.id,
+      p_username: username.trim(),
+      p_password: password || null
+    })
+    setSaving(false)
+    if (rpcError) {
+      setError(accountErrorMessage(rpcError))
+      return
+    }
+    onSaved(
+      `Account updated for ${account.full_name}. Username: "${data?.username}"` +
+        (data?.password_changed ? ' · new password set.' : '.')
+    )
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-box" style={{ maxWidth: '460px', textAlign: 'left' }}>
+        <div className="modal-title">Account settings</div>
+        <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', margin: '0 0 14px 0' }}>
+          Mobile app login for <strong>{account.full_name}</strong>.
+        </p>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label className="field-label">Username</label>
+          <input autoComplete="off" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <p style={hintStyle}>{USERNAME_HINT}</p>
+        </div>
+
+        <div style={{ marginBottom: '6px' }}>
+          <label className="field-label">New password</label>
+          <PasswordInput
+            placeholder="Leave blank to keep the current password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <p style={hintStyle}>
+            For security, the current password can't be shown. If they forgot it, type a new one
+            (at least 6 characters) and tell them.
+          </p>
+        </div>
+
+        {error && <p className="form-error">{error}</p>}
+
+        <div className="modal-actions" style={{ gap: '8px', marginTop: '14px' }}>
+          <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving}>
+            {saving ? 'Saving...' : 'Save changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /* Notifications                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -75,30 +224,35 @@ const TONE = {
   blue: { bar: '#2563eb', bg: '#eff6ff' }
 }
 
-const SEEN_KEY = 'gso-seen-notifications'
-const SOUND_KEY = 'gso-notification-sound'
+// Read/unread and the sound setting are saved per account, so two admins
+// sharing one computer each keep their own. (Before, they were saved per
+// browser, so one admin marking something read hid it from the other.)
+const LEGACY_SEEN_KEY = 'gso-seen-notifications'
+const seenKey = (accountId) => `gso-seen-notifications-${accountId}`
+const soundKey = (accountId) => `gso-notification-sound-${accountId}`
 const TOAST_MS = 7000
 
-function loadSeen() {
+function loadSeen(accountId) {
   try {
-    const raw = localStorage.getItem(SEEN_KEY)
+    // First time on this account: carry over the old shared list once.
+    const raw = localStorage.getItem(seenKey(accountId)) ?? localStorage.getItem(LEGACY_SEEN_KEY)
     return raw ? JSON.parse(raw) : []
   } catch {
     return []
   }
 }
 
-function saveSeen(list) {
+function saveSeen(accountId, list) {
   try {
-    localStorage.setItem(SEEN_KEY, JSON.stringify(list.slice(-500)))
+    localStorage.setItem(seenKey(accountId), JSON.stringify(list.slice(-500)))
   } catch {
     /* storage unavailable — read state just won't persist */
   }
 }
 
-function loadSoundOn() {
+function loadSoundOn(accountId) {
   try {
-    return localStorage.getItem(SOUND_KEY) !== 'off'
+    return localStorage.getItem(soundKey(accountId)) !== 'off'
   } catch {
     return true
   }
@@ -113,10 +267,10 @@ function desktopSupported() {
 // at once. After that, every NEW unread notification plays the sound and
 // pops up in the corner (like Facebook), and — when this tab is in the
 // background — also shows as a desktop notification.
-export function NotificationBell({ notifications, onNavigate, ready = true }) {
+export function NotificationBell({ accountId, notifications, onNavigate, ready = true }) {
   const [open, setOpen] = useState(false)
-  const [seen, setSeen] = useState(loadSeen)
-  const [soundOn, setSoundOn] = useState(loadSoundOn)
+  const [seen, setSeen] = useState(() => loadSeen(accountId))
+  const [soundOn, setSoundOn] = useState(() => loadSoundOn(accountId))
   const [toasts, setToasts] = useState([])
   const [desktopPermission, setDesktopPermission] = useState(
     desktopSupported() ? Notification.permission : 'unsupported'
@@ -179,20 +333,20 @@ export function NotificationBell({ notifications, onNavigate, ready = true }) {
     if (seenSet.has(id)) return
     const next = [...seen, id]
     setSeen(next)
-    saveSeen(next)
+    saveSeen(accountId, next)
   }
 
   function markAll() {
     const next = [...new Set([...seen, ...notifications.map((n) => n.id)])]
     setSeen(next)
-    saveSeen(next)
+    saveSeen(accountId, next)
   }
 
   function toggleSound() {
     const next = !soundOn
     setSoundOn(next)
     try {
-      localStorage.setItem(SOUND_KEY, next ? 'on' : 'off')
+      localStorage.setItem(soundKey(accountId), next ? 'on' : 'off')
     } catch {
       /* ignore */
     }
@@ -218,9 +372,9 @@ export function NotificationBell({ notifications, onNavigate, ready = true }) {
         onClick={() => setOpen((v) => !v)}
         title="Notifications"
         aria-label="Notifications"
-        style={{ position: 'relative', marginRight: '6px' }}
+        style={{ position: 'relative', marginRight: '6px', display: 'inline-flex', alignItems: 'center' }}
       >
-        🔔
+        <BellIcon size={18} />
         {unread > 0 && (
           <span
             style={{
@@ -412,7 +566,7 @@ export function NotificationBell({ notifications, onNavigate, ready = true }) {
                     fontSize: '1rem'
                   }}
                 >
-                  🔔
+                  <BellIcon size={18} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{n.title}</div>
@@ -586,7 +740,7 @@ export function PriorityActionsSummary({ jobOrderActions = [], purchaseItems = [
                   lines={[
                     `${a.equipment?.buildings?.building_name ?? 'N/A'} — ${a.equipment?.exact_location ?? ''}`,
                     a.description,
-                    `Reported ${ago(a.reported_date)}`
+                    `Reported ${fmtDateTime(a.reported_date)}`
                   ]}
                 />
               )
@@ -686,6 +840,7 @@ export function SummaryModal({
   expiring = [],
   completed = [],
   purchaseItems = [],
+  types = [],
   onClose
 }) {
   const now = new Date()
@@ -693,8 +848,10 @@ export function SummaryModal({
   const functional = active.filter((e) => e.current_status === 'functional').length
   const needsAttention = active.length - functional
   const retired = equipment.length - active.length
+  // Built-in types plus any added through "Others".
+  const typeList = types.length ? types : Object.keys(TYPE_LABELS)
 
-  const byType = Object.keys(TYPE_LABELS).map((type) => {
+  const byType = typeList.map((type) => {
     const items = active.filter((e) => e.equipment_type === type)
     const ok = items.filter((e) => e.current_status === 'functional').length
     return { type, total: items.length, ok, bad: items.length - ok }
@@ -732,10 +889,26 @@ export function SummaryModal({
   const th = { textAlign: 'left', fontSize: '0.78rem', color: '#64748b', padding: '6px 8px', borderBottom: '1px solid #e3e8ef' }
   const td = { fontSize: '0.86rem', padding: '6px 8px', borderBottom: '1px solid #f1f5f9' }
 
+  // Prints this window as a summary report. While printing, the page's
+  // print stylesheet shows only this window (see .printing-summary in
+  // index.css) and hides its buttons.
+  function printSummary() {
+    document.body.classList.add('printing-summary')
+    const done = () => {
+      document.body.classList.remove('printing-summary')
+      window.removeEventListener('afterprint', done)
+    }
+    window.addEventListener('afterprint', done)
+    setTimeout(() => {
+      window.print()
+      done()
+    }, 100)
+  }
+
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay summary-print-overlay">
       <div
-        className="modal-box"
+        className="modal-box summary-print-box"
         style={{ maxWidth: '820px', width: '94vw', maxHeight: '90vh', overflowY: 'auto', textAlign: 'left' }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
@@ -745,7 +918,10 @@ export function SummaryModal({
               NBSC Fire Safety Equipment System · generated {fmtDateTime(now)}
             </div>
           </div>
-          <button className="btn btn-secondary btn-sm" onClick={onClose}>Close</button>
+          <div className="no-print" style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-primary btn-sm" onClick={printSummary}>🖨 Print Summary</button>
+            <button className="btn btn-secondary btn-sm" onClick={onClose}>Close</button>
+          </div>
         </div>
 
         <SummarySection title="Equipment overview">
@@ -767,7 +943,7 @@ export function SummaryModal({
             <tbody>
               {byType.map((r) => (
                 <tr key={r.type}>
-                  <td style={td}>{TYPE_LABELS[r.type]}</td>
+                  <td style={td}>{TYPE_LABELS[r.type] || r.type}</td>
                   <td style={td}>{r.total}</td>
                   <td style={{ ...td, color: '#15803d', fontWeight: 600 }}>{r.ok}</td>
                   <td style={{ ...td, color: r.bad ? '#b91c1c' : undefined, fontWeight: r.bad ? 600 : 400 }}>{r.bad}</td>
@@ -844,7 +1020,7 @@ export function SummaryModal({
                     </td>
                     <td style={td}>{a.description}</td>
                     <td style={td}>{a.completed_by || '—'}</td>
-                    <td style={td}>{ago(a.completed_date)}</td>
+                    <td style={td}>{fmtDateTime(a.completed_date)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -878,17 +1054,17 @@ export function SummaryModal({
 
         <SummarySection title="Stock on hand">
           <div style={tileGrid}>
-            {Object.keys(TYPE_LABELS).map((type) => {
+            {typeList.map((type) => {
               const s = stock.find((x) => x.equipment_type === type)
               const qty = s ? s.quantity_available : 0
               return (
-                <Tile key={type} label={TYPE_LABELS[type]} value={qty} color={qty === 0 ? '#b91c1c' : undefined} />
+                <Tile key={type} label={TYPE_LABELS[type] || type} value={qty} color={qty === 0 ? '#b91c1c' : undefined} />
               )
             })}
           </div>
         </SummarySection>
 
-        <div className="modal-actions">
+        <div className="modal-actions no-print">
           <button className="btn btn-primary" onClick={onClose}>Done</button>
         </div>
       </div>
@@ -908,19 +1084,60 @@ function cleanName(name) {
 export function InspectorsTab({ inspections = [], equipment = [] }) {
   const [profiles, setProfiles] = useState([])
   const [expandedKey, setExpandedKey] = useState(null)
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm] = useState({ full_name: '', username: '', password: '' })
+  const [formError, setFormError] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState(null)
+  // Which inspector's Account settings window is open
+  const [settingsFor, setSettingsFor] = useState(null)
 
-  // Inspector accounts live in the profiles table. If the database rules do
-  // not let the admin read other profiles, this just stays empty and the
-  // list is built from submitted inspections only.
+  // Inspector accounts, with their usernames (migration 005). Before 005,
+  // fall back to reading profiles directly; if the database rules don't
+  // allow that either, the list is built from submitted inspections only.
+  async function fetchInspectors() {
+    const { data, error } = await supabase.rpc('list_staff_accounts')
+    if (!error) return (data || []).filter((a) => a.role === 'inspector')
+    const fallback = await supabase.from('profiles').select('id, full_name, role').eq('role', 'inspector')
+    return !fallback.error && fallback.data ? fallback.data : []
+  }
+
   useEffect(() => {
-    supabase
-      .from('profiles')
-      .select('id, full_name, role')
-      .eq('role', 'inspector')
-      .then(({ data, error }) => {
-        if (!error && data) setProfiles(data)
-      })
+    fetchInspectors().then(setProfiles)
   }, [])
+
+  // Creates the inspector's mobile app login (username + password).
+  async function handleAddInspector(e) {
+    e.preventDefault()
+    setFormError(null)
+    if (!form.full_name.trim()) {
+      setFormError('Full name is required.')
+      return
+    }
+    const problem = checkAccountFields(form.username, form.password)
+    if (problem) {
+      setFormError(problem)
+      return
+    }
+    setSaving(true)
+    const { data, error } = await supabase.rpc('create_staff_account', {
+      p_role: 'inspector',
+      p_full_name: form.full_name.trim(),
+      p_username: form.username.trim(),
+      p_password: form.password
+    })
+    setSaving(false)
+    if (error) {
+      setFormError(accountErrorMessage(error))
+      return
+    }
+    setNotice(
+      `Inspector account created. ${form.full_name.trim()} can now sign in to the mobile app with username "${data?.username}".`
+    )
+    setForm({ full_name: '', username: '', password: '' })
+    setShowForm(false)
+    setProfiles(await fetchInspectors())
+  }
 
   const codeById = useMemo(() => {
     const m = {}
@@ -934,12 +1151,12 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
     const map = {}
     profiles.forEach((p) => {
       const name = cleanName(p.full_name)
-      if (name) map[name.toLowerCase()] = { name, hasAccount: true, items: [] }
+      if (name) map[name.toLowerCase()] = { name, hasAccount: true, accountId: p.id, username: p.username || null, items: [] }
     })
     inspections.forEach((i) => {
       const name = cleanName(i.inspector_name) || 'Not recorded'
       const key = name.toLowerCase()
-      if (!map[key]) map[key] = { name, hasAccount: false, items: [] }
+      if (!map[key]) map[key] = { name, hasAccount: false, accountId: null, username: null, items: [] }
       map[key].items.push(i)
     })
     const now = new Date()
@@ -950,6 +1167,8 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
           key,
           name: r.name,
           hasAccount: r.hasAccount,
+          username: r.username,
+          accountId: r.accountId,
           items,
           total: items.length,
           defects: items.filter((i) => i.condition_status === 'defective').length,
@@ -965,8 +1184,68 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
     <div>
       <div className="section-heading">
         <h2>Inspectors</h2>
-        <span className="count-pill">{rows.length} listed</span>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <span className="count-pill">{rows.length} listed</span>
+          <button className="btn btn-primary btn-sm" onClick={() => setShowForm((v) => !v)}>
+            {showForm ? 'Close' : '+ Add Inspector'}
+          </button>
+        </div>
       </div>
+
+      {showForm && (
+        <div className="panel">
+          <form onSubmit={handleAddInspector} className="form-grid">
+            <div>
+              <label className="field-label">Full Name</label>
+              <input
+                placeholder="e.g. Maria Santos"
+                value={form.full_name}
+                onChange={(e) => setForm((prev) => ({ ...prev, full_name: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="field-label">Username (for the mobile app)</label>
+              <input
+                placeholder="e.g. mariasantos"
+                autoComplete="off"
+                value={form.username}
+                onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}
+              />
+              <p style={hintStyle}>{USERNAME_HINT}</p>
+            </div>
+            <div>
+              <label className="field-label">Password (at least 6 characters)</label>
+              <PasswordInput
+                value={form.password}
+                onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
+              />
+            </div>
+            {formError && <p className="form-error">{formError}</p>}
+            <button type="submit" className="btn btn-primary" disabled={saving}>
+              {saving ? 'Creating account...' : 'Add Inspector'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {notice && (
+        <div className="all-clear-banner" style={{ marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+          <span>✓ {notice}</span>
+          <button className="btn btn-secondary btn-sm" onClick={() => setNotice(null)}>OK</button>
+        </div>
+      )}
+
+      {settingsFor && (
+        <AccountSettingsModal
+          account={settingsFor}
+          onClose={() => setSettingsFor(null)}
+          onSaved={async (message) => {
+            setSettingsFor(null)
+            setNotice(message)
+            setProfiles(await fetchInspectors())
+          }}
+        />
+      )}
 
       {rows.length === 0 ? (
         <p style={{ color: 'var(--text-muted)' }}>No inspectors or inspections recorded yet.</p>
@@ -989,6 +1268,11 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
                   </span>
                 )}
               </div>
+              {r.username && (
+                <div style={{ fontSize: '0.82rem', marginTop: '2px' }}>
+                  Username: <strong>{r.username}</strong>
+                </div>
+              )}
               <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                 {r.last ? `Last inspection ${ago(r.last)}` : 'No inspections submitted yet'}
               </div>
@@ -1014,7 +1298,7 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
                 </div>
               </div>
 
-              <div className="equipment-actions" style={{ marginTop: '12px' }}>
+              <div className="equipment-actions" style={{ marginTop: '12px', flexWrap: 'wrap' }}>
                 <button
                   className="btn btn-secondary btn-sm"
                   onClick={() => setExpandedKey(expandedKey === r.key ? null : r.key)}
@@ -1022,6 +1306,14 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
                 >
                   {expandedKey === r.key ? 'Hide inspections' : `View inspections (${r.total})`}
                 </button>
+                {r.accountId && r.username && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setSettingsFor({ id: r.accountId, full_name: r.name, username: r.username })}
+                  >
+                    Account settings
+                  </button>
+                )}
               </div>
 
               {expandedKey === r.key && (
