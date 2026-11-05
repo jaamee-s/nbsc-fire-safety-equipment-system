@@ -13,8 +13,9 @@ function Login({ onLoginSuccess }) {
     setError(null)
     setLoading(true)
 
+    // Autofill and copy-paste often add a space, which makes sign-in fail.
     const { error } = await supabase.auth.signInWithPassword({
-      email,
+      email: email.trim(),
       password
     })
 

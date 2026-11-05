@@ -659,7 +659,90 @@ textarea {
   gap: 12px;
 }
 
+/* Equipment report sheet: off-screen until the print dialog opens */
+.report-print-area {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 1000px;
+  color: #000;
+  background: #fff;
+}
+
+.report-print-head {
+  border-bottom: 2px solid #000;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+}
+
+.report-print-school {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+
+.report-print-title {
+  font-size: 1.25rem;
+  margin: 4px 0;
+}
+
+.report-print-meta {
+  font-size: 0.8rem;
+  margin-top: 2px;
+}
+
+.report-print-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.report-print-table th,
+.report-print-table td {
+  border: 1px solid #999;
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.report-print-table th {
+  background: #eee;
+}
+
+.report-print-table tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
 @media print {
+  /* Print Summary: show only the Summary window, full length, no buttons. */
+  body.printing-summary .summary-print-overlay {
+    display: block !important;
+    position: static !important;
+    background: none !important;
+    padding: 0 !important;
+  }
+
+  body.printing-summary .summary-print-box {
+    max-width: none !important;
+    width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+
+  body.printing-summary .no-print,
+  body.printing-summary .back-to-top-btn {
+    display: none !important;
+  }
+
+  .report-print-area {
+    position: static;
+    left: auto;
+    width: 100%;
+  }
+
   /* Remove the dashboard from the layout entirely, not just from view.
      `visibility: hidden` would leave its full height behind and emit
      blank pages. .tab-strip sits between the header and page-wrap, so
@@ -691,6 +774,13 @@ textarea {
 }
 
 /* ===== Password show/hide toggle ===== */
+/* Microsoft Edge adds its own eye button to password boxes, next to ours.
+   One is enough — hide Edge's. */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}
+
 .password-field-wrap {
   position: relative;
   display: flex;

@@ -1,15 +1,20 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
 import {
+  AccountSettingsModal,
   NotificationBell,
+  PasswordInput,
   PriorityActionsSummary,
   SummaryModal,
   InspectorsTab,
   JobOrderRequestModal
 } from './GsoExtras'
 import { buildGsoNotifications, findPurchaseRequestItems } from './gsoNotifications'
+import { accountErrorMessage, checkAccountFields, USERNAME_HINT } from './staffAccounts'
+
+const HINT_STYLE = { fontSize: '0.78rem', color: 'var(--text-muted)', margin: '5px 0 0 0' }
 
 const EQUIPMENT_TYPES = [
   'fire_extinguisher',
@@ -29,6 +34,19 @@ const STATUS_OPTIONS = [
 ]
 
 const PRIORITY_ORDER = { critical: 1, high: 2, medium: 3, low: 4 }
+
+// Decision support on Equipment cards: a unit that is functional again after
+// a low/medium-priority defect gets a follow-up recommendation, based on the
+// kind of work that fixed it.
+const LOW_RISK_PRIORITIES = ['low', 'medium']
+const RECOMMENDATION_BY_ACTION = {
+  repair: 'check that the repair is holding at the next inspection.',
+  replace: 'check that the replaced part is working at the next inspection.',
+  battery_replacement: 'test the battery at the next inspection.',
+  refill: 'check the pressure gauge at the next inspection.',
+  inspection: 'inspect this unit again at the next scheduled round.',
+  other: 're-check the reported problem at the next inspection.'
+}
 
 const TYPE_LABELS = {
   fire_extinguisher: 'Fire Extinguisher',
@@ -61,8 +79,30 @@ const CODE_PREFIXES = {
 // Supply Office processes it, and the dashboard lists every such unit in the
 // Priority Actions summary (see findPurchaseRequestItems).
 
+// "Others" in the Add Equipment form: a custom type is stored by the name the
+// admin typed (e.g. "Fire Hose Reel"), so it reads correctly everywhere.
+const OTHER_TYPE = '__other__'
+
+function typeLabel(type) {
+  return TYPE_LABELS[type] || type
+}
+
+// Code prefix for a type. Built-in types have fixed ones; a custom type uses
+// its initials ("Fire Hose Reel" -> FHR, "Hydrant" -> HY).
+function codePrefixFor(equipmentType) {
+  if (CODE_PREFIXES[equipmentType]) return CODE_PREFIXES[equipmentType]
+  const words = String(equipmentType || '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+  if (words.length === 0) return 'EQ'
+  const prefix =
+    words.length === 1 ? words[0].slice(0, 2) : words.map((w) => w[0]).join('').slice(0, 4)
+  return prefix.toUpperCase()
+}
+
 async function generateEquipmentCode(supabase, equipmentType) {
-  const prefix = CODE_PREFIXES[equipmentType] || 'EQ'
+  const prefix = codePrefixFor(equipmentType)
 
   const { data, error } = await supabase
     .from('equipment')
@@ -87,6 +127,12 @@ async function generateEquipmentCode(supabase, equipmentType) {
   return `${prefix}-${String(nextNumber).padStart(3, '0')}`
 }
 
+// True when both dates are filled in and expiry comes before installation.
+// Both are 'YYYY-MM-DD' strings, which compare correctly as text.
+function datesOutOfOrder(installationDate, expirationDate) {
+  return !!installationDate && !!expirationDate && expirationDate < installationDate
+}
+
 function daysAgo(dateString) {
   if (!dateString) return null
   const then = new Date(dateString)
@@ -98,6 +144,12 @@ function daysAgo(dateString) {
 // inspection_date is stored as timestamptz, so the exact moment of submission survives.
 function formatTimestamp(dateString) {
   if (!dateString) return '—'
+  // A date with no time (YYYY-MM-DD) shows the date only, not a made-up time.
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateString))
+  if (dateOnly) {
+    return new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))
+      .toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  }
   return new Date(dateString).toLocaleString(undefined, {
     year: 'numeric',
     month: 'short',
@@ -346,6 +398,18 @@ function Dashboard({ profile, onLogout }) {
     return () => clearTimeout(timer)
   }, [qrPrintItems])
 
+  // Equipment report: printed the same way as the QR labels (render, then print)
+  const [reportPrint, setReportPrint] = useState(null)
+
+  useEffect(() => {
+    if (!reportPrint) return
+    const timer = setTimeout(() => {
+      window.print()
+      setReportPrint(null)
+    }, 200)
+    return () => clearTimeout(timer)
+  }, [reportPrint])
+
   // Equipment search / filter state
   const [searchTerm, setSearchTerm] = useState('')
   const [filterType, setFilterType] = useState('')
@@ -383,7 +447,22 @@ function Dashboard({ profile, onLogout }) {
   // Technician management state
   const [technicians, setTechnicians] = useState([])
   const [showTechnicianForm, setShowTechnicianForm] = useState(false)
-  const [technicianForm, setTechnicianForm] = useState({ full_name: '', contact_info: '' })
+  const [technicianForm, setTechnicianForm] = useState({
+    full_name: '',
+    contact_info: '',
+    username: '',
+    password: ''
+  })
+  // Mobile app logins (username shown on cards) and the "account created" note
+  const [staffAccounts, setStaffAccounts] = useState([])
+  const [accountNotice, setAccountNotice] = useState(null)
+  // "Create app account" for a technician added before accounts existed
+  const [techLoginFor, setTechLoginFor] = useState(null)
+  const [techLoginForm, setTechLoginForm] = useState({ username: '', password: '' })
+  const [techLoginSaving, setTechLoginSaving] = useState(false)
+  const [techLoginError, setTechLoginError] = useState(null)
+  // Which technician's Account settings window is open
+  const [accountSettingsFor, setAccountSettingsFor] = useState(null)
   const [technicianSubmitting, setTechnicianSubmitting] = useState(false)
   const [technicianError, setTechnicianError] = useState(null)
   const [editingTechnicianId, setEditingTechnicianId] = useState(null)
@@ -401,6 +480,10 @@ function Dashboard({ profile, onLogout }) {
   // Free-text remarks that go on the Job Order Request form
   const [jobOrderRemarks, setJobOrderRemarks] = useState('')
   const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
+
+  // Add Equipment form: "Others" — the new equipment type's name
+  const [otherTypeName, setOtherTypeName] = useState('')
+  const latestOtherNameRef = useRef('')
 
   // Add Equipment form: cascading location picker state
   const [formFloor, setFormFloor] = useState('')
@@ -441,7 +524,8 @@ function Dashboard({ profile, onLogout }) {
       getInspections(),
       getStock(),
       getTechnicians(),
-      getCompletedActions()
+      getCompletedActions(),
+      getStaffAccounts()
     ]).then(() => setInitialLoaded(true))
   }, [])
 
@@ -773,7 +857,7 @@ function Dashboard({ profile, onLogout }) {
       .select(`
         id, action_type, description, priority, status,
         completed_date, completed_by, outcome_reason,
-        equipment ( equipment_code, equipment_type, exact_location,
+        equipment ( id, equipment_code, equipment_type, exact_location,
           buildings ( building_name )
         )
       `)
@@ -836,6 +920,12 @@ function Dashboard({ profile, onLogout }) {
 
   async function handleTypeChange(e) {
     const type = e.target.value
+    if (type === OTHER_TYPE) {
+      // The code is generated once the new type's name is typed in.
+      setOtherTypeName('')
+      setForm((prev) => ({ ...prev, equipment_type: OTHER_TYPE, equipment_code: '', qr_code: '' }))
+      return
+    }
     const newCode = await generateEquipmentCode(supabase, type)
     setForm((prev) => ({
       ...prev,
@@ -845,10 +935,32 @@ function Dashboard({ profile, onLogout }) {
     }))
   }
 
+  // A typed-in type that matches an existing one (e.g. "sprinkler") uses
+  // that type instead of creating a duplicate.
+  function resolveTypeName(name) {
+    const clean = name.trim().replace(/\s+/g, ' ')
+    const existing = allTypes.find((t) => typeLabel(t).toLowerCase() === clean.toLowerCase())
+    return existing || clean
+  }
+
+  async function handleOtherTypeNameChange(e) {
+    const name = e.target.value
+    setOtherTypeName(name)
+    latestOtherNameRef.current = name
+    if (!name.trim()) {
+      setForm((prev) => ({ ...prev, equipment_code: '', qr_code: '' }))
+      return
+    }
+    const newCode = await generateEquipmentCode(supabase, resolveTypeName(name))
+    // Ignore an older lookup that finishes after a newer keystroke.
+    if (latestOtherNameRef.current !== name) return
+    setForm((prev) => ({ ...prev, equipment_code: newCode, qr_code: newCode }))
+  }
+
   async function openAddForm() {
     const willShow = !showAddForm
     setShowAddForm(willShow)
-    if (willShow) {
+    if (willShow && form.equipment_type !== OTHER_TYPE) {
       const newCode = await generateEquipmentCode(supabase, form.equipment_type)
       setForm((prev) => ({ ...prev, equipment_code: newCode, qr_code: newCode }))
     }
@@ -890,6 +1002,12 @@ function Dashboard({ profile, onLogout }) {
     e.preventDefault()
     setFormError(null)
 
+    const isOther = form.equipment_type === OTHER_TYPE
+    if (isOther && !otherTypeName.trim()) {
+      setFormError('Type the name of the new equipment type.')
+      return
+    }
+
     if (!form.equipment_code || !form.qr_code || !form.building_id) {
       setFormError('Equipment code, QR code, and building are required.')
       return
@@ -900,14 +1018,29 @@ function Dashboard({ profile, onLogout }) {
       return
     }
 
+    if (datesOutOfOrder(form.installation_date, form.expiration_date)) {
+      setFormError('Expiration date cannot be earlier than the installation date.')
+      return
+    }
+
     setSubmitting(true)
 
+    // "Others": save the typed name as the type (reusing an existing type
+    // if it matches), with a code made for that type. The database then
+    // adds the type to the Stock page automatically.
+    let equipmentType = form.equipment_type
+    let code = form.equipment_code
+    if (isOther) {
+      equipmentType = resolveTypeName(otherTypeName)
+      code = await generateEquipmentCode(supabase, equipmentType)
+    }
+
     const payload = {
-      equipment_code: form.equipment_code,
-      equipment_type: form.equipment_type,
+      equipment_code: code,
+      equipment_type: equipmentType,
       building_id: form.building_id,
       exact_location: form.exact_location || null,
-      qr_code: form.qr_code,
+      qr_code: code,
       installation_date: form.installation_date || null,
       expiration_date: form.expiration_date || null,
       current_status: form.current_status,
@@ -933,8 +1066,10 @@ function Dashboard({ profile, onLogout }) {
       })
       setFormFloor('')
       setFormLocationChoice('')
+      setOtherTypeName('')
       setShowAddForm(false)
       getEquipment()
+      getStock() // a new type now has its own Stock row
     }
 
     setSubmitting(false)
@@ -964,7 +1099,14 @@ function Dashboard({ profile, onLogout }) {
 
   function handleEditChange(e) {
     const { name, value } = e.target
-    setEditForm((prev) => ({ ...prev, [name]: value }))
+    setEditForm((prev) => {
+      // A room belongs to one building. Changing the building must clear the
+      // old room, or the unit is saved in a room its new building doesn't have.
+      if (name === 'building_id' && value !== prev.building_id) {
+        return { ...prev, building_id: value, exact_location: '' }
+      }
+      return { ...prev, [name]: value }
+    })
   }
 
   async function saveEdit(id) {
@@ -973,6 +1115,19 @@ function Dashboard({ profile, onLogout }) {
 
     if (!editForm.equipment_code || !editForm.qr_code || !editForm.building_id) {
       setEditError('Equipment code, QR code, and building are required.')
+      setEditSaving(false)
+      return
+    }
+
+    const buildingHasLocations = buildingLocations.some((l) => l.building_id === editForm.building_id)
+    if (buildingHasLocations && !editForm.exact_location) {
+      setEditError('Please select the floor and room/location in this building.')
+      setEditSaving(false)
+      return
+    }
+
+    if (datesOutOfOrder(editForm.installation_date, editForm.expiration_date)) {
+      setEditError('Expiration date cannot be earlier than the installation date.')
       setEditSaving(false)
       return
     }
@@ -1099,7 +1254,9 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(null)
   }
 
-  // Reassess an unresolved action: resets status to pending and clears repair_path
+  // Reassess an unresolved action: sends it back to pending for a fresh Job
+  // Order. The old outcome and technician are cleared too — before, the card
+  // kept showing "Outcome: UNRESOLVED" and "Assigned to" while it was pending.
   async function reassessAction(actionId) {
     if (!window.confirm('Reassess this action?\n\nThis sends it back to Pending so a new Job Order Request can be made (for example with a different technician).')) return
 
@@ -1112,7 +1269,15 @@ function Dashboard({ profile, onLogout }) {
         budget_status: 'not_applicable',
         repair_status: null,
         repair_note: null,
-        repaired_at: null
+        repaired_at: null,
+        assigned_technician_id: null,
+        decided_by: null,
+        decided_at: null,
+        job_order_remarks: null,
+        outcome: null,
+        outcome_reason: null,
+        outcome_by: null,
+        outcome_at: null
       })
       .eq('id', actionId)
 
@@ -1133,6 +1298,14 @@ function Dashboard({ profile, onLogout }) {
 
     if (!selectedTechnicianId) {
       alert('Please select a technician for this Job Order.')
+      return
+    }
+
+    // Reassigning to the technician who already has it would only wipe their
+    // progress ("Working on it") and note, so there is nothing to save.
+    if (isReassign && selectedTechnicianId === techAssignModal.currentTechnicianId) {
+      setTechAssignModal(null)
+      setSelectedTechnicianId('')
       return
     }
 
@@ -1161,10 +1334,12 @@ function Dashboard({ profile, onLogout }) {
 
     const { error } = await supabase.from('maintenance_actions').update(payload).eq('id', actionId)
     if (error) {
+      // Keep the form open so the remarks and technician choice aren't lost.
       alert('Failed to submit Job Order: ' + error.message)
-    } else {
-      getMaintenanceActions()
+      setActionUpdatingId(null)
+      return
     }
+    getMaintenanceActions()
 
     setTechAssignModal(null)
     setSelectedTechnicianId('')
@@ -1196,7 +1371,7 @@ function Dashboard({ profile, onLogout }) {
         alert('Failed to update stock: ' + error.message)
       }
     } else {
-      setStockMessage(`Stock for ${TYPE_LABELS[type]} updated.`)
+      setStockMessage(`Stock for ${typeLabel(type)} updated.`)
       setTimeout(() => setStockMessage(null), 3000)
       getStock()
     }
@@ -1212,28 +1387,71 @@ function Dashboard({ profile, onLogout }) {
       setTechnicianError('Technician name is required.')
       return
     }
+    const accountProblem = checkAccountFields(technicianForm.username, technicianForm.password)
+    if (accountProblem) {
+      setTechnicianError(accountProblem)
+      return
+    }
 
+    // Creates the technician AND their mobile app login in one step.
     setTechnicianSubmitting(true)
-    const { error } = await supabase.from('technicians').insert([
-      {
-        full_name: technicianForm.full_name.trim(),
-        contact_info: technicianForm.contact_info.trim() || null,
-        is_available: true
-      }
-    ])
+    const { data, error } = await supabase.rpc('create_staff_account', {
+      p_role: 'technician',
+      p_full_name: technicianForm.full_name.trim(),
+      p_username: technicianForm.username.trim(),
+      p_password: technicianForm.password,
+      p_contact: technicianForm.contact_info.trim() || null
+    })
 
     if (error) {
-      if (error.message?.includes('schema cache') || error.message?.includes('does not exist')) {
-        setTechnicianError('Database table "technicians" has not been created yet in Supabase. Please run the SQL migration (001_outcome_stock_technicians.sql) in your Supabase SQL Editor.')
-      } else {
-        setTechnicianError(error.message)
-      }
+      setTechnicianError(accountErrorMessage(error))
     } else {
-      setTechnicianForm({ full_name: '', contact_info: '' })
+      setAccountNotice(
+        `Technician account created. ${technicianForm.full_name.trim()} can now sign in to the mobile app with username "${data?.username}".`
+      )
+      setTechnicianForm({ full_name: '', contact_info: '', username: '', password: '' })
       setShowTechnicianForm(false)
       getTechnicians()
+      getStaffAccounts()
     }
     setTechnicianSubmitting(false)
+  }
+
+  // Gives an existing technician (added before accounts existed) a login.
+  async function handleCreateTechnicianLogin(technician) {
+    setTechLoginError(null)
+    const problem = checkAccountFields(techLoginForm.username, techLoginForm.password)
+    if (problem) {
+      setTechLoginError(problem)
+      return
+    }
+    setTechLoginSaving(true)
+    const { data, error } = await supabase.rpc('create_staff_account', {
+      p_role: 'technician',
+      p_full_name: technician.full_name,
+      p_username: techLoginForm.username.trim(),
+      p_password: techLoginForm.password,
+      p_contact: null,
+      p_technician_id: technician.id
+    })
+    setTechLoginSaving(false)
+    if (error) {
+      setTechLoginError(accountErrorMessage(error))
+      return
+    }
+    setAccountNotice(
+      `App account created. ${technician.full_name} can now sign in to the mobile app with username "${data?.username}".`
+    )
+    setTechLoginFor(null)
+    setTechLoginForm({ username: '', password: '' })
+    getTechnicians()
+    getStaffAccounts()
+  }
+
+  async function getStaffAccounts() {
+    const { data, error } = await supabase.rpc('list_staff_accounts')
+    // Before migration 005 this function doesn't exist; usernames just don't show.
+    if (!error) setStaffAccounts(data || [])
   }
 
   async function toggleTechnicianAvailability(id, currentVal) {
@@ -1291,6 +1509,19 @@ function Dashboard({ profile, onLogout }) {
   }
 
   async function deleteTechnician(id, name) {
+    // Deleting would leave these jobs "In Progress" with nobody assigned.
+    const activeJobs = maintenanceActions.filter(
+      (a) => a.assigned_technician_id === id && a.status === 'in_progress'
+    )
+    if (activeJobs.length > 0) {
+      alert(
+        `${name} still has ${activeJobs.length} job${activeJobs.length === 1 ? '' : 's'} in progress ` +
+          `(${activeJobs.map((a) => a.equipment?.equipment_code).join(', ')}).\n\n` +
+          'Reassign those jobs to another technician first, then delete.'
+      )
+      return
+    }
+
     if (!window.confirm(`Delete technician "${name}"? Any past actions assigned to this technician will retain their record.`)) return
 
     const { error } = await supabase.from('technicians').delete().eq('id', id)
@@ -1340,6 +1571,17 @@ function Dashboard({ profile, onLogout }) {
     }
   }
 
+  // Every equipment type in use: the 5 built-in ones plus any added through
+  // "Others" (found in Stock or Equipment). Feeds the type dropdowns, the
+  // Stock page and the Summary.
+  const allTypes = [
+    ...new Set([
+      ...EQUIPMENT_TYPES,
+      ...stock.map((s) => s.equipment_type),
+      ...equipment.map((e) => e.equipment_type)
+    ])
+  ].filter(Boolean)
+
   const sortedActions = [...maintenanceActions].sort((a, b) => {
     const pa = PRIORITY_ORDER[a.priority] || 5
     const pb = PRIORITY_ORDER[b.priority] || 5
@@ -1354,9 +1596,13 @@ function Dashboard({ profile, onLogout }) {
     return acc
   }, {})
 
-  // A unit that has failed 2+ inspections is a recurring problem, not a one-off.
-  // This is the pattern that justifies replacement over repeated repairs.
-  const REPEAT_FAILURE_THRESHOLD = 2
+  // Each unit's most recent fixed defect (completedActions is newest first).
+  // Feeds the decision-support recommendation on Equipment cards.
+  const lastResolvedByEquipment = {}
+  completedActions.forEach((a) => {
+    const id = a.equipment?.id
+    if (id && !lastResolvedByEquipment[id]) lastResolvedByEquipment[id] = a
+  })
 
   // Active deployed equipment (excluding decommissioned/retired units)
   const totalEquipment = equipment.filter((e) => e.current_status !== 'no_longer_in_service').length
@@ -1477,6 +1723,12 @@ function Dashboard({ profile, onLogout }) {
     return matchesSearch && matchesType && matchesStatus && matchesBuilding
   })
 
+  // A retired unit's QR code is a unique identifier that must never go on a
+  // new sticker, so retired units are left out of label printing.
+  const printableEquipment = filteredEquipment.filter(
+    (item) => item.current_status !== 'no_longer_in_service'
+  )
+
   const locationsForSelectedBuilding = buildingLocations.filter(
     (loc) => loc.building_id === form.building_id
   )
@@ -1544,6 +1796,7 @@ function Dashboard({ profile, onLogout }) {
             Summary
           </button>
           <NotificationBell
+            accountId={profile.id}
             notifications={gsoNotifications}
             onNavigate={handleNotificationNavigate}
             ready={initialLoaded}
@@ -1793,7 +2046,7 @@ function Dashboard({ profile, onLogout }) {
                 )}
 
                 <div className="meta">
-                  Reported {age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`}
+                  Reported {formatTimestamp(action.reported_date)}
                   {assignedTech && (
                     <>
                       <br />
@@ -1803,7 +2056,7 @@ function Dashboard({ profile, onLogout }) {
                   {action.decided_by && (
                     <>
                       <br />
-                      Decided by <strong>{action.decided_by}</strong> · {relativeTime(action.decided_at)}
+                      Decided by <strong>{action.decided_by}</strong> · {formatTimestamp(action.decided_at)}
                     </>
                   )}
                   {action.outcome && (
@@ -1946,6 +2199,7 @@ function Dashboard({ profile, onLogout }) {
                             actionId: action.id,
                             isFireExtinguisher,
                             equipmentCode: action.equipment?.equipment_code,
+                            currentTechnicianId: action.assigned_technician_id || '',
                             isReassign: true
                           })
                         }}
@@ -2355,10 +2609,19 @@ function Dashboard({ profile, onLogout }) {
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               className="btn btn-secondary btn-sm"
-              onClick={() => setQrPrintItems(filteredEquipment)}
+              onClick={() => setReportPrint({ items: filteredEquipment, generatedAt: new Date() })}
               disabled={filteredEquipment.length === 0}
+              title="Prints the equipment shown below, using the same filters."
             >
-              🖨 Print QR Labels ({filteredEquipment.length})
+              🖨 Print Report ({filteredEquipment.length})
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setQrPrintItems(printableEquipment)}
+              disabled={printableEquipment.length === 0}
+              title="Retired (No Longer in Service) units are not printed — their QR code is never reused."
+            >
+              🖨 Print QR Labels ({printableEquipment.length})
             </button>
             <button className="btn btn-primary btn-sm" onClick={openAddForm}>
               {showAddForm ? 'Close' : '+ Add Equipment'}
@@ -2373,11 +2636,27 @@ function Dashboard({ profile, onLogout }) {
               <div>
                 <label className="field-label">Equipment Type</label>
                 <select name="equipment_type" value={form.equipment_type} onChange={handleTypeChange}>
-                  {EQUIPMENT_TYPES.map((type) => (
-                    <option key={type} value={type}>{TYPE_LABELS[type]}</option>
+                  {allTypes.map((type) => (
+                    <option key={type} value={type}>{typeLabel(type)}</option>
                   ))}
+                  <option value={OTHER_TYPE}>Others (specify)...</option>
                 </select>
               </div>
+
+              {form.equipment_type === OTHER_TYPE && (
+                <div>
+                  <label className="field-label">New Equipment Type</label>
+                  <input
+                    placeholder="e.g. Fire Hose Reel"
+                    value={otherTypeName}
+                    onChange={handleOtherTypeNameChange}
+                    autoFocus
+                  />
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '6px 0 0 0' }}>
+                    It will be added to the type list and to the Stock page automatically.
+                  </p>
+                </div>
+              )}
 
               <div>
                 <label className="field-label">Equipment Code (auto-generated)</label>
@@ -2489,8 +2768,8 @@ function Dashboard({ profile, onLogout }) {
               <label className="field-label"> Equipment Type</label>
               <select value={filterType} onChange={(e) => setFilterType(e.target.value)}>
                 <option value="">All Types</option>
-                {EQUIPMENT_TYPES.map((type) => (
-                  <option key={type} value={type}>{TYPE_LABELS[type]}</option>
+                {allTypes.map((type) => (
+                  <option key={type} value={type}>{typeLabel(type)}</option>
                 ))}
               </select>
             </div>
@@ -2549,8 +2828,8 @@ function Dashboard({ profile, onLogout }) {
                   <div>
                     <label className="field-label">Equipment Type</label>
                     <select name="equipment_type" value={editForm.equipment_type} onChange={handleEditChange}>
-                      {EQUIPMENT_TYPES.map((type) => (
-                        <option key={type} value={type}>{TYPE_LABELS[type]}</option>
+                      {allTypes.map((type) => (
+                        <option key={type} value={type}>{typeLabel(type)}</option>
                       ))}
                     </select>
                   </div>
@@ -2648,8 +2927,12 @@ function Dashboard({ profile, onLogout }) {
               ) : (
                 (() => {
                   const history = inspectionsByEquipment[item.id] || []
-                  const failures = history.filter((i) => i.condition_status === 'defective').length
-                  const isRepeatOffender = failures >= REPEAT_FAILURE_THRESHOLD
+                  // Decision support: only for a unit that is Functional now
+                  // and whose last fixed defect was low or medium priority.
+                  const pastDefect =
+                    item.current_status === 'functional' ? lastResolvedByEquipment[item.id] : null
+                  const showRecommendation =
+                    pastDefect && LOW_RISK_PRIORITIES.includes(pastDefect.priority)
 
                   return (
                     <div>
@@ -2657,11 +2940,6 @@ function Dashboard({ profile, onLogout }) {
                         <div>
                           <div className="equipment-title">
                             {item.equipment_code} — {TYPE_LABELS[item.equipment_type] || item.equipment_type}
-                            {isRepeatOffender && (
-                              <span className="overdue-tag" style={{ marginLeft: '9px' }}>
-                                {failures}× FAILED
-                              </span>
-                            )}
                           </div>
                           <div className="equipment-meta">
                             {item.buildings?.building_name ?? 'Not assigned'} · {item.exact_location}
@@ -2673,10 +2951,12 @@ function Dashboard({ profile, onLogout }) {
                         </span>
                       </div>
 
-                      {isRepeatOffender && (
-                        <p style={{ fontSize: '0.85rem', color: 'var(--red)', margin: '8px 0 0 0' }}>
-                          This unit has failed {failures} inspections. Consider replacement instead of
-                          another repair.
+                      {showRecommendation && (
+                        <p style={{ fontSize: '0.85rem', color: 'var(--amber)', margin: '8px 0 0 0' }}>
+                          Previously reported defective: "{pastDefect.description}" (
+                          <span style={{ textTransform: 'capitalize' }}>{pastDefect.priority}</span> priority,
+                          fixed {relativeTime(pastDefect.completed_date)}). Recommendation:{' '}
+                          {RECOMMENDATION_BY_ACTION[pastDefect.action_type] || RECOMMENDATION_BY_ACTION.other}
                         </p>
                       )}
 
@@ -2705,12 +2985,19 @@ function Dashboard({ profile, onLogout }) {
                             Encodes <strong>{item.qr_code}</strong> only. Scanning looks the record up
                             live, so this sticker stays accurate if the unit is moved or refilled.
                           </p>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => setQrPrintItems([item])}
-                          >
-                            🖨 Print This Label
-                          </button>
+                          {item.current_status === 'no_longer_in_service' ? (
+                            <p style={{ fontSize: '0.85rem', color: 'var(--red)', margin: 0 }}>
+                              This unit is retired, so its label can't be printed — its QR code is a
+                              unique identifier and is never reused.
+                            </p>
+                          ) : (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              onClick={() => setQrPrintItems([item])}
+                            >
+                              🖨 Print This Label
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -2817,7 +3104,7 @@ function Dashboard({ profile, onLogout }) {
 
             <div className="panel">
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-                {EQUIPMENT_TYPES.map((type) => {
+                {allTypes.map((type) => {
                   const s = stock.find((item) => item.equipment_type === type)
                   const currentQty = s ? s.quantity_available : 0
                   const isFE = type === 'fire_extinguisher'
@@ -2834,7 +3121,7 @@ function Dashboard({ profile, onLogout }) {
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                         <div style={{ fontWeight: 700, fontSize: '1rem' }}>
-                          {TYPE_LABELS[type]}
+                          {typeLabel(type)}
                         </div>
                         {isFE && (
                           <span style={{ fontSize: '0.72rem', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)', padding: '2px 8px', borderRadius: '999px', fontWeight: 600 }}>
@@ -2911,13 +3198,37 @@ function Dashboard({ profile, onLogout }) {
                       onChange={(e) => setTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
                     />
                   </div>
+                  <div>
+                    <label className="field-label">Username (for the mobile app)</label>
+                    <input
+                      placeholder="e.g. kenntech"
+                      autoComplete="off"
+                      value={technicianForm.username}
+                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, username: e.target.value }))}
+                    />
+                    <p style={HINT_STYLE}>{USERNAME_HINT}</p>
+                  </div>
+                  <div>
+                    <label className="field-label">Password (at least 6 characters)</label>
+                    <PasswordInput
+                      value={technicianForm.password}
+                      onChange={(e) => setTechnicianForm((prev) => ({ ...prev, password: e.target.value }))}
+                    />
+                  </div>
 
                   {technicianError && <p className="form-error">{technicianError}</p>}
 
                   <button type="submit" className="btn btn-primary" disabled={technicianSubmitting}>
-                    {technicianSubmitting ? 'Saving...' : 'Add Technician'}
+                    {technicianSubmitting ? 'Creating account...' : 'Add Technician'}
                   </button>
                 </form>
+              </div>
+            )}
+
+            {accountNotice && (
+              <div className="all-clear-banner" style={{ marginBottom: '14px', display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span>✓ {accountNotice}</span>
+                <button className="btn btn-secondary btn-sm" onClick={() => setAccountNotice(null)}>OK</button>
               </div>
             )}
 
@@ -2976,6 +3287,14 @@ function Dashboard({ profile, onLogout }) {
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                               {t.contact_info || 'No contact provided'}
                             </div>
+                            {(() => {
+                              const acc = staffAccounts.find((a) => a.id === t.profile_id)
+                              return acc ? (
+                                <div style={{ fontSize: '0.82rem', marginTop: '2px' }}>
+                                  Username: <strong>{acc.username}</strong>
+                                </div>
+                              ) : null
+                            })()}
                           </div>
                           <span
                             className={`status-badge ${t.is_available ? 'active' : 'inactive-state'}`}
@@ -2987,7 +3306,7 @@ function Dashboard({ profile, onLogout }) {
                           </span>
                         </div>
 
-                        <div className="equipment-actions" style={{ marginTop: '14px' }}>
+                        <div className="equipment-actions" style={{ marginTop: '14px', flexWrap: 'wrap' }}>
                           <button
                             className="btn btn-secondary btn-sm"
                             onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
@@ -3000,7 +3319,73 @@ function Dashboard({ profile, onLogout }) {
                           <button className="btn btn-outline-red btn-sm" onClick={() => deleteTechnician(t.id, t.full_name)}>
                             Delete
                           </button>
+                          {(() => {
+                            const acc = t.profile_id && staffAccounts.find((a) => a.id === t.profile_id)
+                            return acc ? (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() =>
+                                  setAccountSettingsFor({ id: acc.id, full_name: t.full_name, username: acc.username })
+                                }
+                              >
+                                Account settings
+                              </button>
+                            ) : null
+                          })()}
+                          {!t.profile_id && techLoginFor !== t.id && (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              onClick={() => {
+                                setTechLoginFor(t.id)
+                                setTechLoginForm({ username: '', password: '' })
+                                setTechLoginError(null)
+                              }}
+                            >
+                              Create app account
+                            </button>
+                          )}
                         </div>
+
+                        {/* A technician added before accounts existed has no
+                            mobile login yet — give them one here. */}
+                        {!t.profile_id && techLoginFor === t.id && (
+                          <div className="form-grid" style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '12px' }}>
+                            <div>
+                              <label className="field-label">Username (for the mobile app)</label>
+                              <input
+                                placeholder="e.g. kenntech"
+                                autoComplete="off"
+                                value={techLoginForm.username}
+                                onChange={(e) => setTechLoginForm((prev) => ({ ...prev, username: e.target.value }))}
+                              />
+                              <p style={HINT_STYLE}>{USERNAME_HINT}</p>
+                            </div>
+                            <div>
+                              <label className="field-label">Password (at least 6 characters)</label>
+                              <PasswordInput
+                                value={techLoginForm.password}
+                                onChange={(e) => setTechLoginForm((prev) => ({ ...prev, password: e.target.value }))}
+                              />
+                            </div>
+                            {techLoginError && <p className="form-error">{techLoginError}</p>}
+                            <div className="equipment-actions" style={{ marginTop: 0 }}>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => handleCreateTechnicianLogin(t)}
+                                disabled={techLoginSaving}
+                              >
+                                {techLoginSaving ? 'Creating...' : 'Create account'}
+                              </button>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => setTechLoginFor(null)}
+                                disabled={techLoginSaving}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3159,6 +3544,102 @@ function Dashboard({ profile, onLogout }) {
         />
       )}
 
+      {/* The sheet the print dialog prints. Off-screen normally; the print
+          stylesheet hides the dashboard and shows only this. */}
+      {qrPrintItems.length > 0 && (
+        <div className="qr-print-area">
+          <h2 className="qr-print-title">NBSC Fire Safety Equipment — QR Labels</h2>
+          <div className="qr-print-grid">
+            {qrPrintItems.map((item) => (
+              <QrLabel key={item.id} item={item} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {accountSettingsFor && (
+        <AccountSettingsModal
+          account={accountSettingsFor}
+          onClose={() => setAccountSettingsFor(null)}
+          onSaved={(message) => {
+            setAccountSettingsFor(null)
+            setAccountNotice(message)
+            getStaffAccounts()
+          }}
+        />
+      )}
+
+      {/* Equipment report sheet — same filters as the Equipment list. */}
+      {reportPrint && (
+        <div className="report-print-area">
+          <div className="report-print-head">
+            <div className="report-print-school">NORTHERN BUKIDNON STATE COLLEGE · General Services Office</div>
+            <h2 className="report-print-title">Fire Safety Equipment Report</h2>
+            <div className="report-print-meta">
+              Generated {formatTimestamp(reportPrint.generatedAt.toISOString())} by {profile.full_name}
+            </div>
+            <div className="report-print-meta">
+              Filters — Type: <strong>{filterType ? typeLabel(filterType) : 'All types'}</strong>
+              {' · '}Status:{' '}
+              <strong>
+                {filterStatus === '__needs_attention__'
+                  ? 'Needs attention'
+                  : filterStatus
+                  ? STATUS_LABELS[filterStatus] || filterStatus
+                  : 'All statuses'}
+              </strong>
+              {' · '}Building:{' '}
+              <strong>
+                {filterBuilding
+                  ? buildings.find((b) => b.id === filterBuilding)?.building_name || '—'
+                  : 'All buildings'}
+              </strong>
+              {searchTerm.trim() && (
+                <>
+                  {' · '}Search: <strong>"{searchTerm.trim()}"</strong>
+                </>
+              )}
+            </div>
+            <div className="report-print-meta">
+              Total: <strong>{reportPrint.items.length}</strong> unit{reportPrint.items.length === 1 ? '' : 's'}
+            </div>
+          </div>
+          <table className="report-print-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Code</th>
+                <th>Type</th>
+                <th>Building</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Installed</th>
+                <th>Expires</th>
+                <th>Last inspection</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reportPrint.items.map((item, i) => {
+                const lastInspection = (inspectionsByEquipment[item.id] || [])[0]
+                return (
+                  <tr key={item.id}>
+                    <td>{i + 1}</td>
+                    <td>{item.equipment_code}</td>
+                    <td>{typeLabel(item.equipment_type)}</td>
+                    <td>{item.buildings?.building_name ?? '—'}</td>
+                    <td>{item.exact_location || '—'}</td>
+                    <td>{STATUS_LABELS[item.current_status] || item.current_status}</td>
+                    <td>{item.installation_date ? formatTimestamp(item.installation_date) : '—'}</td>
+                    <td>{item.expiration_date ? formatTimestamp(item.expiration_date) : '—'}</td>
+                    <td>{lastInspection ? formatTimestamp(lastInspection.inspection_date) : 'Never inspected'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {replacementPrompt && (
         <div className="modal-overlay">
           <div className="modal-box">
@@ -3191,6 +3672,7 @@ function Dashboard({ profile, onLogout }) {
           expiring={expiringEquipment}
           completed={completedActions}
           purchaseItems={purchaseRequestItems}
+          types={allTypes}
           onClose={() => setShowSummary(false)}
         />
       )}
