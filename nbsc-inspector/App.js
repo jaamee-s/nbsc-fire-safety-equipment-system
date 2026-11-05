@@ -38,6 +38,7 @@ import {
   STATUS_LABELS,
   TYPE_LABELS,
   daysUntil,
+  formatDateTime,
   findEquipmentByQrCode,
   getInspectorDashboard,
   getTechnicianDashboard,
@@ -58,6 +59,14 @@ import {
   subscribeToMyNotifications,
   unregisterPush
 } from './lib/push'
+
+// In the browser preview, Microsoft Edge adds its own eye button to every
+// password box — on top of the app's "Show password". Hide Edge's one.
+if (Platform.OS === 'web' && typeof document !== 'undefined') {
+  const style = document.createElement('style')
+  style.textContent = 'input::-ms-reveal, input::-ms-clear { display: none; }'
+  document.head.appendChild(style)
+}
 
 const C = {
   navy: '#0F2A4A',
@@ -441,7 +450,6 @@ function RootApp() {
         <HomeScreen
           account={account}
           dashboard={dashboard}
-          onScan={() => setScreen('scan')}
           onManual={() => setScreen('manual')}
           onOpenEquipment={handleFound}
         />
@@ -521,7 +529,6 @@ function RootApp() {
         <BottomTabs
           role={account.role}
           screen={screen}
-          unread={unreadCount}
           onNavigate={(next) => {
             if (next === 'home' || next === 'techHome') goHome()
             else goToScreen(next)
@@ -536,18 +543,18 @@ function RootApp() {
 /* Bottom navigation                                                   */
 /* ------------------------------------------------------------------ */
 
-function BottomTabs({ role, screen, unread, onNavigate }) {
+// Notifications open from the bell in the header, so they have no tab here.
+// The inspector's Scan button sits in the center, slightly larger.
+function BottomTabs({ role, screen, onNavigate }) {
   const tabs =
     role === 'technician'
       ? [
           { key: 'techHome', icon: '▦', label: 'Dashboard' },
-          { key: 'notifications', icon: '🔔', label: 'Notifications', badge: unread },
           { key: 'summary', icon: '📊', label: 'Summary' }
         ]
       : [
           { key: 'home', icon: '▦', label: 'Dashboard' },
-          { key: 'scan', icon: '▣', label: 'Scan' },
-          { key: 'notifications', icon: '🔔', label: 'Notifications', badge: unread },
+          { key: 'scan', icon: '▣', label: 'Scan QR', center: true },
           { key: 'summary', icon: '📊', label: 'Summary' }
         ]
 
@@ -555,16 +562,19 @@ function BottomTabs({ role, screen, unread, onNavigate }) {
     <View style={s.tabBar}>
       {tabs.map((t) => {
         const active = screen === t.key
+        if (t.center) {
+          return (
+            <Pressable key={t.key} style={s.tab} onPress={() => onNavigate(t.key)}>
+              <View style={s.scanTabBtn}>
+                <Text style={s.scanTabIcon}>{t.icon}</Text>
+              </View>
+              <Text style={[s.tabLabel, s.tabLabelActive]}>{t.label}</Text>
+            </Pressable>
+          )
+        }
         return (
           <Pressable key={t.key} style={s.tab} onPress={() => onNavigate(t.key)}>
-            <View>
-              <Text style={[s.tabIcon, active && { color: C.blue }]}>{t.icon}</Text>
-              {t.badge > 0 && (
-                <View style={s.tabBadge}>
-                  <Text style={s.tabBadgeText}>{t.badge > 9 ? '9+' : t.badge}</Text>
-                </View>
-              )}
-            </View>
+            <Text style={[s.tabIcon, active && { color: C.blue }]}>{t.icon}</Text>
             <Text style={[s.tabLabel, active && s.tabLabelActive]}>{t.label}</Text>
           </Pressable>
         )
@@ -609,15 +619,15 @@ function LoginScreen({ onSignedIn }) {
             technicians see and update their assigned repairs.
           </Text>
 
-          <Text style={s.label}>Email</Text>
+          <Text style={s.label}>Username</Text>
           <TextInput
             style={s.input}
             value={email}
             onChangeText={setEmail}
-            placeholder="you@example.com"
+            placeholder="Username (or email)"
             autoCapitalize="none"
             autoCorrect={false}
-            keyboardType="email-address"
+            keyboardType="default"
             textContentType="username"
           />
 
@@ -711,7 +721,7 @@ function ErrorCard({ error }) {
 /* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
+function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
   const { data, loading, error, reload } = dashboard
   // Separate from `loading` so pull-to-refresh actually shows its spinner.
   const [refreshing, setRefreshing] = useState(false)
@@ -746,10 +756,71 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
   const recent = (data && data.recent) || []
   const recentBad = recent.filter((r) => r.condition_status === 'defective').length
   const recentGood = recent.length - recentBad
-  const neverInspected = dueList.filter((d) => !d.last_inspected).length
+  const neverInspectedList = dueList.filter((d) => !d.last_inspected)
   const lastInspection = recent[0] ? recent[0].inspection_date : null
 
+  // The database sends at most 10 rows per list, so the boxes use its real
+  // totals (migration 004). Before 004 is run, fall back to the list lengths.
+  const dueCount = data && data.due_count != null ? data.due_count : dueList.length
+  const neverInspected =
+    data && data.never_inspected_count != null ? data.never_inspected_count : neverInspectedList.length
+  const onHoldCount = data && data.on_hold_count != null ? data.on_hold_count : onHoldList.length
+
+  // An inspection result is what the unit was AT the time. Show what it is
+  // NOW, from the unit's current status (sent by migration 004). Before 004,
+  // fall back to on-hold membership.
+  const onHoldCodes = new Set(onHoldList.map((d) => d.equipment_code))
+  function resultState(r) {
+    if (r.condition_status !== 'defective') {
+      return { tag: 'OK', color: C.green, bg: s.tagGreen, note: 'Functional' }
+    }
+    const finding = r.findings || 'Defective'
+    const stillOpen = r.current_status
+      ? OPEN_PROBLEM_STATUSES.includes(r.current_status)
+      : onHoldCodes.has(r.equipment_code)
+    if (stillOpen) {
+      return { tag: 'Still defective', color: C.red, bg: s.tagRed, note: `${finding} · waiting for GSO` }
+    }
+    const replaced = r.current_status
+      ? r.current_status === 'no_longer_in_service'
+      : (r.equipment_code || '').startsWith('FE-')
+    if (replaced) {
+      return { tag: 'Replaced', color: C.green, bg: s.tagGreen, note: `${finding} · GSO replaced this unit` }
+    }
+    if (r.current_status && r.current_status !== 'functional') {
+      const label = STATUS_LABELS[r.current_status] || r.current_status
+      return { tag: label, color: C.amber, bg: { backgroundColor: C.amberBg }, note: `${finding} · now ${label}` }
+    }
+    return { tag: 'Fixed', color: C.green, bg: s.tagGreen, note: `${finding} · resolved by GSO, now functional` }
+  }
+
+  // Open defects: units this inspector reported defective that are still
+  // waiting for GSO. Fixed/replaced ones aren't counted, so the box and its
+  // list always match. Migration 004 sends the complete list; before it,
+  // build it from the recent inspections. One row per unit.
+  let openDefects = data && data.open_defects
+  if (!openDefects) {
+    openDefects = []
+    recent.forEach((r) => {
+      if (
+        r.condition_status === 'defective' &&
+        onHoldCodes.has(r.equipment_code) &&
+        !openDefects.some((o) => o.equipment_code === r.equipment_code)
+      ) {
+        openDefects.push(r)
+      }
+    })
+  }
+
   const toggle = (key) => setOpenStat(openStat === key ? null : key)
+
+  // Lists behind the Due / Never inspected / On hold boxes. `total` is the
+  // real count; the list itself may be capped at 10.
+  const unitLists = {
+    due: { title: 'Can be inspected', items: dueList, total: dueCount },
+    never: { title: 'Never inspected', items: neverInspectedList, total: neverInspected },
+    hold: { title: 'On hold — waiting for GSO', items: onHoldList, total: onHoldCount }
+  }
 
   return (
     <ScrollView
@@ -760,16 +831,12 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
         name={account.full_name}
         line={
           data
-            ? `${dueList.length} unit${dueList.length === 1 ? '' : 's'} due for inspection · ${onHoldList.length} on hold`
+            ? `${dueCount} unit${dueCount === 1 ? '' : 's'} can be inspected · ${onHoldCount} on hold`
             : null
         }
       />
 
       <View style={s.quickRow}>
-        <Pressable style={[s.quickBtn, { backgroundColor: C.blue }]} onPress={onScan}>
-          <Text style={s.quickIcon}>▣</Text>
-          <Text style={s.quickText}>Scan QR Code</Text>
-        </Pressable>
         <Pressable style={[s.quickBtn, s.quickBtnOutline]} onPress={onManual}>
           <Text style={[s.quickIcon, { color: C.navy }]}>⌨</Text>
           <Text style={[s.quickText, { color: C.navy }]}>Enter code</Text>
@@ -785,36 +852,86 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
       ) : data ? (
         <>
           <Text style={s.sectionTitle}>Overview</Text>
-          <Text style={s.sectionHint}>Tap Today, This week or Defects to see the list.</Text>
+          <Text style={s.sectionHint}>Tap a box to see its list.</Text>
           <View style={s.dashGrid}>
             <DashTile value={data.today_count} label="Inspected today" tone="blue" active={openStat === 'today'} onPress={() => toggle('today')} />
             <DashTile value={data.week_count} label="This week" active={openStat === 'week'} onPress={() => toggle('week')} />
-            <DashTile value={data.defect_count} label="Defects found" tone={data.defect_count > 0 ? 'red' : undefined} active={openStat === 'defects'} onPress={() => toggle('defects')} />
-            <DashTile value={dueList.length} label="Due for inspection" tone={dueList.length > 0 ? 'amber' : 'green'} />
-            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} />
-            <DashTile value={onHoldList.length} label="On hold (GSO)" tone={onHoldList.length > 0 ? 'amber' : undefined} />
+            <DashTile value={openDefects.length} label="Open defects" tone={openDefects.length > 0 ? 'red' : 'green'} active={openStat === 'defects'} onPress={() => toggle('defects')} />
+            <DashTile value={dueCount} label="Can be inspected" tone={dueCount > 0 ? 'amber' : 'green'} active={openStat === 'due'} onPress={() => toggle('due')} />
+            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} active={openStat === 'never'} onPress={() => toggle('never')} />
+            <DashTile value={onHoldCount} label="On hold (GSO)" tone={onHoldCount > 0 ? 'amber' : undefined} active={openStat === 'hold'} onPress={() => toggle('hold')} />
           </View>
 
-          {openStat &&
+          {openStat && unitLists[openStat] && (
+            <View style={[s.card, { marginBottom: 20 }]}>
+              <View style={s.statPanelHead}>
+                <Text style={s.sectionTitle}>{unitLists[openStat].title}</Text>
+                <Pressable onPress={() => setOpenStat(null)}>
+                  <Text style={s.statPanelClose}>Close</Text>
+                </Pressable>
+              </View>
+              {unitLists[openStat].items.length === 0 ? (
+                <Text style={s.muted}>Nothing here right now.</Text>
+              ) : (
+                unitLists[openStat].items.map((d, i, arr) => (
+                  <Pressable
+                    key={d.id}
+                    style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
+                    onPress={() => openFromDue(d.equipment_code)}
+                  >
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{d.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
+                        {d.building_name ? ` · ${d.building_name}` : ''}
+                      </Text>
+                      <Text style={s.listMeta}>{d.exact_location}</Text>
+                    </View>
+                    {openStat === 'hold' ? (
+                      <View style={[s.tag, s.tagRed]}>
+                        <Text style={[s.tagText, { color: C.red }]}>
+                          {STATUS_LABELS[d.current_status] || d.current_status}
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text
+                        style={[s.listWhen, !d.last_inspected && { color: C.red, fontWeight: '700' }]}
+                      >
+                        {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
+                      </Text>
+                    )}
+                  </Pressable>
+                ))
+              )}
+              {unitLists[openStat].total > unitLists[openStat].items.length && (
+                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                  Showing {unitLists[openStat].items.length} of {unitLists[openStat].total} — the ones
+                  {openStat === 'hold' ? ' reported most recently' : ' waiting longest'} come first.
+                </Text>
+              )}
+            </View>
+          )}
+
+          {openStat && !unitLists[openStat] &&
             (() => {
               const filtered =
                 openStat === 'today'
                   ? recent.filter((r) => isToday(r.inspection_date))
                   : openStat === 'week'
                   ? recent.filter((r) => isThisWeek(r.inspection_date))
-                  : recent.filter((r) => r.condition_status === 'defective')
+                  : openDefects
 
               const totalForStat =
                 openStat === 'today'
                   ? data.today_count
                   : openStat === 'week'
                   ? data.week_count
-                  : data.defect_count
+                  : openDefects.length
 
               const titleMap = {
                 today: "Today's inspections",
                 week: "This week's inspections",
-                defects: 'Defects found'
+                defects: 'Open defects — waiting for GSO'
               }
 
               return (
@@ -828,13 +945,15 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
 
                   {filtered.length === 0 ? (
                     <Text style={s.muted}>
-                      {totalForStat > 0
+                      {openStat === 'defects'
+                        ? '✓ No open defects. Everything you reported has been resolved by GSO.'
+                        : totalForStat > 0
                         ? 'None of these are in your recent list — check your full inspection history.'
                         : 'Nothing here yet.'}
                     </Text>
                   ) : (
                     filtered.map((r, i) => {
-                      const bad = r.condition_status === 'defective'
+                      const st = resultState(r)
                       return (
                         <View
                           key={r.id}
@@ -842,15 +961,11 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
                         >
                           <View style={s.flex}>
                             <Text style={s.listCode}>{r.equipment_code}</Text>
-                            <Text style={s.listMeta}>
-                              {bad ? r.findings || 'Defective' : 'Functional'}
-                            </Text>
+                            <Text style={s.listMeta}>{st.note}</Text>
                             <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
                           </View>
-                          <View style={[s.tag, bad ? s.tagRed : s.tagGreen]}>
-                            <Text style={[s.tagText, { color: bad ? C.red : C.green }]}>
-                              {bad ? 'Defective' : 'OK'}
-                            </Text>
+                          <View style={[s.tag, st.bg]}>
+                            <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
                           </View>
                         </View>
                       )
@@ -876,12 +991,12 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
                 <Text style={[s.legend, { color: C.red }]}>{recentBad} defective</Text>
               </View>
               <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                Last inspection: {lastInspection ? relativeTime(lastInspection) : 'none yet'}
+                Last inspection: {lastInspection ? formatDateTime(lastInspection) : 'none yet'}
               </Text>
             </View>
           )}
 
-          <Text style={s.sectionTitle}>Due for inspection</Text>
+          <Text style={s.sectionTitle}>Can be inspected</Text>
           <Text style={s.sectionHint}>Longest since last check — start here.</Text>
           <View style={s.card}>
             {dueList.length === 0 ? (
@@ -910,7 +1025,7 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
                           !d.last_inspected && { color: C.red, fontWeight: '700' }
                         ]}
                       >
-                        {relativeTime(d.last_inspected)}
+                        {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
                       </Text>
                       {needsAttention && (
                         <View style={[s.tag, s.tagRed]}>
@@ -964,7 +1079,7 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
               <Text style={s.muted}>Nothing submitted yet.</Text>
             ) : (
               recent.map((r, i) => {
-                const bad = r.condition_status === 'defective'
+                const st = resultState(r)
                 return (
                   <View
                     key={r.id}
@@ -972,15 +1087,11 @@ function HomeScreen({ account, dashboard, onScan, onManual, onOpenEquipment }) {
                   >
                     <View style={s.flex}>
                       <Text style={s.listCode}>{r.equipment_code}</Text>
-                      <Text style={s.listMeta}>
-                        {bad ? r.findings || 'Defective' : 'Functional'}
-                      </Text>
+                      <Text style={s.listMeta}>{st.note}</Text>
                       <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
                     </View>
-                    <View style={[s.tag, bad ? s.tagRed : s.tagGreen]}>
-                      <Text style={[s.tagText, { color: bad ? C.red : C.green }]}>
-                        {bad ? 'Defective' : 'OK'}
-                      </Text>
+                    <View style={[s.tag, st.bg]}>
+                      <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
                     </View>
                   </View>
                 )
@@ -1030,6 +1141,29 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
   // The database returns assigned jobs highest priority first.
   const nextJob = jobs.find((j) => j.repair_status !== 'repaired')
 
+  // Which box's list is open, and the lists behind the boxes. `total` is the
+  // box's number; if the list holds fewer, a "Showing X of N" note appears.
+  const [openStat, setOpenStat] = useState(null)
+  const toggle = (key) => setOpenStat(openStat === key ? null : key)
+  const recentDone = (data && data.recent_done) || []
+  const jobLists = {
+    todo: { title: 'To do', items: jobs.filter((j) => j.repair_status !== 'repaired'), total: todo },
+    notStarted: {
+      title: 'Not started',
+      items: jobs.filter((j) => (j.repair_status || 'assigned') === 'assigned'),
+      total: notStarted
+    },
+    working: { title: 'Working on it', items: jobs.filter((j) => j.repair_status === 'working'), total: working },
+    urgent: {
+      title: 'High / critical',
+      items: jobs.filter((j) => j.priority === 'critical' || j.priority === 'high'),
+      total: urgent
+    },
+    awaiting: { title: 'Awaiting GSO', items: jobs.filter((j) => j.repair_status === 'repaired'), total: awaiting },
+    done: { title: 'Completed', items: recentDone, total: done, completed: true }
+  }
+  const openList = openStat ? jobLists[openStat] : null
+
   return (
     <ScrollView
       contentContainerStyle={s.scroll}
@@ -1056,13 +1190,68 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
         <>
           <Text style={s.sectionTitle}>Overview</Text>
           <View style={[s.dashGrid, { marginTop: 8 }]}>
-            <DashTile value={todo} label="To do" tone={todo > 0 ? 'red' : undefined} />
-            <DashTile value={notStarted} label="Not started" tone={notStarted > 0 ? 'amber' : undefined} />
-            <DashTile value={working} label="Working on it" tone={working > 0 ? 'blue' : undefined} />
-            <DashTile value={urgent} label="High / critical" tone={urgent > 0 ? 'red' : undefined} />
-            <DashTile value={awaiting} label="Awaiting GSO" />
-            <DashTile value={done} label="Completed" tone="green" />
+            <DashTile value={todo} label="To do" tone={todo > 0 ? 'red' : undefined} active={openStat === 'todo'} onPress={() => toggle('todo')} />
+            <DashTile value={notStarted} label="Not started" tone={notStarted > 0 ? 'amber' : undefined} active={openStat === 'notStarted'} onPress={() => toggle('notStarted')} />
+            <DashTile value={working} label="Working on it" tone={working > 0 ? 'blue' : undefined} active={openStat === 'working'} onPress={() => toggle('working')} />
+            <DashTile value={urgent} label="High / critical" tone={urgent > 0 ? 'red' : undefined} active={openStat === 'urgent'} onPress={() => toggle('urgent')} />
+            <DashTile value={awaiting} label="Awaiting GSO" active={openStat === 'awaiting'} onPress={() => toggle('awaiting')} />
+            <DashTile value={done} label="Completed" tone="green" active={openStat === 'done'} onPress={() => toggle('done')} />
           </View>
+
+          {openList && (
+            <View style={[s.card, { marginBottom: 20 }]}>
+              <View style={s.statPanelHead}>
+                <Text style={s.sectionTitle}>{openList.title}</Text>
+                <Pressable onPress={() => setOpenStat(null)}>
+                  <Text style={s.statPanelClose}>Close</Text>
+                </Pressable>
+              </View>
+              {openList.items.length === 0 ? (
+                <Text style={s.muted}>Nothing here right now.</Text>
+              ) : openList.completed ? (
+                openList.items.map((r, i, arr) => (
+                  <View key={r.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{r.equipment_code}</Text>
+                      <Text style={s.listMeta}>{r.description}</Text>
+                      <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
+                    </View>
+                    <View style={[s.tag, s.tagGreen]}>
+                      <Text style={[s.tagText, { color: C.green }]}>Done</Text>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                openList.items.map((j, i, arr) => (
+                  <Pressable
+                    key={j.id}
+                    style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
+                    onPress={() => onOpenJob(j)}
+                  >
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{j.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {TYPE_LABELS[j.equipment_type] || j.equipment_type}
+                        {j.building_name ? ` · ${j.building_name}` : ''}
+                      </Text>
+                      <Text style={[s.listMeta, { color: C.text }]}>{j.description}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                      <PriorityTag priority={j.priority} />
+                      <Text style={s.listWhen}>
+                        {REPAIR_STATUS_LABELS[j.repair_status] || j.repair_status}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
+              {openList.total > openList.items.length && (
+                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                  Showing the {openList.items.length} most recent of {openList.total}.
+                </Text>
+              )}
+            </View>
+          )}
 
           {total > 0 && (
             <View style={s.card}>
@@ -1136,7 +1325,7 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
                   <View style={s.flex}>
                     <Text style={s.listCode}>{r.equipment_code}</Text>
                     <Text style={s.listMeta}>{r.description}</Text>
-                    <Text style={s.listMeta}>{relativeTime(r.completed_date)}</Text>
+                    <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
                   </View>
                   <View style={[s.tag, s.tagGreen]}>
                     <Text style={[s.tagText, { color: C.green }]}>Done</Text>
@@ -1432,11 +1621,12 @@ function ManualEntry({ onFound, onCancel }) {
     setError(null)
     setLooking(true)
     try {
+      // On success this screen closes, so only reset `looking` on failure.
       onFound(await findEquipmentByQrCode(code))
     } catch (err) {
       setError(err.message)
+      setLooking(false)
     }
-    setLooking(false)
   }
 
   return (
@@ -1685,7 +1875,15 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
                 })}
                 <Pressable
                   style={[s.finding, isOther && s.findingActive]}
-                  onPress={() => setSelectedFinding(OTHER_FINDING)}
+                  onPress={() => {
+                    // Don't carry over the action/priority of a preset picked
+                    // before — a custom finding starts from neutral defaults
+                    // and the override rows open so the inspector sets them.
+                    setSelectedFinding(OTHER_FINDING)
+                    setActionType('other')
+                    setPriority('medium')
+                    setShowOverrides(true)
+                  }}
                 >
                   <Text style={[s.findingText, isOther && s.findingTextActive]}>
                     Something else...
@@ -1979,23 +2177,28 @@ const s = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 6
   },
-  tab: { flex: 1, alignItems: 'center' },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
+  // Center Scan button: a little larger than the other tabs and raised.
+  scanTabBtn: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: C.blue,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -22,
+    borderWidth: 4,
+    borderColor: C.white,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 }
+  },
+  scanTabIcon: { fontSize: 22, color: C.white },
   tabIcon: { fontSize: 20, color: C.muted, textAlign: 'center' },
   tabLabel: { fontSize: 11, color: C.muted, marginTop: 2, fontWeight: '600' },
   tabLabelActive: { color: C.blue, fontWeight: '800' },
-  tabBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -12,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#EF4444',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4
-  },
-  tabBadgeText: { color: C.white, fontSize: 10, fontWeight: '800' },
 
   statPanelHead: {
     flexDirection: 'row',

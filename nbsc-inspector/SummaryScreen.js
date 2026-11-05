@@ -85,8 +85,9 @@ function buildInspectorSummary(data) {
     recentOk: recent.length - bad.length,
     recentBad: bad.length,
     topFindings,
-    dueCount: (data.due || []).length,
-    holdCount: (data.on_hold || []).length,
+    // Real totals from the database (migration 004); the lists are capped at 10.
+    dueCount: data.due_count != null ? data.due_count : (data.due || []).length,
+    holdCount: data.on_hold_count != null ? data.on_hold_count : (data.on_hold || []).length,
     last: newest(recent, 'inspection_date')
   }
 }
@@ -160,7 +161,7 @@ export default function SummaryScreen({ role, account, onBack }) {
     return (
       head +
       `\nInspections today: ${data.today_count ?? 0}\nThis week: ${data.week_count ?? 0}\nDefects found: ${data.defect_count ?? 0}\n` +
-      `Due for inspection: ${insp.dueCount}\nOn hold (waiting for GSO): ${insp.holdCount}`
+      `Can be inspected: ${insp.dueCount}\nOn hold (waiting for GSO): ${insp.holdCount}`
     )
   }
 
@@ -210,7 +211,7 @@ export default function SummaryScreen({ role, account, onBack }) {
           )}
 
           <Section title="Still ahead">
-            <Line label="Due for inspection" value={insp.dueCount} />
+            <Line label="Can be inspected" value={insp.dueCount} />
             <Line label="On hold (waiting for GSO)" value={insp.holdCount} last />
           </Section>
         </>

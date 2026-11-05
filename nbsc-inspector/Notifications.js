@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import { Ionicons } from '@expo/vector-icons'
 
 import { TYPE_LABELS, STATUS_LABELS, relativeTime } from './lib/inspector'
 
@@ -147,7 +148,7 @@ function buildInspectorNotifications(data) {
         kind: 'due',
         code: d.equipment_code,
         title: d.last_inspected
-          ? `Due for inspection: ${d.equipment_code}`
+          ? `Can be inspected: ${d.equipment_code}`
           : `Never inspected: ${d.equipment_code}`,
         gso: null,
         detail: `${TYPE_LABELS[d.equipment_type] || d.equipment_type} · ${d.building_name || ''} ${d.exact_location || ''}`.trim(),
@@ -229,7 +230,7 @@ export function useNotifications(account, data) {
 export function NotificationBell({ count, onPress }) {
   return (
     <Pressable onPress={onPress} style={n.bell} hitSlop={8} accessibilityLabel="Notifications">
-      <Text style={n.bellIcon}>🔔</Text>
+      <Ionicons name="notifications-outline" size={19} color={C.white} />
       {count > 0 && (
         <View style={n.badge}>
           <Text style={n.badgeText}>{count > 9 ? '9+' : count}</Text>
@@ -412,7 +413,7 @@ export function InspectorSummary({ data }) {
       <SumRow label="Inspections this week" value={data.week_count ?? 0} />
       <SumRow label="Defects found (total)" value={data.defect_count ?? 0} color={data.defect_count > 0 ? C.red : undefined} />
       <SumRow label="Units on hold (waiting for GSO)" value={onHold} color={onHold > 0 ? C.amber : undefined} />
-      <SumRow label="Units due for inspection" value={due} />
+      <SumRow label="Units that can be inspected" value={due} />
       <SumRow label="Last inspection" value={last ? relativeTime(last) : 'None yet'} last />
 
       {recent.length > 0 && (
@@ -497,7 +498,6 @@ const n = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.4)',
     borderRadius: 999
   },
-  bellIcon: { fontSize: 16 },
   badge: {
     position: 'absolute',
     top: -6,
