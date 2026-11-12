@@ -103,9 +103,9 @@ export async function showLocalNotification(title, body, data) {
   }
 }
 
-// Calls `onTap(data, id)` when the user taps a notification — including the
-// one that opened the app from the tray. `id` lets the caller ignore a tap it
-// has already handled.
+// Calls `onTap(data, id, title)` when the user taps a notification — including
+// the one that opened the app from the tray. `id` lets the caller ignore a tap
+// it has already handled; `title` names the equipment.
 export function onNotificationTap(onTap) {
   if (Platform.OS === 'web') return () => {}
   const handle = (response) => {
@@ -114,7 +114,7 @@ export function onNotificationTap(onTap) {
     // Clear it once handled, so the same old tap isn't replayed the next
     // time the app opens or someone signs in.
     Notifications.clearLastNotificationResponseAsync().catch(() => {})
-    onTap(request.content?.data || {}, request.identifier)
+    onTap(request.content?.data || {}, request.identifier, request.content?.title || '')
   }
   const sub = Notifications.addNotificationResponseReceivedListener(handle)
   Notifications.getLastNotificationResponseAsync()
@@ -136,6 +136,25 @@ export async function getMyNotifications(limit = 30) {
   // If the migration hasn't been run yet the table is missing — just show nothing.
   if (error) return []
   return data || []
+}
+
+// The equipment code a notification is about. The database writes every
+// title in one of these fixed forms (migration 003), e.g.
+// "SR-002 is back in service", "New job order: FA-001".
+const TITLE_PATTERNS = [
+  /^(?:New defect reported|New job order|Job withdrawn|Job reassigned|Repair finished|Job closed|Job marked unresolved):\s*(.+)$/,
+  /^Technician started working on\s+(.+)$/,
+  /^(.+?)\s+(?:was replaced|is back in service)$/
+]
+
+export function equipmentCodeFromTitle(title) {
+  const text = (title || '').trim()
+  for (const pattern of TITLE_PATTERNS) {
+    const m = pattern.exec(text)
+    // "Equipment" is what the database writes when the unit was not found.
+    if (m && m[1].trim() && m[1].trim() !== 'Equipment') return m[1].trim()
+  }
+  return null
 }
 
 export async function markNotificationsRead(ids) {

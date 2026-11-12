@@ -25,7 +25,7 @@ export const TYPE_LABELS = {
 
 export const ACTION_TYPE_LABELS = {
   repair: 'Repair',
-  replace: 'Replace',
+  replace: 'Replace whole unit',
   battery_replacement: 'Battery Replacement',
   refill: 'Refill',
   inspection: 'Inspection',
@@ -36,7 +36,7 @@ export const STATUS_LABELS = {
   functional: 'Functional',
   defective: 'Defective',
   for_repair: 'For Repair',
-  for_replacement: 'For Replacement',
+  for_replacement: 'Needs New Unit',
   expired: 'Expired',
   no_longer_in_service: 'No Longer in Service'
 }
@@ -302,6 +302,107 @@ export async function getTechnicianDashboard() {
     throw toError('Could not load your jobs: ', err)
   }
   if (result.error) throw toError('Could not load your jobs: ', result.error)
+  return result.data
+}
+
+// The signed-in account's own numbers (migration 009): the same counts the
+// web Inspectors / Technicians cards show, plus day-by-day counts for the
+// Summary graphs, and whether the account is marked Available.
+export async function getMyStats() {
+  let result
+  try {
+    result = await supabase.rpc('get_my_stats')
+  } catch (err) {
+    throw toError('Could not load your numbers: ', err)
+  }
+  if (result.error) throw toError('Could not load your numbers: ', result.error)
+  return result.data
+}
+
+// The inspector's open job orders from the GSO (migrations 010 and 011):
+// which building / floor to inspect, by when, how urgent, and each unit with
+// whether it has been inspected since the order was given.
+export async function getMyInspectionAssignments() {
+  let result
+  try {
+    result = await supabase.rpc('get_my_inspection_assignments')
+  } catch (err) {
+    throw toError('Could not load your job orders: ', err)
+  }
+  if (result.error) throw toError('Could not load your job orders: ', result.error)
+  return result.data || []
+}
+
+// Per equipment type: units in service, functional / needs attention, and
+// how many were inspected this month (migration 013) — the same numbers as
+// the web Stock page. Null before 013 is run.
+export async function getEquipmentOverview() {
+  let result
+  try {
+    result = await supabase.rpc('get_equipment_overview')
+  } catch (err) {
+    throw toError('Could not load the equipment overview: ', err)
+  }
+  if (result.error) return null
+  return result.data || []
+}
+
+// Dates the signed-in inspector / technician will be unavailable (leave,
+// training...), migration 012. The admin sees them on the web cards.
+// Returns null when the table isn't there yet (before 012 is run).
+export async function getMyUnavailableDates() {
+  let result
+  try {
+    result = await supabase
+      .from('staff_unavailability')
+      .select('id, start_date, end_date, reason')
+      .order('start_date', { ascending: true })
+  } catch (err) {
+    throw toError('Could not load your dates: ', err)
+  }
+  if (result.error) {
+    if (/does not exist|schema cache/i.test(result.error.message)) return null
+    throw toError('Could not load your dates: ', result.error)
+  }
+  return result.data || []
+}
+
+export async function addUnavailableDates(profileId, startDate, endDate, reason) {
+  let result
+  try {
+    result = await supabase.from('staff_unavailability').insert([
+      {
+        profile_id: profileId,
+        start_date: startDate,
+        end_date: endDate,
+        reason: (reason || '').trim() || null
+      }
+    ])
+  } catch (err) {
+    throw toError('Could not save your dates: ', err)
+  }
+  if (result.error) throw toError('Could not save your dates: ', result.error)
+}
+
+export async function removeUnavailableDates(id) {
+  let result
+  try {
+    result = await supabase.from('staff_unavailability').delete().eq('id', id)
+  } catch (err) {
+    throw toError('Could not remove those dates: ', err)
+  }
+  if (result.error) throw toError('Could not remove those dates: ', result.error)
+}
+
+// Inspectors and technicians set their own Available / Unavailable status.
+export async function setMyAvailability(available) {
+  let result
+  try {
+    result = await supabase.rpc('set_my_availability', { p_available: !!available })
+  } catch (err) {
+    throw toError('Could not change your status: ', err)
+  }
+  if (result.error) throw toError('Could not change your status: ', result.error)
   return result.data
 }
 
