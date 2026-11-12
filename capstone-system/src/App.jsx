@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
@@ -8,11 +8,24 @@ import {
   PasswordInput,
   PriorityActionsSummary,
   SummaryModal,
+  AvailabilityModal,
+  CalendarButton,
   InspectorsTab,
-  JobOrderRequestModal
+  JobOrderRequestModal,
+  LeaveLine,
+  ReplacementNote
 } from './GsoExtras'
-import { buildGsoNotifications, findPurchaseRequestItems } from './gsoNotifications'
+import { buildGsoNotifications, findPurchaseRequestItems, needsReplacementUnit } from './gsoNotifications'
 import { accountErrorMessage, checkAccountFields, USERNAME_HINT } from './staffAccounts'
+// StatusDonut (pie chart) is hidden for now — see the dashboard graphs.
+import { InspectionWeeks, TypeBars } from './DashboardCharts'
+import { ReportsTab } from './ReportsTab'
+import { ACTION_STATUS_LABELS, buildInventoryReport, manilaDay } from './reports'
+import nbscHeader from './assets/nbsc-print-header.png'
+
+// The print dialog opens a moment after a report sheet is drawn; load the
+// letterhead now so it is never missing from the first printout.
+if (typeof window !== 'undefined') new Image().src = nbscHeader
 
 const HINT_STYLE = { fontSize: '0.78rem', color: 'var(--text-muted)', margin: '5px 0 0 0' }
 
@@ -41,7 +54,7 @@ const PRIORITY_ORDER = { critical: 1, high: 2, medium: 3, low: 4 }
 const LOW_RISK_PRIORITIES = ['low', 'medium']
 const RECOMMENDATION_BY_ACTION = {
   repair: 'check that the repair is holding at the next inspection.',
-  replace: 'check that the replaced part is working at the next inspection.',
+  replace: 'check that the new unit is working at the next inspection.',
   battery_replacement: 'test the battery at the next inspection.',
   refill: 'check the pressure gauge at the next inspection.',
   inspection: 'inspect this unit again at the next scheduled round.',
@@ -60,9 +73,21 @@ const STATUS_LABELS = {
   functional: 'Functional',
   defective: 'Defective',
   for_repair: 'For Repair',
-  for_replacement: 'For Replacement',
+  for_replacement: 'Needs New Unit',
   expired: 'Expired',
   no_longer_in_service: 'No Longer in Service'
+}
+
+// Work types. "Replace whole unit" = the entire unit is swapped for a new
+// one; fixing a part (battery, bulb, nozzle) or refilling is not a
+// replacement. Same labels as the mobile app.
+const ACTION_LABELS = {
+  repair: 'Repair',
+  replace: 'Replace whole unit',
+  battery_replacement: 'Battery Replacement',
+  refill: 'Refill',
+  inspection: 'Inspection',
+  other: 'Other'
 }
 
 const CODE_PREFIXES = {
@@ -198,6 +223,61 @@ function QrLabel({ item }) {
         <div className="qr-label-foot">NBSC Fire Safety · Scan to inspect</div>
       </div>
     </div>
+  )
+}
+
+// Sidebar: navigation only, grouped under small headings.
+const SIDEBAR_GROUPS = [
+  { title: 'Main', items: [{ tab: 'dashboard', label: 'Dashboard' }] },
+  { title: 'Manage', items: [{ tab: 'buildings', label: 'Buildings' }, { tab: 'stock', label: 'Stock' }] },
+  { title: 'People', items: [{ tab: 'inspectors', label: 'Inspectors' }, { tab: 'technicians', label: 'Technicians' }] },
+  { title: 'Reports', items: [{ tab: 'reports', label: 'Reports' }] }
+]
+
+// One outline icon style for every sidebar item.
+function NavIcon({ name }) {
+  const paths = {
+    dashboard: (
+      <>
+        <rect x="3" y="3" width="7" height="9" />
+        <rect x="14" y="3" width="7" height="5" />
+        <rect x="14" y="12" width="7" height="9" />
+        <rect x="3" y="16" width="7" height="5" />
+      </>
+    ),
+    buildings: (
+      <>
+        <path d="M4 21V5l8-3 8 3v16" />
+        <path d="M9 21v-5h6v5" />
+        <path d="M8 8h1M15 8h1M8 12h1M15 12h1" />
+      </>
+    ),
+    stock: (
+      <>
+        <path d="M3 7l9-4 9 4-9 4-9-4z" />
+        <path d="M3 7v10l9 4 9-4V7" />
+        <path d="M12 11v10" />
+      </>
+    ),
+    inspectors: (
+      <>
+        <circle cx="11" cy="11" r="6" />
+        <path d="M20 20l-4.5-4.5" />
+      </>
+    ),
+    technicians: <path d="M14.5 5.5a4 4 0 0 0 4.9 4.9L21 12l-9 9-3-3 9-9-1.6-1.6a4 4 0 0 1-4.9-4.9z" />,
+    reports: (
+      <>
+        <path d="M6 2h9l5 5v15H6z" />
+        <path d="M14 2v6h6" />
+        <path d="M9 13h7M9 17h7" />
+      </>
+    )
+  }
+  return (
+    <svg className="side-icon" viewBox="0 0 24 24" aria-hidden="true">
+      {paths[name]}
+    </svg>
   )
 }
 
@@ -343,6 +423,11 @@ function Dashboard({ profile, onLogout }) {
   const [maintenanceActions, setMaintenanceActions] = useState([])
   // Completed (closed) jobs, loaded separately so they can appear in the Summary.
   const [completedActions, setCompletedActions] = useState([])
+  // Every job ever filed (open and closed, no limit): the Repairs report and
+  // the Assigned / Working / Completed numbers on the Technician cards.
+  const [allActions, setAllActions] = useState([])
+  // Unavailable dates sent by inspectors / technicians (migration 012)
+  const [unavailability, setUnavailability] = useState([])
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState(null)
@@ -463,6 +548,14 @@ function Dashboard({ profile, onLogout }) {
   const [techLoginError, setTechLoginError] = useState(null)
   // Which technician's Account settings window is open
   const [accountSettingsFor, setAccountSettingsFor] = useState(null)
+  // Which technician's "Assign job order" list is open
+  const [jobPickFor, setJobPickFor] = useState(null)
+  // Which technician's repair History is open
+  const [techHistoryFor, setTechHistoryFor] = useState(null)
+  // Whose unavailable dates are open (calendar button on a technician card)
+  const [calendarFor, setCalendarFor] = useState(null)
+  // Which report the Reports page opens on (n changes to reopen it)
+  const [reportStart, setReportStart] = useState({ key: 'inventory', n: 0 })
   const [technicianSubmitting, setTechnicianSubmitting] = useState(false)
   const [technicianError, setTechnicianError] = useState(null)
   const [editingTechnicianId, setEditingTechnicianId] = useState(null)
@@ -480,6 +573,10 @@ function Dashboard({ profile, onLogout }) {
   // Free-text remarks that go on the Job Order Request form
   const [jobOrderRemarks, setJobOrderRemarks] = useState('')
   const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
+
+  // Add Equipment form: the new unit comes out of the storeroom stock, so the
+  // system takes 1 off that type's stock when it is saved.
+  const [takeFromStock, setTakeFromStock] = useState(true)
 
   // Add Equipment form: "Others" — the new equipment type's name
   const [otherTypeName, setOtherTypeName] = useState('')
@@ -525,7 +622,9 @@ function Dashboard({ profile, onLogout }) {
       getStock(),
       getTechnicians(),
       getCompletedActions(),
-      getStaffAccounts()
+      getAllActions(),
+      getStaffAccounts(),
+      getUnavailability()
     ]).then(() => setInitialLoaded(true))
   }, [])
 
@@ -537,11 +636,20 @@ function Dashboard({ profile, onLogout }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_actions' }, () => {
         getMaintenanceActions()
         getCompletedActions()
+        getAllActions()
         getEquipment()
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inspections' }, () => {
         getInspections()
         getEquipment()
+      })
+      // A technician changed their availability on the phone (migration 009).
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'technicians' }, () => {
+        getTechnicians()
+      })
+      // Someone sent (or removed) unavailable dates from the app (migration 013).
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_unavailability' }, () => {
+        getUnavailability()
       })
       .subscribe()
     return () => {
@@ -555,7 +663,7 @@ function Dashboard({ profile, onLogout }) {
       .from('equipment')
       .select(`
         id, equipment_code, equipment_type, building_id, exact_location,
-        qr_code, installation_date, expiration_date, current_status, description,
+        qr_code, installation_date, expiration_date, current_status, description, created_at,
         buildings ( building_name )
       `)
       .order('created_at', { ascending: false })
@@ -869,6 +977,31 @@ function Dashboard({ profile, onLogout }) {
     else setCompletedActions(data || [])
   }
 
+  async function getUnavailability() {
+    const { data, error } = await supabase
+      .from('staff_unavailability')
+      .select('id, profile_id, start_date, end_date, reason, created_at')
+      .order('start_date', { ascending: true })
+    // Before migration 012 the table doesn't exist; there is simply nothing.
+    if (!error) setUnavailability(data || [])
+  }
+
+  async function getAllActions() {
+    const { data, error } = await supabase
+      .from('maintenance_actions')
+      .select(`
+        id, action_type, description, priority, status, repair_status,
+        reported_date, completed_date, assigned_technician_id,
+        equipment ( id, equipment_code, equipment_type, exact_location, building_id,
+          buildings ( building_name )
+        )
+      `)
+      .order('reported_date', { ascending: false })
+
+    if (error) console.error('Error fetching all actions:', error)
+    else setAllActions(data || [])
+  }
+
   async function getStock() {
     const { data, error } = await supabase
       .from('equipment_stock')
@@ -905,7 +1038,7 @@ function Dashboard({ profile, onLogout }) {
       .select(`
         id, equipment_id, inspection_date, condition_status,
         findings, recommended_action, inspection_notes, action_required,
-        inspector_name
+        inspector_name, inspector_id
       `)
       .order('inspection_date', { ascending: false })
 
@@ -920,6 +1053,10 @@ function Dashboard({ profile, onLogout }) {
 
   async function handleTypeChange(e) {
     const type = e.target.value
+    // A fire extinguisher added here is usually the replacement for one whose
+    // job was closed as Resolved — and that already took 1 from stock. So
+    // for fire extinguishers the box starts unticked (no double deduction).
+    setTakeFromStock(type !== 'fire_extinguisher')
     if (type === OTHER_TYPE) {
       // The code is generated once the new type's name is typed in.
       setOtherTypeName('')
@@ -960,6 +1097,7 @@ function Dashboard({ profile, onLogout }) {
   async function openAddForm() {
     const willShow = !showAddForm
     setShowAddForm(willShow)
+    if (willShow) setTakeFromStock(form.equipment_type !== 'fire_extinguisher')
     if (willShow && form.equipment_type !== OTHER_TYPE) {
       const newCode = await generateEquipmentCode(supabase, form.equipment_type)
       setForm((prev) => ({ ...prev, equipment_code: newCode, qr_code: newCode }))
@@ -1053,6 +1191,9 @@ function Dashboard({ profile, onLogout }) {
       console.error('Error inserting equipment:', error)
       setFormError(error.message)
     } else {
+      // Installed from the storeroom: 1 fewer in stock (a brand-new
+      // "Others" type has no stock yet).
+      if (takeFromStock && !isOther) await takeOneFromStock(equipmentType)
       setForm({
         equipment_code: '',
         equipment_type: EQUIPMENT_TYPES[0],
@@ -1250,6 +1391,7 @@ function Dashboard({ profile, onLogout }) {
     setOutcomeChoice('resolved')
     getMaintenanceActions()
     getCompletedActions()
+    getAllActions()
     getEquipment()
     setActionUpdatingId(null)
   }
@@ -1285,6 +1427,7 @@ function Dashboard({ profile, onLogout }) {
       alert('Failed to reassess action: ' + error.message)
     } else {
       getMaintenanceActions()
+      getAllActions()
     }
     setActionUpdatingId(null)
   }
@@ -1339,7 +1482,10 @@ function Dashboard({ profile, onLogout }) {
       setActionUpdatingId(null)
       return
     }
+    // Refreshed here too, not only by the live updates, so the technician
+    // cards' numbers and the "Assign job order" list change right away.
     getMaintenanceActions()
+    getAllActions()
 
     setTechAssignModal(null)
     setSelectedTechnicianId('')
@@ -1347,12 +1493,39 @@ function Dashboard({ profile, onLogout }) {
     setActionUpdatingId(null)
   }
 
+  // Takes 1 unit of a type out of the storeroom stock, reading the current
+  // count from the database (the copy on screen can be out of date).
+  // Does nothing when the storeroom has none.
+  async function takeOneFromStock(type) {
+    const { data: current } = await supabase
+      .from('equipment_stock')
+      .select('quantity_available')
+      .eq('equipment_type', type)
+      .maybeSingle()
+    if (!current || current.quantity_available <= 0) return false
+    const { error } = await supabase
+      .from('equipment_stock')
+      .update({
+        quantity_available: current.quantity_available - 1,
+        updated_at: new Date().toISOString(),
+        updated_by: `${profile.full_name} (${profile.role})`
+      })
+      .eq('equipment_type', type)
+    if (error) {
+      console.error('Error taking a unit from stock:', error)
+      return false
+    }
+    return true
+  }
+
   async function handleSaveStock(type) {
-    const qty = parseInt(stockEdits[type], 10)
-    if (isNaN(qty) || qty < 0) {
-      alert('Stock quantity must be a non-negative number.')
+    // Whole units only: "2.5" or "3abc" used to be saved quietly as 2 or 3.
+    const raw = String(stockEdits[type] ?? '').trim()
+    if (!/^\d+$/.test(raw)) {
+      alert('Stock quantity must be a whole number (0 or more).')
       return
     }
+    const qty = parseInt(raw, 10)
 
     setStockSaving(true)
     const { error } = await supabase
@@ -1454,26 +1627,17 @@ function Dashboard({ profile, onLogout }) {
     if (!error) setStaffAccounts(data || [])
   }
 
-  async function toggleTechnicianAvailability(id, currentVal) {
-    const { error } = await supabase
-      .from('technicians')
-      .update({ is_available: !currentVal })
-      .eq('id', id)
-
-    if (error) {
-      alert('Failed to update availability: ' + error.message)
-    } else {
-      getTechnicians()
-    }
-  }
-
+  // Availability is set by the technician in the mobile app (migration 009).
+  // Only a technician with no app account can't do that, so for them the
+  // admin still sets it in Edit.
   function startEditTechnician(t) {
     setEditingTechnicianId(t.id)
     setEditTechnicianError(null)
     setEditTechnicianForm({
       full_name: t.full_name || '',
       contact_info: t.contact_info || '',
-      is_available: t.is_available
+      is_available: t.is_available,
+      has_account: !!t.profile_id
     })
   }
 
@@ -1490,14 +1654,12 @@ function Dashboard({ profile, onLogout }) {
     }
 
     setEditTechnicianSaving(true)
-    const { error } = await supabase
-      .from('technicians')
-      .update({
-        full_name: editTechnicianForm.full_name.trim(),
-        contact_info: editTechnicianForm.contact_info.trim() || null,
-        is_available: editTechnicianForm.is_available
-      })
-      .eq('id', id)
+    const changes = {
+      full_name: editTechnicianForm.full_name.trim(),
+      contact_info: editTechnicianForm.contact_info.trim() || null
+    }
+    if (!editTechnicianForm.has_account) changes.is_available = editTechnicianForm.is_available
+    const { error } = await supabase.from('technicians').update(changes).eq('id', id)
 
     if (error) {
       setEditTechnicianError(error.message)
@@ -1541,11 +1703,15 @@ function Dashboard({ profile, onLogout }) {
     if (!replacementPrompt) return
 
     const newCode = await generateEquipmentCode(supabase, replacementPrompt.equipment_type)
+    // Local calendar dates. toISOString() is UTC, which in the Philippines
+    // gives yesterday's date before 8 AM.
+    const ymd = (d) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     const today = new Date()
-    const installDate = today.toISOString().slice(0, 10)
+    const installDate = ymd(today)
     const expiry = new Date(today)
     expiry.setFullYear(expiry.getFullYear() + 2)
-    const expiryDate = expiry.toISOString().slice(0, 10)
+    const expiryDate = ymd(expiry)
 
     const { error } = await supabase.from('equipment').insert([
       {
@@ -1614,14 +1780,17 @@ function Dashboard({ profile, onLogout }) {
 
   // Priority Actions counts by stage
   const pendingCount = sortedActions.filter((a) => a.status === 'pending').length
-  const inProgressCount = sortedActions.filter((a) => a.status === 'in_progress').length
-  const unresolvedCount = sortedActions.filter((a) => a.status === 'unresolved').length
+  // Used by the In Progress / Unresolved filter buttons, which are hidden
+  // for now (see the commented-out buttons in Priority Actions).
+  // const inProgressCount = sortedActions.filter((a) => a.status === 'in_progress').length
+  // const unresolvedCount = sortedActions.filter((a) => a.status === 'unresolved').length
 
   const displayedActions = sortedActions.filter((a) => {
     if (priorityFilter === 'pending') return a.status === 'pending'
     if (priorityFilter === 'in_progress') return a.status === 'in_progress'
     if (priorityFilter === 'unresolved') return a.status === 'unresolved'
-    return true
+    // "All" shows only the Purchase Request summary, no cards.
+    return false
   })
 
   const today = new Date()
@@ -1648,8 +1817,9 @@ function Dashboard({ profile, onLogout }) {
     .filter((item) => item.daysLeft !== null && item.daysLeft <= 30)
     .sort((a, b) => a.daysLeft - b.daysLeft)
 
-  // Priority Actions summary: what needs a Job Order Request and what needs
-  // a Purchase Request (replacement needed, not enough stock on hand).
+  // Defects still waiting for a Job Order (no technician yet) — offered by
+  // "Assign job order" on a technician's card. And what needs a Purchase
+  // Request (replacement needed, not enough stock on hand).
   const jobOrderActions = sortedActions.filter((a) => a.status === 'pending')
   const purchaseRequestItems = findPurchaseRequestItems({
     actions: sortedActions,
@@ -1657,13 +1827,155 @@ function Dashboard({ profile, onLogout }) {
     stock
   })
 
+  // Unavailable dates still current or coming up, with who sent them.
+  const todayPh = manilaDay(new Date())
+  const upcomingLeaves = unavailability
+    .filter((l) => l.end_date >= todayPh)
+    .map((l) => {
+      const acc = staffAccounts.find((a) => a.id === l.profile_id)
+      return { ...l, name: acc ? acc.full_name : 'A staff member', role: acc ? acc.role : 'inspector' }
+    })
+  // A person's current / upcoming unavailable dates, earliest first.
+  const leavesFor = (profileId) => (profileId ? upcomingLeaves.filter((l) => l.profile_id === profileId) : [])
+
   // Notifications shown in the header bell
   const gsoNotifications = buildGsoNotifications({
     actions: sortedActions,
     expiring: expiringEquipment,
     completed: completedActions,
-    purchaseRequests: purchaseRequestItems
+    purchaseRequests: purchaseRequestItems,
+    leaves: upcomingLeaves
   })
+
+  // Shared by the Reports page and the Equipment page's Print Report.
+  const reportCtx = {
+    typeLabel,
+    statusLabel: (s) => STATUS_LABELS[s] || s,
+    formatTimestamp,
+    daysUntil,
+    inspectionsByEquipment
+  }
+
+  function printReport(report) {
+    if (!report) return
+    setReportPrint({ ...report, generatedAt: new Date() })
+  }
+
+  // Dashboard graphs
+  const retiredCount = equipment.length - totalEquipment
+  // Installed units of one type, counted from the equipment records (the
+  // Stock page). "Inspected this month" = units inspected since the 1st of
+  // this month (Philippine time), with the result of their latest one.
+  const monthStart = `${manilaDay(new Date()).slice(0, 7)}-01`
+  function installedStats(type) {
+    const ofType = equipment.filter((e) => e.equipment_type === type)
+    const items = ofType.filter((e) => e.current_status !== 'no_longer_in_service')
+    const ok = items.filter((e) => e.current_status === 'functional').length
+    let inspected = 0
+    let inspectedOk = 0
+    items.forEach((e) => {
+      const latest = (inspectionsByEquipment[e.id] || [])[0]
+      if (latest && manilaDay(latest.inspection_date) >= monthStart) {
+        inspected += 1
+        if (latest.condition_status === 'defective') return
+        inspectedOk += 1
+      }
+    })
+    return {
+      total: items.length,
+      ok,
+      bad: items.length - ok,
+      retired: ofType.length - items.length,
+      inspected,
+      inspectedOk,
+      inspectedBad: inspected - inspectedOk
+    }
+  }
+
+  // Per type: in service (functional / needs attention), no longer in
+  // service, and new units waiting in the storeroom (Stock page).
+  const typeChartRows = allTypes.map((type) => {
+    const ofType = equipment.filter((e) => e.equipment_type === type)
+    const items = ofType.filter((e) => e.current_status !== 'no_longer_in_service')
+    const ok = items.filter((e) => e.current_status === 'functional').length
+    return {
+      type,
+      label: typeLabel(type),
+      ok,
+      bad: items.length - ok,
+      retired: ofType.length - items.length,
+      storeroom: stock.find((s) => s.equipment_type === type)?.quantity_available || 0
+    }
+  })
+
+  // Technician cards: counted the same way as the technician's own app
+  // (get_my_stats in migration 009).
+  function technicianCounts(techId) {
+    const mine = allActions.filter((a) => a.assigned_technician_id === techId)
+    const open = mine.filter((a) => a.status === 'in_progress')
+    return {
+      assigned: open.filter((a) => (a.repair_status || 'assigned') !== 'repaired').length,
+      working: open.filter((a) => a.repair_status === 'working').length,
+      completed: mine.filter((a) => a.status === 'completed').length
+    }
+  }
+
+  // System Summary preview on the Reports page
+  const weekAgo = new Date().getTime() - 7 * 24 * 60 * 60 * 1000
+  const summaryRows = [
+    ['Equipment in service', totalEquipment],
+    ['Functional', activeCount],
+    ['Needs attention', needsActionCount],
+    ['No Longer in Service', retiredCount],
+    ['Priority Actions (open)', sortedActions.length],
+    ['Needs Job Order Request', pendingCount],
+    ['Needs Purchase Request', purchaseRequestItems.length],
+    ['Expiring within 30 days / expired', expiringEquipment.length],
+    ['Inspections in the last 7 days', inspections.filter((i) => new Date(i.inspection_date).getTime() >= weekAgo).length]
+  ]
+
+  // Opens the Job Order Request form for a reported defect. From Priority
+  // Actions no technician is picked yet; from a technician's card
+  // ("Assign job order") that technician is already chosen.
+  function openJobOrderRequest(action, technicianId) {
+    setSelectedTechnicianId(technicianId || '')
+    setJobOrderRemarks('')
+    setTechAssignModal({
+      actionId: action.id,
+      isFireExtinguisher: action.equipment?.equipment_type === 'fire_extinguisher',
+      equipmentCode: action.equipment?.equipment_code,
+      equipmentType: action.equipment?.equipment_type,
+      location: `${action.equipment?.buildings?.building_name ?? 'N/A'} — ${action.equipment?.exact_location ?? ''}`,
+      finding: action.description,
+      actionType: action.action_type,
+      priority: action.priority,
+      reportedDate: action.reported_date
+    })
+  }
+
+  // Opens the Reports page on one report (e.g. 'expiry' for Expiring /
+  // Expired — the dashboard no longer has its own Expiration Alerts list).
+  function openReport(key) {
+    setReportStart({ key, n: reportStart.n + 1 })
+    setActiveTab('reports')
+    window.scrollTo({ top: 0 })
+  }
+
+  // "Needs a purchase request" (inspection / repair history): the Purchase
+  // Request summary on the dashboard.
+  function openPurchaseSummary() {
+    setActiveTab('dashboard')
+    setPriorityFilter('all')
+    scrollToId('priority-actions-section')
+  }
+
+  function goTab(tab) {
+    // The sidebar's Reports always starts on the first report.
+    if (tab === 'reports') setReportStart({ key: 'inventory', n: reportStart.n + 1 })
+    setActiveTab(tab)
+    if (tab === 'technicians') getTechnicians()
+    window.scrollTo({ top: 0 })
+  }
 
   function scrollToId(id) {
     setTimeout(() => {
@@ -1689,9 +2001,14 @@ function Dashboard({ profile, onLogout }) {
       setShowSummary(true)
       return
     }
+    // Unavailable dates: the person's page (their card has the calendar).
+    if (n.target === 'leave') {
+      goTab(n.role === 'technician' ? 'technicians' : 'inspectors')
+      return
+    }
     setActiveTab('dashboard')
     if (n.target === 'expiry') {
-      scrollToId('expiration-alerts-section')
+      openReport('expiry')
       return
     }
     if (n.target === 'purchase') {
@@ -1801,99 +2118,52 @@ function Dashboard({ profile, onLogout }) {
             onNavigate={handleNotificationNavigate}
             ready={initialLoaded}
           />
-          <span className="user-role-tag">{profile.full_name} · {profile.role}</span>
-          <button className="logout-btn" onClick={onLogout}>Log out</button>
         </div>
       </header>
 
       <div className="app-layout">
         <aside className="app-sidebar">
-          <nav className="sidebar-nav">
-            <button
-              className={`sidebar-item ${activeTab === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setActiveTab('dashboard')}
-              title="Dashboard"
-            >
-              <span className="sidebar-icon">📊</span>
-              <span className="sidebar-text">Dashboard</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeTab === 'inspectors' ? 'active' : ''}`}
-              onClick={() => setActiveTab('inspectors')}
-              title="Inspectors"
-            >
-              <span className="sidebar-icon">🔍</span>
-              <span className="sidebar-text">Inspectors</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeTab === 'buildings' ? 'active' : ''}`}
-              onClick={() => setActiveTab('buildings')}
-              title="Buildings"
-            >
-              <span className="sidebar-icon">🏢</span>
-              <span className="sidebar-text">Buildings</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeTab === 'stock' ? 'active' : ''}`}
-              onClick={() => setActiveTab('stock')}
-              title="Stock"
-            >
-              <span className="sidebar-icon">📦</span>
-              <span className="sidebar-text">Stock</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeTab === 'technicians' ? 'active' : ''}`}
-              onClick={() => setActiveTab('technicians')}
-              title="Technicians"
-            >
-              <span className="sidebar-icon">🔧</span>
-              <span className="sidebar-text">Technicians</span>
-            </button>
-          </nav>
-
-          {/* Expiring card placed in the sidebar together */}
-          <div className="sidebar-section">
-            <div className="sidebar-section-header">
-              Alerts
-            </div>
-            <button
-              className="sidebar-stat-card"
-              onClick={() => {
-                setActiveTab('dashboard')
-                setTimeout(() => {
-                  document.getElementById('expiration-alerts-section')?.scrollIntoView({ behavior: 'smooth' })
-                }, 0)
-              }}
-              title="Expiring / Expired Equipment"
-            >
-              <div className="stat-icon amber sidebar-alert-icon">
-                ⏳
-                {expiringEquipment.length > 0 && (
-                  <span className="sidebar-badge-dot">{expiringEquipment.length}</span>
-                )}
-              </div>
-              <div className="sidebar-alert-details">
-                <div className="stat-value">{expiringEquipment.length}</div>
-                <div className="stat-label">Expiring / Expired</div>
-              </div>
-            </button>
-            {expiringEquipment.length > 0 && (
-              <div className="sidebar-expiring-mini">
-                {expiringEquipment.slice(0, 3).map((item) => (
-                  <div key={item.id} className="sidebar-expiring-mini-row">
-                    <span style={{ fontWeight: 600 }}>{item.equipment_code}</span>
-                    <span className={`mini-tag ${item.daysLeft < 0 ? 'alert' : 'warn'}`}>
-                      {item.daysLeft < 0 ? 'Expired' : `${item.daysLeft}d`}
+          {SIDEBAR_GROUPS.map((group) => (
+            <div key={group.title} className="side-group">
+              <div className="side-group-title">{group.title}</div>
+              {group.items.map((item) => (
+                <button
+                  key={item.tab}
+                  className={`side-item ${activeTab === item.tab ? 'active' : ''}`}
+                  onClick={() => goTab(item.tab)}
+                >
+                  <NavIcon name={item.tab} />
+                  <span className="side-text">{item.label}</span>
+                  {item.tab === 'dashboard' && expiringEquipment.length > 0 && (
+                    <span
+                      className="side-badge"
+                      title={`${expiringEquipment.length} expiring within 30 days or expired`}
+                    >
+                      {expiringEquipment.length}
                     </span>
-                  </div>
-                ))}
-              </div>
-            )}
+                  )}
+                </button>
+              ))}
+            </div>
+          ))}
+          <div className="side-user">
+            <strong>{profile.full_name}</strong>
+            <span style={{ textTransform: 'capitalize' }}>{profile.role}</span>
+            <button className="side-logout" onClick={onLogout}>
+              <svg className="side-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <path d="M16 17l5-5-5-5" />
+                <path d="M21 12H9" />
+              </svg>
+              Log out
+            </button>
           </div>
         </aside>
 
         <main className="main-content">
           <div className="page-wrap">
+        {(activeTab === 'dashboard' || activeTab === 'priority') && (
+        <div>
             <div className="stat-grid">
               <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
                 <div className="stat-icon blue">📦</div>
@@ -1934,8 +2204,19 @@ function Dashboard({ profile, onLogout }) {
               </button>
             </div>
 
-        {(activeTab === 'dashboard' || activeTab === 'priority') && (
-        <div>
+            <div className="chart-grid">
+              {/* Pie chart hidden for now (adviser's request): "Equipment by
+                  type" below has the same totals, per type and overall.
+              <StatusDonut
+                functional={activeCount}
+                needsAttention={needsActionCount}
+                retired={retiredCount}
+              />
+              */}
+              <TypeBars rows={typeChartRows} />
+              <InspectionWeeks inspections={inspections} />
+            </div>
+
         <div id="priority-actions-section" className="section-heading" style={{ scrollMarginTop: '80px' }}>
           <h2>Priority Actions</h2>
           {sortedActions.length > 0 && (
@@ -1951,12 +2232,9 @@ function Dashboard({ profile, onLogout }) {
           >
             All <span className="chip-count">{sortedActions.length}</span>
           </button>
-          <button
-            className={`filter-chip ${priorityFilter === 'pending' ? 'active' : ''}`}
-            onClick={() => setPriorityFilter('pending')}
-          >
-            ⏳ Needs Job Order <span className="chip-count">{pendingCount}</span>
-          </button>
+
+          {/* Hidden for now (adviser's request). Kept in the code so they can
+              be turned back on: remove these comment markers.
           <button
             className={`filter-chip ${priorityFilter === 'in_progress' ? 'active' : ''}`}
             onClick={() => setPriorityFilter('in_progress')}
@@ -1969,6 +2247,7 @@ function Dashboard({ profile, onLogout }) {
           >
             ⚠️ Unresolved <span className="chip-count">{unresolvedCount}</span>
           </button>
+          */}
         </div>
 
         {/* "All" is an overview: the action buttons live in the stage filters
@@ -1977,19 +2256,20 @@ function Dashboard({ profile, onLogout }) {
             one summary instead. */}
         {priorityFilter === 'all' && (
           <PriorityActionsSummary
-            jobOrderActions={jobOrderActions}
             purchaseItems={purchaseRequestItems}
             onOpenAction={openActionInFilter}
-            onOpenExpiry={() => scrollToId('expiration-alerts-section')}
+            onOpenExpiry={() => openReport('expiry')}
           />
         )}
 
         {displayedActions.length === 0 ? (
-          <div className="all-clear-banner">
-            {sortedActions.length === 0
-              ? '✓ No pending actions. All equipment accounted for.'
-              : `✓ No actions in "${priorityFilter.replace('_', ' ')}" stage.`}
-          </div>
+          priorityFilter === 'all' ? null : (
+            <div className="all-clear-banner">
+              {sortedActions.length === 0
+                ? '✓ No pending actions. All equipment accounted for.'
+                : `✓ No actions in "${priorityFilter.replace('_', ' ')}" stage.`}
+            </div>
+          )
         ) : (
           displayedActions.map((action) => {
             const age = daysAgo(action.reported_date)
@@ -2025,7 +2305,7 @@ function Dashboard({ profile, onLogout }) {
                 <p>
                   {action.equipment?.buildings?.building_name ?? 'N/A'} — {action.equipment?.exact_location}
                 </p>
-                <p>{action.description} <span style={{ color: 'var(--text-muted)' }}>({action.action_type})</span></p>
+                <p>{action.description} <span style={{ color: 'var(--text-muted)' }}>({ACTION_LABELS[action.action_type] || action.action_type})</span></p>
                 <p>
                   Priority: <strong style={{ textTransform: 'capitalize' }}>{action.priority}</strong>{' '}
                   &nbsp;·&nbsp; Status: <strong style={{ textTransform: 'capitalize' }}>{action.status.replace('_', ' ')}</strong>
@@ -2125,42 +2405,19 @@ function Dashboard({ profile, onLogout }) {
                   )
                 })()}
 
-                {needsJobOrder && readOnly && (
-                  <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--amber)', margin: '10px 0 0 0' }}>
-                    Needs a Job Order Request — listed in the summary above.
+                {/* Job Orders are filed from the technician's card now
+                    (Technicians → "Assign job order"), not from here. */}
+                {/* What this defect needs next. A unit that needs a new unit
+                    with no stock to cover it can't go to a technician yet:
+                    the Purchase Request comes first. */}
+                {needsJobOrder && (
+                  <p style={{ fontSize: '0.85rem', fontWeight: 600, color: needsPurchase ? 'var(--red)' : 'var(--amber)', margin: '10px 0 0 0' }}>
+                    {needsPurchase
+                      ? `Needs a Purchase Request first — there is no ${typeLabel(action.equipment?.equipment_type)} in stock to replace this unit. Coordinate with the Supply Office; assign a technician once the new unit arrives.`
+                      : needsReplacementUnit(action)
+                      ? 'Needs a Job Order Request — a technician will install a new unit from stock. Assign it from Technicians → "Assign job order".'
+                      : 'Needs a Job Order Request — assign a technician to repair it from Technicians → "Assign job order".'}
                   </p>
-                )}
-
-                {/* One GSO action: Job Order Request (opens the request form) */}
-                {needsJobOrder && !readOnly && (
-                  <div style={{ marginTop: '10px' }}>
-                    <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: '0 0 8px 0' }}>
-                      Action required: file a Job Order Request so this defect can be repaired.
-                    </p>
-                    <div className="action-buttons">
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => {
-                          setSelectedTechnicianId('')
-                          setJobOrderRemarks('')
-                          setTechAssignModal({
-                            actionId: action.id,
-                            isFireExtinguisher,
-                            equipmentCode: action.equipment?.equipment_code,
-                            equipmentType: action.equipment?.equipment_type,
-                            location: `${action.equipment?.buildings?.building_name ?? 'N/A'} — ${action.equipment?.exact_location ?? ''}`,
-                            finding: action.description,
-                            actionType: action.action_type,
-                            priority: action.priority,
-                            reportedDate: action.reported_date
-                          })
-                        }}
-                        disabled={actionUpdatingId === action.id}
-                      >
-                        Job Order Request
-                      </button>
-                    </div>
-                  </div>
                 )}
 
                 {/* Stage: In progress — close with outcome tracking or reassign technician */}
@@ -2240,43 +2497,6 @@ function Dashboard({ profile, onLogout }) {
           })
         )}
 
-        <div className="section-heading" id="expiration-alerts-section" style={{ scrollMarginTop: '80px', marginTop: '36px' }}>
-          <h2>Expiration Alerts</h2>
-          {expiringEquipment.length > 0 && (
-            <span className="count-pill">{expiringEquipment.length} flagged</span>
-          )}
-        </div>
-
-        {expiringEquipment.length === 0 ? (
-          <div className="all-clear-banner">
-            ✓ No equipment expiring within 30 days.
-          </div>
-        ) : (
-          expiringEquipment.map((item) => {
-            const isExpired = item.daysLeft < 0
-            return (
-              <div key={item.id} className={`action-card ${isExpired ? 'overdue' : 'warning'}`}>
-                <div className="action-title">
-                  ⏳ {item.equipment_code} — {TYPE_LABELS[item.equipment_type] || item.equipment_type}
-                  {isExpired && <span className="overdue-tag">EXPIRED</span>}
-                </div>
-                <p>
-                  {item.buildings?.building_name ?? 'N/A'} — {item.exact_location}
-                </p>
-                <p>
-                  Expiration Date: <strong>{item.expiration_date}</strong>
-                </p>
-                <div className="meta">
-                  {isExpired
-                    ? `Expired ${Math.abs(item.daysLeft)} day${Math.abs(item.daysLeft) === 1 ? '' : 's'} ago`
-                    : item.daysLeft === 0
-                    ? 'Expires today'
-                    : `Expires in ${item.daysLeft} day${item.daysLeft === 1 ? '' : 's'}`}
-                </div>
-              </div>
-            )
-          })
-        )}
         </div>
         )}
 
@@ -2284,9 +2504,14 @@ function Dashboard({ profile, onLogout }) {
         <div>
         <div className="section-heading" id="buildings-section">
           <h2>Buildings</h2>
-          <button className="btn btn-primary btn-sm" onClick={() => setShowBuildingForm((v) => !v)}>
-            {showBuildingForm ? 'Close' : '+ Add Building'}
-          </button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <span className="count-pill neutral">
+              {buildings.length} building{buildings.length === 1 ? '' : 's'}
+            </span>
+            <button className="btn btn-primary btn-sm" onClick={() => setShowBuildingForm((v) => !v)}>
+              {showBuildingForm ? 'Close' : '+ Add Building'}
+            </button>
+          </div>
         </div>
 
         {showBuildingForm && (
@@ -2323,76 +2548,99 @@ function Dashboard({ profile, onLogout }) {
         {buildings.length === 0 ? (
           <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>No buildings added yet.</p>
         ) : (
-          <div style={{ marginBottom: '10px' }}>
-            {buildings.map((b) => (
-              <div key={b.id} className="panel">
-                {editingBuildingId === b.id ? (
-                  <div className="form-grid">
-                    <div>
-                      <label className="field-label">Building Name</label>
-                      <input
-                        name="building_name"
-                        value={editBuildingForm.building_name}
-                        onChange={handleEditBuildingChange}
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Location Description</label>
-                      <input
-                        name="location_description"
-                        value={editBuildingForm.location_description}
-                        onChange={handleEditBuildingChange}
-                      />
-                    </div>
+          <div className="table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Building</th>
+                  <th>Location</th>
+                  <th className="num">Floors</th>
+                  <th className="num">Rooms</th>
+                  <th className="num" title="Units in service (No Longer in Service not counted)">Equipment</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {buildings.map((b) => {
+                  const locs = buildingLocations.filter((l) => l.building_id === b.id)
+                  const floorCount = new Set(locs.map((l) => l.floor_label)).size
+                  const unitCount = equipment.filter(
+                    (e) => e.building_id === b.id && e.current_status !== 'no_longer_in_service'
+                  ).length
+                  const open = expandedLocationsBuildingId === b.id
+                  return (
+                    <Fragment key={b.id}>
+                      <tr>
+                        <td><strong>{b.building_name}</strong></td>
+                        <td>{b.location_description || '—'}</td>
+                        <td className="num">{floorCount}</td>
+                        <td className="num">{locs.length}</td>
+                        <td className="num">{unitCount}</td>
+                        <td>
+                          <div className="row-actions">
+                            <button
+                              className={`btn btn-sm ${open ? 'btn-primary' : 'btn-secondary'}`}
+                              onClick={() => setExpandedLocationsBuildingId(open ? null : b.id)}
+                            >
+                              {open ? 'Hide floors & rooms' : 'Floors & rooms'}
+                            </button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => startEditBuilding(b)}>
+                              Edit
+                            </button>
+                            <button
+                              className="btn btn-outline-red btn-sm"
+                              onClick={() => deleteBuilding(b.id, b.building_name)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
 
-                    {editBuildingError && <p className="form-error">{editBuildingError}</p>}
+                      {editingBuildingId === b.id && (
+                        <tr className="row-detail">
+                          <td colSpan={6}>
+                            <div className="form-grid">
+                              <div>
+                                <label className="field-label">Building Name</label>
+                                <input
+                                  name="building_name"
+                                  value={editBuildingForm.building_name}
+                                  onChange={handleEditBuildingChange}
+                                />
+                              </div>
+                              <div>
+                                <label className="field-label">Location Description</label>
+                                <input
+                                  name="location_description"
+                                  value={editBuildingForm.location_description}
+                                  onChange={handleEditBuildingChange}
+                                />
+                              </div>
 
-                    <div className="equipment-actions">
-                      <button
-                        className="btn btn-primary"
-                        onClick={() => saveEditBuilding(b.id)}
-                        disabled={editBuildingSaving}
-                      >
-                        {editBuildingSaving ? 'Saving...' : 'Save'}
-                      </button>
-                      <button className="btn btn-secondary" onClick={cancelEditBuilding} disabled={editBuildingSaving}>
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="equipment-card-head">
-                      <div>
-                        <div className="equipment-title">{b.building_name}</div>
-                        <div className="equipment-meta">{b.location_description || 'No description'}</div>
-                      </div>
-                      <div className="equipment-actions" style={{ marginTop: 0 }}>
-                        <button className="btn btn-secondary btn-sm" onClick={() => startEditBuilding(b)}>
-                          Edit
-                        </button>
-                        <button
-                          className="btn btn-outline-red btn-sm"
-                          onClick={() => deleteBuilding(b.id, b.building_name)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
+                              {editBuildingError && <p className="form-error">{editBuildingError}</p>}
 
-                    <div className="equipment-actions">
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() =>
-                          setExpandedLocationsBuildingId(expandedLocationsBuildingId === b.id ? null : b.id)
-                        }
-                      >
-                        {expandedLocationsBuildingId === b.id ? 'Hide Floors/Rooms' : 'Manage Floors/Rooms'}
-                      </button>
-                    </div>
+                              <div className="equipment-actions">
+                                <button
+                                  className="btn btn-primary"
+                                  onClick={() => saveEditBuilding(b.id)}
+                                  disabled={editBuildingSaving}
+                                >
+                                  {editBuildingSaving ? 'Saving...' : 'Save'}
+                                </button>
+                                <button className="btn btn-secondary" onClick={cancelEditBuilding} disabled={editBuildingSaving}>
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
 
-                    {expandedLocationsBuildingId === b.id && (
-                      <div style={{ marginTop: '14px', borderTop: '1px solid var(--border)', paddingTop: '14px' }}>
+                      {open && (
+                        <tr className="row-detail">
+                          <td colSpan={6}>
+                      <div style={{ padding: '4px 2px' }}>
                         {(() => {
                           const locsForThisBuilding = buildingLocations.filter((l) => l.building_id === b.id)
                           const floorGroups = [...new Set(locsForThisBuilding.map((l) => l.floor_label))]
@@ -2592,11 +2840,14 @@ function Dashboard({ profile, onLogout }) {
                           )
                         })()}
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
         </div>
@@ -2609,7 +2860,32 @@ function Dashboard({ profile, onLogout }) {
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               className="btn btn-secondary btn-sm"
-              onClick={() => setReportPrint({ items: filteredEquipment, generatedAt: new Date() })}
+              onClick={() =>
+                printReport(
+                  buildInventoryReport(
+                    filteredEquipment,
+                    [
+                      ['Type', filterType ? typeLabel(filterType) : 'All types'],
+                      [
+                        'Status',
+                        filterStatus === '__needs_attention__'
+                          ? 'Needs attention'
+                          : filterStatus
+                          ? STATUS_LABELS[filterStatus] || filterStatus
+                          : 'All statuses'
+                      ],
+                      [
+                        'Building',
+                        filterBuilding
+                          ? buildings.find((b) => b.id === filterBuilding)?.building_name || '—'
+                          : 'All buildings'
+                      ],
+                      ...(searchTerm.trim() ? [['Search', `"${searchTerm.trim()}"`]] : [])
+                    ],
+                    reportCtx
+                  )
+                )
+              }
               disabled={filteredEquipment.length === 0}
               title="Prints the equipment shown below, using the same filters."
             >
@@ -2753,6 +3029,31 @@ function Dashboard({ profile, onLogout }) {
                 <textarea name="description" placeholder="Optional" value={form.description} onChange={handleChange} />
               </div>
 
+              {form.equipment_type !== OTHER_TYPE && (() => {
+                const inStore = stock.find((s) => s.equipment_type === form.equipment_type)?.quantity_available || 0
+                return (
+                  <label className="check-line">
+                    <input
+                      type="checkbox"
+                      checked={takeFromStock && inStore > 0}
+                      disabled={inStore === 0}
+                      onChange={(e) => setTakeFromStock(e.target.checked)}
+                    />
+                    <span>
+                      {inStore > 0
+                        ? `This unit is taken from the storeroom stock (${inStore} left — the system will make it ${inStore - 1}).`
+                        : 'The storeroom has no stock of this type, so nothing is taken from Stock.'}
+                      {inStore > 0 && form.equipment_type === 'fire_extinguisher' && (
+                        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                          Leave this unticked if it replaces a fire extinguisher whose job was closed as
+                          Resolved — that unit was already taken from stock then.
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })()}
+
               {formError && <p className="form-error">{formError}</p>}
 
               <button type="submit" className="btn btn-primary" disabled={submitting}>
@@ -2777,6 +3078,10 @@ function Dashboard({ profile, onLogout }) {
               <label className="field-label">Status</label>
               <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
                 <option value="">All Statuses</option>
+                {/* Set by the "Needs Attention" stat card: anything not
+                    Functional and not retired. Listed so the dropdown shows
+                    what the list is actually filtered by. */}
+                <option value="__needs_attention__">Needs Attention</option>
                 {STATUS_OPTIONS.map((status) => (
                   <option key={status} value={status}>{STATUS_LABELS[status]}</option>
                 ))}
@@ -2944,7 +3249,9 @@ function Dashboard({ profile, onLogout }) {
                           <div className="equipment-meta">
                             {item.buildings?.building_name ?? 'Not assigned'} · {item.exact_location}
                           </div>
-                          <div className="equipment-meta">Expires: {item.expiration_date || '—'}</div>
+                          <div className="equipment-meta">
+                            Expires: {item.expiration_date ? formatTimestamp(item.expiration_date) : '—'}
+                          </div>
                         </div>
                         <span className={`status-badge ${item.current_status === 'functional' ? 'active' : 'inactive-state'}`}>
                           {item.current_status === 'functional' ? '✓ Functional' : `⚠ ${STATUS_LABELS[item.current_status] || item.current_status}`}
@@ -3073,28 +3380,57 @@ function Dashboard({ profile, onLogout }) {
         </div>
         )}
 
+        {/* ===================== REPORTS TAB ===================== */}
+        {activeTab === 'reports' && (
+          <ReportsTab
+            key={reportStart.n}
+            initialReport={reportStart.key}
+            equipment={equipment}
+            buildings={buildings}
+            inspections={inspections}
+            actions={allActions}
+            technicians={technicians}
+            purchaseItems={purchaseRequestItems}
+            types={allTypes}
+            statusOptions={STATUS_OPTIONS}
+            ctx={reportCtx}
+            summaryRows={summaryRows}
+            onPrint={printReport}
+            onOpenSummary={() => setShowSummary(true)}
+          />
+        )}
+
         {/* ===================== INSPECTORS TAB ===================== */}
         {activeTab === 'inspectors' && (
-          <InspectorsTab inspections={inspections} equipment={equipment} />
+          <InspectorsTab
+            inspections={inspections}
+            equipment={equipment}
+            buildings={buildings}
+            buildingLocations={buildingLocations}
+            actions={allActions}
+            purchaseItems={purchaseRequestItems}
+            onOpenPurchaseSummary={openPurchaseSummary}
+            leaves={upcomingLeaves}
+            adminName={profile.full_name}
+            adminRole={profile.role}
+          />
         )}
 
         {/* ===================== STOCK TAB ===================== */}
         {activeTab === 'stock' && (
           <div>
             <div className="section-heading">
-              <h2>Equipment Stock Inventory</h2>
-              <span className="count-pill" style={{ background: 'var(--blue-light)', color: 'var(--blue)', borderColor: '#bfdbfe' }}>
-                Simple Count per Type
-              </span>
+              <h2>Stock</h2>
+              <span className="count-pill neutral">Units in the GSO storeroom</span>
             </div>
 
-            <div className="panel" style={{ marginBottom: '16px' }}>
-              <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                Track available replacement units kept in the GSO storeroom. Closing a fire
-                extinguisher job as Resolved automatically deducts 1 unit. Any replacement this
-                stock cannot cover is listed under "Needs Purchase Request" in Priority Actions.
-              </p>
-            </div>
+            <p className="page-hint">
+              <b>In storeroom:</b> new units kept by the GSO, entered here when they arrive. The
+              system takes 1 away by itself when a unit is installed from the storeroom (Add
+              Equipment) or used to replace a fire extinguisher. <b>Installed units:</b> counted
+              by the system from inspections and repairs — a unit found defective moves from
+              Functional to Needs attention, a fixed one moves back.
+            </p>
 
             {stockMessage && (
               <div className="all-clear-banner" style={{ marginBottom: '14px' }}>
@@ -3102,69 +3438,79 @@ function Dashboard({ profile, onLogout }) {
               </div>
             )}
 
-            <div className="panel">
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-                {allTypes.map((type) => {
-                  const s = stock.find((item) => item.equipment_type === type)
-                  const currentQty = s ? s.quantity_available : 0
-                  const isFE = type === 'fire_extinguisher'
+            <div className="card-grid">
+              {allTypes.map((type) => {
+                const s = stock.find((item) => item.equipment_type === type)
+                const currentQty = s ? s.quantity_available : 0
+                const isFE = type === 'fire_extinguisher'
+                const isCustom = !EQUIPMENT_TYPES.includes(type)
+                const u = installedStats(type)
 
-                  return (
-                    <div
-                      key={type}
-                      style={{
-                        border: '1px solid var(--border)',
-                        borderRadius: '10px',
-                        padding: '16px',
-                        background: '#fff'
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                        <div style={{ fontWeight: 700, fontSize: '1rem' }}>
-                          {typeLabel(type)}
-                        </div>
-                        {isFE && (
-                          <span style={{ fontSize: '0.72rem', background: 'var(--amber-bg)', color: 'var(--amber)', border: '1px solid var(--amber-border)', padding: '2px 8px', borderRadius: '999px', fontWeight: 600 }}>
-                            Stock-swapped
-                          </span>
-                        )}
+                return (
+                  <div key={type} className="info-card">
+                    <div className="info-card-top">
+                      <strong>{typeLabel(type)}</strong>
+                      <span className={`tag ${currentQty === 0 ? 'tag-red' : 'tag-green'}`}>
+                        {currentQty === 0 ? 'Out of stock' : 'On hand'}
+                      </span>
+                    </div>
+
+                    <div className="stock-label">In storeroom (new, not installed)</div>
+                    <div className="stock-qty-row">
+                      <div className="stock-qty">{currentQty}</div>
+                      <input
+                        type="number"
+                        min="0"
+                        aria-label={`New quantity for ${typeLabel(type)}`}
+                        value={stockEdits[type] !== undefined ? stockEdits[type] : currentQty}
+                        onChange={(e) => {
+                          const val = e.target.value
+                          setStockEdits((prev) => ({ ...prev, [type]: val }))
+                        }}
+                      />
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleSaveStock(type)}
+                        disabled={stockSaving}
+                      >
+                        Save
+                      </button>
+                    </div>
+
+                    <div className="info-line">
+                      {s?.updated_at
+                        ? `Updated ${formatTimestamp(s.updated_at)}${s.updated_by ? ` by ${s.updated_by}` : ''}`
+                        : isCustom
+                        ? 'Added automatically from "Others"'
+                        : 'No updates recorded yet'}
+                    </div>
+                    {isFE && (
+                      <div className="info-line">1 unit is deducted automatically when a fire extinguisher job is closed as Resolved.</div>
+                    )}
+
+                    {/* Counted by the system from the equipment records — not typed in. */}
+                    <div className="installed-box">
+                      <div className="stock-label">Installed units (counted by the system)</div>
+                      <div className="installed-total">
+                        <b>{u.total}</b> in service
+                        {u.retired > 0 && <span> · {u.retired} no longer in service</span>}
                       </div>
-
-                      <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
-                        {s?.updated_by ? `Updated by ${s.updated_by} · ${relativeTime(s.updated_at)}` : 'No updates recorded yet'}
+                      <div className="type-bar" title={`${u.ok} functional, ${u.bad} need attention`}>
+                        {u.ok > 0 && <i style={{ width: `${(u.ok / Math.max(1, u.total)) * 100}%`, background: 'var(--green)' }} />}
+                        {u.bad > 0 && <i style={{ width: `${(u.bad / Math.max(1, u.total)) * 100}%`, background: 'var(--red)' }} />}
                       </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div style={{ flex: 1 }}>
-                          <label className="field-label" style={{ fontSize: '0.78rem' }}>Available Quantity</label>
-                          <input
-                            type="number"
-                            min="0"
-                            value={stockEdits[type] !== undefined ? stockEdits[type] : currentQty}
-                            onChange={(e) => {
-                              const val = e.target.value
-                              setStockEdits((prev) => ({ ...prev, [type]: val }))
-                            }}
-                            style={{ fontWeight: 700, fontSize: '1.1rem' }}
-                          />
-                        </div>
-                        <button
-                          className="btn btn-primary btn-sm"
-                          style={{ alignSelf: 'flex-end', height: '42px' }}
-                          onClick={() => handleSaveStock(type)}
-                          disabled={stockSaving}
-                        >
-                          Save
-                        </button>
+                      <div className="type-counts">
+                        <span className="ok">{u.ok} functional ({u.total ? Math.round((u.ok / u.total) * 100) : 0}%)</span>
+                        <span className="bad">{u.bad} needs attention ({u.total ? Math.round((u.bad / u.total) * 100) : 0}%)</span>
                       </div>
-
-                      <div style={{ marginTop: '10px', fontSize: '0.8rem', color: currentQty === 0 ? 'var(--red)' : 'var(--green)', fontWeight: 600 }}>
-                        {currentQty === 0 ? '⚠ Zero units available (out of stock)' : `✓ ${currentQty} units on hand`}
+                      <div className="info-line" style={{ marginTop: '4px' }}>
+                        Inspected this month: <b>{u.inspected} of {u.total}</b>
+                        {u.inspected > 0 && ` · ${u.inspectedOk} functional · ${u.inspectedBad} defective`}
                       </div>
                     </div>
-                  )
-                })}
-              </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}
@@ -3174,9 +3520,12 @@ function Dashboard({ profile, onLogout }) {
           <div>
             <div className="section-heading">
               <h2>Technicians</h2>
-              <button className="btn btn-primary btn-sm" onClick={() => setShowTechnicianForm((v) => !v)}>
-                {showTechnicianForm ? 'Close' : '+ Add Technician'}
-              </button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <span className="count-pill neutral">{technicians.length} listed</span>
+                <button className="btn btn-primary btn-sm" onClick={() => setShowTechnicianForm((v) => !v)}>
+                  {showTechnicianForm ? 'Close' : '+ Add Technician'}
+                </button>
+              </div>
             </div>
 
             {showTechnicianForm && (
@@ -3235,9 +3584,12 @@ function Dashboard({ profile, onLogout }) {
             {technicians.length === 0 ? (
               <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>No technicians registered yet.</p>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: '14px', marginBottom: '18px' }}>
-                {technicians.map((t) => (
-                  <div key={t.id} className="panel" style={{ margin: 0 }}>
+              <div className="card-grid">
+                {technicians.map((t) => {
+                  const acc = t.profile_id && staffAccounts.find((a) => a.id === t.profile_id)
+                  const counts = technicianCounts(t.id)
+                  return (
+                  <div key={t.id} className="info-card">
                     {editingTechnicianId === t.id ? (
                       <div className="form-grid">
                         <div>
@@ -3254,16 +3606,22 @@ function Dashboard({ profile, onLogout }) {
                             onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
                           />
                         </div>
-                        <div>
-                          <label className="field-label">Availability</label>
-                          <select
-                            value={editTechnicianForm.is_available ? 'yes' : 'no'}
-                            onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, is_available: e.target.value === 'yes' }))}
-                          >
-                            <option value="yes">Available</option>
-                            <option value="no">Unavailable</option>
-                          </select>
-                        </div>
+                        {/* With an app account, the technician sets this in the app. */}
+                        {!editTechnicianForm.has_account && (
+                          <div>
+                            <label className="field-label">Availability</label>
+                            <select
+                              value={editTechnicianForm.is_available ? 'yes' : 'no'}
+                              onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, is_available: e.target.value === 'yes' }))}
+                            >
+                              <option value="yes">Available</option>
+                              <option value="no">Unavailable</option>
+                            </select>
+                            <p style={HINT_STYLE}>
+                              No app account yet. Once they have one, they set this themselves in the app.
+                            </p>
+                          </div>
+                        )}
                         {editTechnicianError && <p className="form-error">{editTechnicianError}</p>}
                         <div className="equipment-actions">
                           <button className="btn btn-primary btn-sm" onClick={() => saveEditTechnician(t.id)} disabled={editTechnicianSaving}>
@@ -3276,62 +3634,177 @@ function Dashboard({ profile, onLogout }) {
                       </div>
                     ) : (
                       <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                          <div>
-                            <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>
-                              {t.full_name}
-                              {t.profile_id && (
-                                <span style={{ marginLeft: '8px', fontSize: '0.72rem', fontWeight: 600, color: 'var(--blue)' }}>📱 App account</span>
-                              )}
-                            </div>
-                            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                              {t.contact_info || 'No contact provided'}
-                            </div>
-                            {(() => {
-                              const acc = staffAccounts.find((a) => a.id === t.profile_id)
-                              return acc ? (
-                                <div style={{ fontSize: '0.82rem', marginTop: '2px' }}>
-                                  Username: <strong>{acc.username}</strong>
-                                </div>
-                              ) : null
-                            })()}
-                          </div>
-                          <span
-                            className={`status-badge ${t.is_available ? 'active' : 'inactive-state'}`}
-                            style={{ cursor: 'pointer' }}
-                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
-                            title="Click to toggle availability"
-                          >
-                            {t.is_available ? '✓ Available' : '✕ Unavailable'}
+                        <div className="info-card-top">
+                          <strong>{t.full_name}</strong>
+                          <span className="tag-row">
+                            <span
+                              className={`tag ${t.is_available ? 'tag-green' : 'tag-grey'}`}
+                              title={t.profile_id ? 'Set by the technician in the mobile app' : 'No app account yet'}
+                            >
+                              {t.is_available ? 'Available' : 'Unavailable'}
+                            </span>
+                            {t.profile_id && (
+                              <CalendarButton onClick={() => setCalendarFor({ id: t.profile_id, name: t.full_name })} />
+                            )}
+                          </span>
+                        </div>
+                        <div className="info-line">
+                          Username <b>{acc ? acc.username : 'No app account yet'}</b>
+                        </div>
+                        <div className="info-line">
+                          Contact <b>{t.contact_info || 'Not provided'}</b>
+                        </div>
+                        <LeaveLine leaves={leavesFor(t.profile_id)} />
+
+                        <div className="mini-stats">
+                          <span title="Open jobs not yet marked repaired">
+                            <b>{counts.assigned}</b>Assigned
+                          </span>
+                          <span title="Jobs they are working on now">
+                            <b>{counts.working}</b>Working
+                          </span>
+                          <span title="Jobs closed by GSO">
+                            <b className={counts.completed > 0 ? 'ok' : ''}>{counts.completed}</b>Completed
                           </span>
                         </div>
 
-                        <div className="equipment-actions" style={{ marginTop: '14px', flexWrap: 'wrap' }}>
+                        {/* Assign job order: the defects still waiting for a
+                            technician, most urgent first. Picking one opens
+                            the Job Order Request form with this technician. */}
+                        {jobPickFor === t.id && (
+                          <div className="assign-box">
+                            <div className="assign-head">
+                              Choose a defect to assign
+                              <span className="assign-count">{jobOrderActions.length}</span>
+                            </div>
+                            {jobOrderActions.length === 0 ? (
+                              <div className="info-line">✓ No defects are waiting for a job order.</div>
+                            ) : (
+                              jobOrderActions.map((a) => {
+                                // Needs a new unit and there's none in stock:
+                                // the Purchase Request comes first.
+                                const waitsForPurchase = purchaseRequestItems.some((p) => p.actionId === a.id)
+                                return (
+                                <button
+                                  key={a.id}
+                                  className="pick-row"
+                                  disabled={waitsForPurchase}
+                                  title={waitsForPurchase ? 'No unit in stock yet — file a Purchase Request first.' : 'Assign this job to the technician'}
+                                  onClick={() => {
+                                    setJobPickFor(null)
+                                    openJobOrderRequest(a, t.id)
+                                  }}
+                                >
+                                  <span className="assign-row-top">
+                                    <b>
+                                      {a.equipment?.equipment_code} — {typeLabel(a.equipment?.equipment_type)}
+                                    </b>
+                                    <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
+                                      {a.priority}
+                                    </span>
+                                  </span>
+                                  <span className="info-line">
+                                    {a.equipment?.buildings?.building_name ?? 'N/A'} — {a.equipment?.exact_location}
+                                  </span>
+                                  <span className="info-line">
+                                    {a.description} · reported {formatTimestamp(a.reported_date)}
+                                  </span>
+                                  {waitsForPurchase && (
+                                    <span className="info-line" style={{ color: 'var(--red)', fontWeight: 600 }}>
+                                      Needs a Purchase Request first — no unit in stock to install.
+                                    </span>
+                                  )}
+                                </button>
+                                )
+                              })
+                            )}
+                          </div>
+                        )}
+
+                        {/* Repair history: every job this technician was given,
+                            newest first. Units that need a new unit are tagged. */}
+                        {techHistoryFor === t.id && (() => {
+                          const jobs = allActions
+                            .filter((a) => a.assigned_technician_id === t.id)
+                            .sort((a, b) => new Date(b.reported_date) - new Date(a.reported_date))
+                          return (
+                            <div className="assign-box">
+                              <div className="assign-head">
+                                Repair history
+                                <span className="assign-count">{jobs.length}</span>
+                              </div>
+                              {jobs.length === 0 ? (
+                                <div className="info-line">No jobs given to this technician yet.</div>
+                              ) : (
+                                jobs.slice(0, 15).map((a) => {
+                                  const done = a.status === 'completed'
+                                  let status = ACTION_STATUS_LABELS[a.status] || a.status
+                                  if (a.status === 'in_progress' && a.repair_status === 'working') status += ' (working)'
+                                  if (a.status === 'in_progress' && a.repair_status === 'repaired') status += ' (marked repaired)'
+                                  return (
+                                    <div
+                                      key={a.id}
+                                      style={{
+                                        borderLeft: `3px solid ${done ? 'var(--green)' : 'var(--amber)'}`,
+                                        paddingLeft: '10px'
+                                      }}
+                                    >
+                                      <div className="assign-row-top">
+                                        <b>
+                                          {a.equipment?.equipment_code} — {typeLabel(a.equipment?.equipment_type)}
+                                        </b>
+                                        <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
+                                          {a.priority} priority
+                                        </span>
+                                      </div>
+                                      <div className="info-line">{a.description}</div>
+                                      <div className="info-line">
+                                        <b>{status}</b> · reported {formatTimestamp(a.reported_date)}
+                                        {done && a.completed_date ? ` · completed ${formatTimestamp(a.completed_date)}` : ''}
+                                      </div>
+                                      <ReplacementNote
+                                        action={a}
+                                        purchaseItems={purchaseRequestItems}
+                                        onOpenPurchaseSummary={openPurchaseSummary}
+                                      />
+                                    </div>
+                                  )
+                                })
+                              )}
+                              {jobs.length > 15 && (
+                                <div className="info-line">Showing the latest 15 of {jobs.length}.</div>
+                              )}
+                            </div>
+                          )
+                        })()}
+
+                        <div className="info-actions">
                           <button
                             className="btn btn-secondary btn-sm"
-                            onClick={() => toggleTechnicianAvailability(t.id, t.is_available)}
+                            onClick={() => setTechHistoryFor(techHistoryFor === t.id ? null : t.id)}
                           >
-                            Set {t.is_available ? 'Unavailable' : 'Available'}
+                            {techHistoryFor === t.id ? 'Hide history' : 'History'}
+                          </button>
+                          <button
+                            className={`btn btn-sm ${jobPickFor === t.id ? 'btn-secondary' : 'btn-primary'}`}
+                            onClick={() => setJobPickFor(jobPickFor === t.id ? null : t.id)}
+                            title="Give this technician a reported defect to repair"
+                          >
+                            {jobPickFor === t.id ? 'Close list' : `Assign job order (${jobOrderActions.length})`}
                           </button>
                           <button className="btn btn-secondary btn-sm" onClick={() => startEditTechnician(t)}>
                             Edit
                           </button>
-                          <button className="btn btn-outline-red btn-sm" onClick={() => deleteTechnician(t.id, t.full_name)}>
-                            Delete
-                          </button>
-                          {(() => {
-                            const acc = t.profile_id && staffAccounts.find((a) => a.id === t.profile_id)
-                            return acc ? (
-                              <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() =>
-                                  setAccountSettingsFor({ id: acc.id, full_name: t.full_name, username: acc.username })
-                                }
-                              >
-                                Account settings
-                              </button>
-                            ) : null
-                          })()}
+                          {acc && (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() =>
+                                setAccountSettingsFor({ id: acc.id, full_name: t.full_name, username: acc.username })
+                              }
+                            >
+                              Account settings
+                            </button>
+                          )}
                           {!t.profile_id && techLoginFor !== t.id && (
                             <button
                               className="btn btn-primary btn-sm"
@@ -3344,6 +3817,9 @@ function Dashboard({ profile, onLogout }) {
                               Create app account
                             </button>
                           )}
+                          <button className="btn btn-outline-red btn-sm" onClick={() => deleteTechnician(t.id, t.full_name)}>
+                            Delete
+                          </button>
                         </div>
 
                         {/* A technician added before accounts existed has no
@@ -3389,7 +3865,8 @@ function Dashboard({ profile, onLogout }) {
                       </div>
                     )}
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
@@ -3539,6 +4016,7 @@ function Dashboard({ profile, onLogout }) {
           onSelectTechnician={setSelectedTechnicianId}
           remarks={jobOrderRemarks}
           onRemarksChange={setJobOrderRemarks}
+          leaves={upcomingLeaves}
           onCancel={() => setTechAssignModal(null)}
           onSubmit={handleConfirmStartWork}
         />
@@ -3557,6 +4035,14 @@ function Dashboard({ profile, onLogout }) {
         </div>
       )}
 
+      {calendarFor && (
+        <AvailabilityModal
+          profileId={calendarFor.id}
+          name={calendarFor.name}
+          onClose={() => setCalendarFor(null)}
+        />
+      )}
+
       {accountSettingsFor && (
         <AccountSettingsModal
           account={accountSettingsFor}
@@ -3569,74 +4055,56 @@ function Dashboard({ profile, onLogout }) {
         />
       )}
 
-      {/* Equipment report sheet — same filters as the Equipment list. */}
+      {/* Report sheet — the table the Reports page (or the Equipment page's
+          Print Report) built, exactly as previewed. */}
       {reportPrint && (
         <div className="report-print-area">
           <div className="report-print-head">
-            <div className="report-print-school">NORTHERN BUKIDNON STATE COLLEGE · General Services Office</div>
-            <h2 className="report-print-title">Fire Safety Equipment Report</h2>
+            <img className="print-letterhead" src={nbscHeader} alt="Northern Bukidnon State College" />
+            <div className="report-print-school">General Services Office</div>
+            <h2 className="report-print-title">{reportPrint.title}</h2>
+
             <div className="report-print-meta">
-              Generated {formatTimestamp(reportPrint.generatedAt.toISOString())} by {profile.full_name}
+              Filters —{' '}
+              {reportPrint.filterText.map(([label, value], i) => (
+                <span key={label}>
+                  {i > 0 && ' · '}
+                  {label}: <strong>{value}</strong>
+                </span>
+              ))}
             </div>
             <div className="report-print-meta">
-              Filters — Type: <strong>{filterType ? typeLabel(filterType) : 'All types'}</strong>
-              {' · '}Status:{' '}
-              <strong>
-                {filterStatus === '__needs_attention__'
-                  ? 'Needs attention'
-                  : filterStatus
-                  ? STATUS_LABELS[filterStatus] || filterStatus
-                  : 'All statuses'}
-              </strong>
-              {' · '}Building:{' '}
-              <strong>
-                {filterBuilding
-                  ? buildings.find((b) => b.id === filterBuilding)?.building_name || '—'
-                  : 'All buildings'}
-              </strong>
-              {searchTerm.trim() && (
-                <>
-                  {' · '}Search: <strong>"{searchTerm.trim()}"</strong>
-                </>
-              )}
-            </div>
-            <div className="report-print-meta">
-              Total: <strong>{reportPrint.items.length}</strong> unit{reportPrint.items.length === 1 ? '' : 's'}
+              Total: <strong>{reportPrint.total}</strong> {reportPrint.unit}
+              {reportPrint.total === 1 ? '' : 's'}
             </div>
           </div>
           <table className="report-print-table">
             <thead>
               <tr>
-                <th>#</th>
-                <th>Code</th>
-                <th>Type</th>
-                <th>Building</th>
-                <th>Location</th>
-                <th>Status</th>
-                <th>Installed</th>
-                <th>Expires</th>
-                <th>Last inspection</th>
+                {reportPrint.columns.map((c) => (
+                  <th key={c}>{c}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {reportPrint.items.map((item, i) => {
-                const lastInspection = (inspectionsByEquipment[item.id] || [])[0]
-                return (
-                  <tr key={item.id}>
-                    <td>{i + 1}</td>
-                    <td>{item.equipment_code}</td>
-                    <td>{typeLabel(item.equipment_type)}</td>
-                    <td>{item.buildings?.building_name ?? '—'}</td>
-                    <td>{item.exact_location || '—'}</td>
-                    <td>{STATUS_LABELS[item.current_status] || item.current_status}</td>
-                    <td>{item.installation_date ? formatTimestamp(item.installation_date) : '—'}</td>
-                    <td>{item.expiration_date ? formatTimestamp(item.expiration_date) : '—'}</td>
-                    <td>{lastInspection ? formatTimestamp(lastInspection.inspection_date) : 'Never inspected'}</td>
-                  </tr>
-                )
-              })}
+              {reportPrint.rows.map((row, i) => (
+                <tr key={i}>
+                  {row.map((cell, j) => (
+                    <td key={j}>{cell}</td>
+                  ))}
+                </tr>
+              ))}
             </tbody>
           </table>
+          <div className="report-print-signature">
+            <div className="report-print-sig-label">Prepared by:</div>
+            <div className="report-print-sig-name">{profile.full_name}</div>
+            <div className="report-print-sig-role">
+              {profile.role ? profile.role.charAt(0).toUpperCase() + profile.role.slice(1) : ''} · General Services Office
+            </div>
+          </div>
+          {/* The print date: bottom left of every printed page */}
+          <div className="print-footer-date">Date printed: {formatTimestamp(reportPrint.generatedAt.toISOString())}</div>
         </div>
       )}
 
@@ -3673,6 +4141,7 @@ function Dashboard({ profile, onLogout }) {
           completed={completedActions}
           purchaseItems={purchaseRequestItems}
           types={allTypes}
+          preparedBy={profile}
           onClose={() => setShowSummary(false)}
         />
       )}
