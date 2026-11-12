@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabaseClient'
-import { playNotificationSound } from './gsoNotifications'
+import { needsReplacementUnit, playNotificationSound } from './gsoNotifications'
+import { actionForInspection, inspectionPriority as priorityOfInspection, unitsForAssignment } from './reports'
 import { accountErrorMessage, checkAccountFields, checkUsername, USERNAME_HINT } from './staffAccounts'
+import nbscHeader from './assets/nbsc-print-header.png'
 
 /* =====================================================================
    Exports:
@@ -24,7 +26,7 @@ const TYPE_LABELS = {
 
 const ACTION_TYPE_LABELS = {
   repair: 'Repair',
-  replace: 'Replace',
+  replace: 'Replace whole unit',
   battery_replacement: 'Battery Replacement',
   refill: 'Refill',
   inspection: 'Inspection',
@@ -250,6 +252,63 @@ function saveSeen(accountId, list) {
   }
 }
 
+// When each notification first reached this account ("arrived"). The bell
+// shows and sorts by this, newest first. Before, it used the event's own
+// date — e.g. the day a defect was reported — so a notification that came
+// in today about a 24-day-old defect showed "24 days ago" and sat near the
+// bottom of the list.
+const arrivalsKey = (accountId) => `gso-notification-arrivals-${accountId}`
+
+function loadArrivals(accountId) {
+  try {
+    const raw = localStorage.getItem(arrivalsKey(accountId))
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && parsed.times ? parsed : { syncedAt: null, times: {} }
+  } catch {
+    return { syncedAt: null, times: {} }
+  }
+}
+
+function saveArrivals(accountId, arrivals) {
+  try {
+    localStorage.setItem(arrivalsKey(accountId), JSON.stringify(arrivals))
+  } catch {
+    /* storage unavailable — arrival times just won't persist */
+  }
+}
+
+// Gives every notification not seen before its arrival time:
+// - the event's own time when the event is newer than the last check (it
+//   happened while the page was closed, or just now) — that is when it came in
+// - "now" when the event is older than the last check (an old item that only
+//   just appeared in the list, e.g. a job sent back to Needs Job Order)
+// - the first time ever on this account, each one simply gets its event time
+// Never later than now (an expiry date can be in the future).
+function stampArrivals(arrivals, notifications) {
+  const now = new Date().getTime()
+  const times = {}
+  let changed = false
+  notifications.forEach((n) => {
+    if (arrivals.times[n.id]) {
+      times[n.id] = arrivals.times[n.id]
+      return
+    }
+    changed = true
+    const event = n.time ? new Date(n.time).getTime() : NaN
+    let at
+    if (!arrivals.syncedAt) at = Number.isNaN(event) ? now : Math.min(event, now)
+    else if (!Number.isNaN(event) && event > arrivals.syncedAt) at = Math.min(event, now)
+    else at = now
+    times[n.id] = new Date(at).toISOString()
+  })
+  // Items no longer in the list are dropped, so the saved map stays small.
+  if (Object.keys(arrivals.times).length !== Object.keys(times).length) changed = true
+  // The "last check" time also moves forward at least once a minute while
+  // the page is open, so an old item that reappears is stamped as arriving now.
+  const stale = !arrivals.syncedAt || now - arrivals.syncedAt > 60 * 1000
+  return changed || stale ? { syncedAt: now, times } : null
+}
+
 function loadSoundOn(accountId) {
   try {
     return localStorage.getItem(soundKey(accountId)) !== 'off'
@@ -272,6 +331,19 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
   const [seen, setSeen] = useState(() => loadSeen(accountId))
   const [soundOn, setSoundOn] = useState(() => loadSoundOn(accountId))
   const [toasts, setToasts] = useState([])
+  const [arrivals, setArrivals] = useState(() => loadArrivals(accountId))
+  // The notification list the arrival times were last updated for.
+  const [stampedFor, setStampedFor] = useState(null)
+
+  // Record when each notification arrived (see stampArrivals) whenever the
+  // list changes. Waits for the dashboard's first load, so the list is
+  // complete before anything is stamped. (Updating state while rendering,
+  // the React-recommended way to follow a changed prop.)
+  if (ready && stampedFor !== notifications) {
+    setStampedFor(notifications)
+    const next = stampArrivals(arrivals, notifications)
+    if (next) setArrivals(next)
+  }
   const [desktopPermission, setDesktopPermission] = useState(
     desktopSupported() ? Notification.permission : 'unsupported'
   )
@@ -321,6 +393,20 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
       })
     }
   }, [notifications, ready, seenSet])
+
+  // Keep the arrival times on this computer, per account.
+  useEffect(() => {
+    if (arrivals.syncedAt) saveArrivals(accountId, arrivals)
+  }, [arrivals, accountId])
+
+  // Newest arrival first. Until a notification is stamped, its event time
+  // stands in, so nothing jumps around on the first load.
+  const sorted = useMemo(() => {
+    const at = (n) => new Date(arrivals.times[n.id] || n.time || 0).getTime()
+    return [...notifications]
+      .map((n) => ({ ...n, arrivedAt: arrivals.times[n.id] || n.time || null }))
+      .sort((a, b) => at(b) - at(a))
+  }, [notifications, arrivals])
 
   // Each popup closes by itself after a few seconds.
   useEffect(() => {
@@ -464,8 +550,14 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                 You&apos;re all caught up. Nothing needs your attention.
               </p>
             ) : (
-              notifications.map((n) => {
+              sorted.map((n) => {
                 const isUnread = !seenSet.has(n.id)
+                // The event's own date, when it differs from the arrival by
+                // more than an hour (e.g. "Reported Oct 17, 2026, 11:33 PM").
+                const showEvent =
+                  n.time &&
+                  n.arrivedAt &&
+                  Math.abs(new Date(n.arrivedAt) - new Date(n.time)) > 60 * 60 * 1000
                 const tone = TONE[n.tone] || TONE.blue
                 return (
                   <div
@@ -502,9 +594,11 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                     <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>
                       <strong>Next:</strong> {n.next}
                     </div>
-                    {n.time && (
+                    {n.arrivedAt && (
                       <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '3px' }}>
-                        {ago(n.time)}
+                        {ago(n.arrivedAt)}
+                        {showEvent &&
+                          ` · ${n.timeLabel || 'Date'} ${/^\d{4}-\d{2}-\d{2}$/.test(String(n.time)) ? formatDay(n.time) : fmtDateTime(n.time)}`}
                       </div>
                     )}
                   </div>
@@ -616,7 +710,7 @@ const PRIORITY_TAG = {
 }
 
 const PR_STATUS_LABELS = {
-  pending: 'Needs Job Order',
+  pending: 'Proceed to Purchase Request',
   in_progress: 'Job Order in progress',
   unresolved: 'Unresolved',
   delayed: 'Delayed',
@@ -692,11 +786,11 @@ function SummaryRow({ onClick, title, tag, lines }) {
   )
 }
 
-// Shown at the top of Priority Actions when the filter is "All". It gathers,
-// in one place, every unit that needs a Job Order Request and every unit
-// that needs a Purchase Request. Clicking a row opens it in its own filter,
-// where the action buttons are.
-export function PriorityActionsSummary({ jobOrderActions = [], purchaseItems = [], onOpenAction, onOpenExpiry }) {
+// Shown at the top of Priority Actions when the filter is "All": every unit
+// that needs a Purchase Request. (Job Orders are filed from the "Needs Job
+// Order" filter, or from a technician's card — the adviser asked to drop the
+// duplicate Job Order list here.) Clicking a row opens it.
+export function PriorityActionsSummary({ purchaseItems = [], onOpenAction, onOpenExpiry }) {
   const qtyByType = {}
   purchaseItems.forEach((p) => {
     qtyByType[p.type] = (qtyByType[p.type] || 0) + 1
@@ -709,45 +803,10 @@ export function PriorityActionsSummary({ jobOrderActions = [], purchaseItems = [
     >
       <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: '2px' }}>Summary of required requests</div>
       <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '14px' }}>
-        All equipment that needs a Job Order Request or a Purchase Request, gathered in one place.
-        Click an item to open it.
+        All equipment that needs a Purchase Request, gathered in one place. Click an item to open it.
       </div>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-          gap: '14px'
-        }}
-      >
-        <SummaryColumn
-          title="Needs Job Order Request"
-          hint="Reported defects with no technician assigned yet."
-          count={jobOrderActions.length}
-          accent="#d97706"
-        >
-          {jobOrderActions.length === 0 ? (
-            <div style={{ fontSize: '0.85rem', color: 'var(--green)' }}>✓ None — every defect has a Job Order.</div>
-          ) : (
-            jobOrderActions.map((a) => {
-              const p = PRIORITY_TAG[a.priority] || PRIORITY_TAG.medium
-              return (
-                <SummaryRow
-                  key={a.id}
-                  onClick={() => onOpenAction(a)}
-                  title={`${a.equipment?.equipment_code ?? '—'} — ${TYPE_LABELS[a.equipment?.equipment_type] || a.equipment?.equipment_type || ''}`}
-                  tag={<SmallTag bg={p.bg} fg={p.fg}>{a.priority}</SmallTag>}
-                  lines={[
-                    `${a.equipment?.buildings?.building_name ?? 'N/A'} — ${a.equipment?.exact_location ?? ''}`,
-                    a.description,
-                    `Reported ${fmtDateTime(a.reported_date)}`
-                  ]}
-                />
-              )
-            })
-          )}
-        </SummaryColumn>
-
+      <div>
         <SummaryColumn
           title="Needs Purchase Request"
           hint="Units that need a replacement, with no stock on hand to cover them."
@@ -841,6 +900,7 @@ export function SummaryModal({
   completed = [],
   purchaseItems = [],
   types = [],
+  preparedBy = null,
   onClose
 }) {
   const now = new Date()
@@ -911,6 +971,7 @@ export function SummaryModal({
         className="modal-box summary-print-box"
         style={{ maxWidth: '820px', width: '94vw', maxHeight: '90vh', overflowY: 'auto', textAlign: 'left' }}
       >
+        <img className="print-letterhead print-only" src={nbscHeader} alt="Northern Bukidnon State College" />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
           <div>
             <div className="modal-title" style={{ marginBottom: '2px' }}>System Summary</div>
@@ -1067,6 +1128,17 @@ export function SummaryModal({
         <div className="modal-actions no-print">
           <button className="btn btn-primary" onClick={onClose}>Done</button>
         </div>
+        {preparedBy && (
+          <div className="report-print-signature print-only">
+            <div className="report-print-sig-label">Prepared by:</div>
+            <div className="report-print-sig-name">{preparedBy.full_name}</div>
+            <div className="report-print-sig-role">
+              {preparedBy.role ? preparedBy.role.charAt(0).toUpperCase() + preparedBy.role.slice(1) : ''} · General Services Office
+            </div>
+          </div>
+        )}
+        {/* The print date: bottom left of every printed page */}
+        <div className="print-footer-date print-only">Date printed: {fmtDateTime(now)}</div>
       </div>
     </div>
   )
@@ -1081,7 +1153,276 @@ function cleanName(name) {
   return (name || '').replace(/\s*\([^)]*\)\s*$/, '').trim()
 }
 
-export function InspectorsTab({ inspections = [], equipment = [] }) {
+// Calendar day in the Philippines ('YYYY-MM-DD'), so "Today" means the same
+// day here as in the mobile app, whatever this computer's clock is set to.
+function manilaDay(value) {
+  return new Date(value).toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })
+}
+
+// 'YYYY-MM-DD' -> "Nov 11, 2026", built from its parts so it never shifts a day.
+function formatDay(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '')
+  if (!m) return ymd || '—'
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
+const ASSIGN_PRIORITIES = ['critical', 'high', 'medium', 'low']
+const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 }
+
+/* ------------------------------------------------------------------ */
+/* Unavailable dates (set by inspectors / technicians in the app)      */
+/* ------------------------------------------------------------------ */
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+function ymdOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function leaveText(l) {
+  return `${formatDay(l.start_date)}${l.end_date !== l.start_date ? ` – ${formatDay(l.end_date)}` : ''}${l.reason ? ` · ${l.reason}` : ''}`
+}
+
+// True when an unavailable-date range touches the days from..to (YYYY-MM-DD).
+function leaveOverlaps(l, from, to) {
+  return l.start_date <= to && l.end_date >= from
+}
+
+// On an Inspector / Technician card: their current or next unavailable
+// dates (sent from the app). Red when it is today.
+export function LeaveLine({ leaves = [] }) {
+  if (leaves.length === 0) return null
+  const today = ymdOf(new Date())
+  const now = leaves.find((l) => l.start_date <= today && today <= l.end_date)
+  const next = now || leaves[0]
+  return (
+    <div className={`leave-line ${now ? 'now' : ''}`}>
+      {now ? 'Unavailable today: ' : 'Unavailable soon: '}
+      <b>{leaveText(next)}</b>
+      {leaves.length > 1 && ` (+${leaves.length - 1} more)`}
+    </div>
+  )
+}
+
+// In a job order form: a warning when the person chosen is unavailable on
+// any day from today to the due date — so work isn't given to someone who
+// can't do it (e.g. a 2-day leave). The admin can still go ahead.
+export function LeaveWarning({ name, leaves = [], from, to }) {
+  const hits = leaves.filter((l) => leaveOverlaps(l, from, to || from))
+  if (hits.length === 0) return null
+  return (
+    <div className="leave-warning">
+      ⚠ <b>{name}</b> is unavailable on {hits.map(leaveText).join('; ')}. Choose someone else, or
+      set a date when they are back.
+    </div>
+  )
+}
+
+// The calendar button on an Inspector / Technician card.
+export function CalendarButton({ onClick }) {
+  return (
+    <button
+      className="calendar-btn"
+      onClick={onClick}
+      title="Unavailable dates"
+      aria-label="Unavailable dates"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="5" width="18" height="16" rx="2" />
+        <path d="M3 10h18M8 3v4M16 3v4" />
+      </svg>
+    </button>
+  )
+}
+
+// Shows the dates one inspector / technician said they are unavailable
+// (migration 012), as a month calendar plus a list. Read-only for the admin:
+// the person sets them in the mobile app.
+export function AvailabilityModal({ profileId, name, onClose }) {
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState(null)
+  const [month, setMonth] = useState(() => {
+    const d = new Date()
+    return new Date(d.getFullYear(), d.getMonth(), 1)
+  })
+
+  useEffect(() => {
+    supabase
+      .from('staff_unavailability')
+      .select('id, start_date, end_date, reason, created_at')
+      .eq('profile_id', profileId)
+      .order('start_date', { ascending: true })
+      .then(({ data, error: err }) => {
+        if (err) setError('Unavailable dates appear once the latest database update (migration 012) is run.')
+        else setRows(data || [])
+      })
+  }, [profileId])
+
+  const today = ymdOf(new Date())
+  const list = rows || []
+  const inRange = (ymd) => list.find((r) => r.start_date <= ymd && ymd <= r.end_date)
+  const current = list.filter((r) => r.end_date >= today)
+  const onLeaveToday = list.some((r) => r.start_date <= today && today <= r.end_date)
+
+  // The month's days, with blanks before the 1st so weekdays line up.
+  const first = month.getDay()
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
+  const cells = [
+    ...Array.from({ length: first }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) => new Date(month.getFullYear(), month.getMonth(), i + 1))
+  ]
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-box" style={{ maxWidth: '460px', textAlign: 'left' }}>
+        <div className="modal-title" style={{ marginBottom: '2px' }}>Unavailable dates</div>
+        <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+          {name} · set by them in the mobile app
+        </div>
+
+        {error ? (
+          <p className="form-error">{error}</p>
+        ) : rows === null ? (
+          <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
+        ) : (
+          <>
+            {onLeaveToday && <div className="tag tag-red" style={{ marginBottom: '10px' }}>Unavailable today</div>}
+
+            <div className="cal-head">
+              <button className="btn btn-secondary btn-sm" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>
+                ‹
+              </button>
+              <b>{month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</b>
+              <button className="btn btn-secondary btn-sm" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>
+                ›
+              </button>
+            </div>
+            <div className="cal-grid">
+              {WEEKDAYS.map((w) => (
+                <div key={w} className="cal-weekday">{w}</div>
+              ))}
+              {cells.map((d, i) => {
+                if (!d) return <div key={`b${i}`} />
+                const ymd = ymdOf(d)
+                const hit = inRange(ymd)
+                return (
+                  <div
+                    key={ymd}
+                    className={`cal-day ${hit ? 'off' : ''} ${ymd === today ? 'today' : ''}`}
+                    title={hit ? `Unavailable${hit.reason ? `: ${hit.reason}` : ''}` : ''}
+                  >
+                    {d.getDate()}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="chart-legend">
+              <span><i style={{ background: 'var(--red)' }} />Unavailable</span>
+              <span><i style={{ background: 'transparent', border: '2px solid var(--blue)' }} />Today</span>
+            </div>
+
+            <div className="assign-head" style={{ marginTop: '14px' }}>
+              Current and upcoming <span className="assign-count">{current.length}</span>
+            </div>
+            {current.length === 0 ? (
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '6px 0 0 0' }}>
+                No unavailable dates set.
+              </p>
+            ) : (
+              current.map((r) => (
+                <div key={r.id} className="info-line" style={{ marginTop: '6px' }}>
+                  <b>
+                    {formatDay(r.start_date)}
+                    {r.end_date !== r.start_date ? ` – ${formatDay(r.end_date)}` : ''}
+                  </b>
+                  {r.reason ? ` · ${r.reason}` : ''}
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        <div className="modal-actions" style={{ marginTop: '16px' }}>
+          <button className="btn btn-primary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// For a unit that needs a new unit (a fire extinguisher job, or work type
+// "Replace whole unit" — the same rule the Purchase Request summary uses): a tag, and
+// when the storeroom can't cover it, the "Needs a purchase request" button
+// that opens the summary on the dashboard.
+export function ReplacementNote({ action, purchaseItems = [], onOpenPurchaseSummary }) {
+  if (!action || !needsReplacementUnit(action)) return null
+  const needsPurchase = purchaseItems.some((p) => p.actionId === action.id)
+  const open = !['completed'].includes(action.status)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '4px' }}>
+      <span className="tag tag-red">Needs New Unit</span>
+      {needsPurchase ? (
+        <button className="btn btn-outline-red btn-sm" onClick={onOpenPurchaseSummary}>
+          Needs a purchase request
+        </button>
+      ) : (
+        <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+          {open ? 'Stock on hand covers it' : 'Replaced'}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function PriorityPill({ priority }) {
+  if (!priority) {
+    return <span className="tag tag-grey" title="No priority recorded for this inspection">No priority</span>
+  }
+  const p = PRIORITY_TAG[priority] || PRIORITY_TAG.medium
+  return (
+    <SmallTag bg={p.bg} fg={p.fg}>
+      {priority} priority
+    </SmallTag>
+  )
+}
+
+
+// Live progress of one assignment, counted from the inspections this
+// inspector submitted after the assignment was made. Units on hold (a
+// reported defect not yet resolved) can't be inspected, so they are
+// counted apart and don't block the assignment from being done.
+function assignmentProgress(a, equipment, inspections) {
+  const units = unitsForAssignment(a, equipment)
+  const since = new Date(a.created_at).getTime()
+  const inspectedIds = new Set(
+    inspections
+      .filter((i) => i.inspector_id === a.inspector_id && new Date(i.inspection_date).getTime() >= since)
+      .map((i) => i.equipment_id)
+  )
+  const done = units.filter((u) => inspectedIds.has(u.id)).length
+  const onHold = units.filter(
+    (u) => !inspectedIds.has(u.id) && ['defective', 'for_repair', 'for_replacement'].includes(u.current_status)
+  ).length
+  const total = units.length - onHold
+  return { done, total, onHold, complete: total > 0 && done >= total }
+}
+
+export function InspectorsTab({
+  inspections = [],
+  equipment = [],
+  buildings = [],
+  buildingLocations = [],
+  actions = [],
+  purchaseItems = [],
+  onOpenPurchaseSummary,
+  leaves = [],
+  adminName = '',
+  adminRole = 'admin'
+}) {
   const [profiles, setProfiles] = useState([])
   const [expandedKey, setExpandedKey] = useState(null)
   const [showForm, setShowForm] = useState(false)
@@ -1091,20 +1432,142 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
   const [notice, setNotice] = useState(null)
   // Which inspector's Account settings window is open
   const [settingsFor, setSettingsFor] = useState(null)
+  // Inspection assignments (migration 010) and the "Assign inspection" form
+  const [assignments, setAssignments] = useState([])
+  const [assignmentsReady, setAssignmentsReady] = useState(true)
+  const [assignFor, setAssignFor] = useState(null)
+  const [assignForm, setAssignForm] = useState(null)
+  const [assignError, setAssignError] = useState(null)
+  const [assignSaving, setAssignSaving] = useState(false)
+  // Whose unavailable dates are open (calendar button)
+  const [calendarFor, setCalendarFor] = useState(null)
+  // Filters for the open inspection history (dates and priority)
+  const [histFilter, setHistFilter] = useState({ from: '', to: '', priority: '' })
 
   // Inspector accounts, with their usernames (migration 005). Before 005,
   // fall back to reading profiles directly; if the database rules don't
   // allow that either, the list is built from submitted inspections only.
   async function fetchInspectors() {
     const { data, error } = await supabase.rpc('list_staff_accounts')
-    if (!error) return (data || []).filter((a) => a.role === 'inspector')
-    const fallback = await supabase.from('profiles').select('id, full_name, role').eq('role', 'inspector')
-    return !fallback.error && fallback.data ? fallback.data : []
+    let list
+    if (!error) {
+      list = (data || []).filter((a) => a.role === 'inspector')
+    } else {
+      const fallback = await supabase.from('profiles').select('id, full_name, role').eq('role', 'inspector')
+      list = !fallback.error && fallback.data ? fallback.data : []
+    }
+    // Available / Unavailable, set by each inspector in the app (migration
+    // 009). Before 009 the card just shows "App account".
+    const availability = await supabase.rpc('list_staff_availability')
+    if (!availability.error) {
+      const byId = {}
+      ;(availability.data || []).forEach((a) => {
+        byId[a.id] = a.is_available
+      })
+      list = list.map((p) => ({ ...p, is_available: byId[p.id] }))
+    }
+    return list
+  }
+
+  // Open assignments plus cancelled ones are loaded; cancelled ones are
+  // simply not shown. Before migration 010 the table doesn't exist.
+  async function fetchAssignments() {
+    const { data, error } = await supabase
+      .from('inspection_assignments')
+      .select('id, inspector_id, building_id, floor_label, due_date, priority, notes, status, created_by, created_at')
+      .eq('status', 'open')
+      .order('due_date', { ascending: true })
+    if (error) return null
+    return data || []
   }
 
   useEffect(() => {
     fetchInspectors().then(setProfiles)
+    fetchAssignments().then((list) => {
+      setAssignmentsReady(list !== null)
+      setAssignments(list || [])
+    })
   }, [])
+
+  async function reloadAssignments() {
+    const list = await fetchAssignments()
+    setAssignmentsReady(list !== null)
+    setAssignments(list || [])
+  }
+
+  // Opens the inspection Job Order Request form for this inspector.
+  function openAssignForm(accountId) {
+    setAssignFor(accountId)
+    setAssignError(null)
+    setAssignForm({
+      id: crypto.randomUUID(),
+      inspector_id: accountId,
+      building_id: buildings[0]?.id || '',
+      floor_label: '',
+      due_date: manilaDay(new Date()),
+      priority: 'medium',
+      notes: ''
+    })
+  }
+
+  async function saveAssignment() {
+    const r = { name: cleanName(profiles.find((p) => p.id === assignForm.inspector_id)?.full_name) || 'the inspector' }
+    setAssignError(null)
+    if (!assignForm.building_id) {
+      setAssignError('Choose a building.')
+      return
+    }
+    if (!assignForm.due_date) {
+      setAssignError('Choose a due date.')
+      return
+    }
+    if (assignForm.due_date < manilaDay(new Date())) {
+      setAssignError("The due date can't be before today.")
+      return
+    }
+    const covered = unitsForAssignment(
+      { building_id: assignForm.building_id, floor_label: assignForm.floor_label || null },
+      equipment
+    ).length
+    if (covered === 0) {
+      setAssignError('There is no equipment in service there to inspect. Choose another building or floor.')
+      return
+    }
+    setAssignSaving(true)
+    const { error } = await supabase.from('inspection_assignments').insert([
+      {
+        id: assignForm.id,
+        inspector_id: assignForm.inspector_id,
+        building_id: assignForm.building_id,
+        floor_label: assignForm.floor_label || null,
+        due_date: assignForm.due_date,
+        priority: assignForm.priority,
+        notes: assignForm.notes.trim() || null,
+        created_by: adminName || null
+      }
+    ])
+    setAssignSaving(false)
+    if (error) {
+      setAssignError(error.message)
+      return
+    }
+    const b = buildings.find((x) => x.id === assignForm.building_id)
+    setNotice(
+      `Job Order submitted: ${r.name} will inspect ${b?.building_name || 'the building'}${assignForm.floor_label ? ` — ${assignForm.floor_label}` : ''} on or before ${formatDay(assignForm.due_date)}. They get a notification on their phone.`
+    )
+    setAssignFor(null)
+    reloadAssignments()
+  }
+
+  async function cancelAssignment(a, label) {
+    if (!window.confirm(`Cancel this inspection assignment?\n\n${label}\n\nThe inspector is notified.`)) return
+    const { error } = await supabase.from('inspection_assignments').update({ status: 'cancelled' }).eq('id', a.id)
+    if (error) {
+      alert('Could not cancel: ' + error.message)
+      return
+    }
+    reloadAssignments()
+  }
 
   // Creates the inspector's mobile app login (username + password).
   async function handleAddInspector(e) {
@@ -1147,45 +1610,68 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
     return m
   }, [equipment])
 
+  const buildingName = (id) => buildings.find((b) => b.id === id)?.building_name || 'Building'
+
+  // Priority of one inspection in the history — decided the same way as in
+  // the Inspection Report (reports.js).
+  const inspectionPriority = (i) => priorityOfInspection(i, { actions, assignments, equipment })
+  // Counted the same way as the inspector's own app (get_my_stats, migration
+  // 009): an inspection belongs to the account that submitted it. Older
+  // inspections with no account are grouped by the name written on them.
   const rows = useMemo(() => {
-    const map = {}
+    const accounts = {}
+    const legacy = {}
     profiles.forEach((p) => {
       const name = cleanName(p.full_name)
-      if (name) map[name.toLowerCase()] = { name, hasAccount: true, accountId: p.id, username: p.username || null, items: [] }
+      accounts[p.id] = {
+        key: `id-${p.id}`,
+        name: name || 'Unnamed inspector',
+        hasAccount: true,
+        accountId: p.id,
+        username: p.username || null,
+        isAvailable: p.is_available,
+        items: []
+      }
     })
     inspections.forEach((i) => {
+      if (i.inspector_id && accounts[i.inspector_id]) {
+        accounts[i.inspector_id].items.push(i)
+        return
+      }
       const name = cleanName(i.inspector_name) || 'Not recorded'
-      const key = name.toLowerCase()
-      if (!map[key]) map[key] = { name, hasAccount: false, accountId: null, username: null, items: [] }
-      map[key].items.push(i)
+      const k = name.toLowerCase()
+      if (!legacy[k]) {
+        legacy[k] = { key: `name-${k}`, name, hasAccount: false, accountId: null, username: null, items: [] }
+      }
+      legacy[k].items.push(i)
     })
-    const now = new Date()
-    return Object.entries(map)
-      .map(([key, r]) => {
+    const accountNames = new Set(Object.values(accounts).map((r) => r.name.toLowerCase()))
+    return [...Object.values(accounts), ...Object.values(legacy)]
+      .map((r) => {
         const items = [...r.items].sort((a, b) => new Date(b.inspection_date) - new Date(a.inspection_date))
         return {
-          key,
-          name: r.name,
-          hasAccount: r.hasAccount,
-          username: r.username,
-          accountId: r.accountId,
+          ...r,
+          // An old record with the same name as an account is kept apart, so
+          // the account's numbers match what its app shows.
+          olderRecords: !r.hasAccount && accountNames.has(r.name.toLowerCase()),
           items,
           total: items.length,
-          defects: items.filter((i) => i.condition_status === 'defective').length,
-          today: items.filter((i) => sameDay(new Date(i.inspection_date), now)).length,
-          week: items.filter((i) => now - new Date(i.inspection_date) <= 7 * 24 * 60 * 60 * 1000).length,
           last: items[0]?.inspection_date || null
         }
       })
-      .sort((a, b) => a.name.localeCompare(b.name))
+      .sort((a, b) => a.name.localeCompare(b.name) || Number(b.hasAccount) - Number(a.hasAccount))
   }, [profiles, inspections])
+
+  const today = manilaDay(new Date())
+  const floorsFor = (buildingId) =>
+    [...new Set(buildingLocations.filter((l) => l.building_id === buildingId).map((l) => l.floor_label))]
 
   return (
     <div>
       <div className="section-heading">
         <h2>Inspectors</h2>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <span className="count-pill">{rows.length} listed</span>
+          <span className="count-pill neutral">{rows.length} listed</span>
           <button className="btn btn-primary btn-sm" onClick={() => setShowForm((v) => !v)}>
             {showForm ? 'Close' : '+ Add Inspector'}
           </button>
@@ -1235,6 +1721,42 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
         </div>
       )}
 
+      {!assignmentsReady && (
+        <p className="page-hint">
+          Inspection assignments appear once the latest database update (migration 010) is run.
+        </p>
+      )}
+
+      {calendarFor && (
+        <AvailabilityModal
+          profileId={calendarFor.id}
+          name={calendarFor.name}
+          onClose={() => setCalendarFor(null)}
+        />
+      )}
+
+      {assignFor && assignForm && (
+        <InspectionJobOrderModal
+          form={assignForm}
+          setForm={setAssignForm}
+          profile={{ full_name: adminName, role: adminRole }}
+          inspectors={rows.filter((x) => x.hasAccount)}
+          buildings={buildings}
+          floors={floorsFor(assignForm.building_id)}
+          coveredCount={
+            unitsForAssignment(
+              { building_id: assignForm.building_id, floor_label: assignForm.floor_label || null },
+              equipment
+            ).length
+          }
+          error={assignError}
+          saving={assignSaving}
+          leaves={leaves}
+          onCancel={() => setAssignFor(null)}
+          onSubmit={saveAssignment}
+        />
+      )}
+
       {settingsFor && (
         <AccountSettingsModal
           account={settingsFor}
@@ -1250,106 +1772,233 @@ export function InspectorsTab({ inspections = [], equipment = [] }) {
       {rows.length === 0 ? (
         <p style={{ color: 'var(--text-muted)' }}>No inspectors or inspections recorded yet.</p>
       ) : (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-            gap: '14px',
-            marginBottom: '18px'
-          }}
-        >
-          {rows.map((r) => (
-            <div key={r.key} className="panel" style={{ margin: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>
-                {r.name}
-                {r.hasAccount && (
-                  <span style={{ marginLeft: '8px', fontSize: '0.72rem', fontWeight: 600, color: 'var(--blue)' }}>
-                    📱 App account
-                  </span>
-                )}
-              </div>
-              {r.username && (
-                <div style={{ fontSize: '0.82rem', marginTop: '2px' }}>
-                  Username: <strong>{r.username}</strong>
-                </div>
-              )}
-              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                {r.last ? `Last inspection ${ago(r.last)}` : 'No inspections submitted yet'}
-              </div>
+        <div className="card-grid">
+          {rows.map((r) => {
+            // This inspector's open assignments: most urgent first, then
+            // the earliest due date. Finished ones drop off the card.
+            const mine = assignments
+              .filter((a) => a.inspector_id === r.accountId)
+              .map((a) => ({ ...a, progress: assignmentProgress(a, equipment, inspections) }))
+              .filter((a) => !a.progress.complete)
+              .sort(
+                (a, b) =>
+                  PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.due_date.localeCompare(b.due_date)
+              )
 
-              <div style={{ display: 'flex', gap: '18px', marginTop: '12px' }}>
-                <div>
-                  <div style={{ fontSize: '1.3rem', fontWeight: 800 }}>{r.today}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Today</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: '1.3rem', fontWeight: 800 }}>{r.week}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>This week</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: '1.3rem', fontWeight: 800 }}>{r.total}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Total</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: '1.3rem', fontWeight: 800, color: r.defects ? 'var(--red)' : undefined }}>
-                    {r.defects}
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Defects found</div>
-                </div>
-              </div>
-
-              <div className="equipment-actions" style={{ marginTop: '12px', flexWrap: 'wrap' }}>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => setExpandedKey(expandedKey === r.key ? null : r.key)}
-                  disabled={r.total === 0}
-                >
-                  {expandedKey === r.key ? 'Hide inspections' : `View inspections (${r.total})`}
-                </button>
-                {r.accountId && r.username && (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setSettingsFor({ id: r.accountId, full_name: r.name, username: r.username })}
-                  >
-                    Account settings
-                  </button>
-                )}
-              </div>
-
-              {expandedKey === r.key && (
-                <div style={{ marginTop: '12px', borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
-                  {r.items.slice(0, 15).map((i) => {
-                    const failed = i.condition_status === 'defective'
-                    return (
-                      <div
-                        key={i.id}
-                        style={{
-                          borderLeft: `3px solid ${failed ? 'var(--red)' : 'var(--green)'}`,
-                          paddingLeft: '10px',
-                          marginBottom: '8px'
-                        }}
+            return (
+              <div key={r.key} className="info-card">
+                <div className="info-card-top">
+                  <strong>{r.name}</strong>
+                  <span className="tag-row">
+                    {!r.hasAccount ? (
+                      <span className="tag tag-grey">No account</span>
+                    ) : r.isAvailable === undefined ? (
+                      <span className="tag tag-blue">App account</span>
+                    ) : (
+                      <span
+                        className={`tag ${r.isAvailable ? 'tag-green' : 'tag-grey'}`}
+                        title="Set by the inspector in the mobile app"
                       >
-                        <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>
-                          {codeById[i.equipment_id] || 'Equipment'} — {failed ? '⚠ Defective' : '✓ Functional'}
-                        </span>
-                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginLeft: '8px' }}>
-                          {fmtDateTime(i.inspection_date)}
-                        </span>
-                        {i.findings && (
-                          <p style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>{i.findings}</p>
-                        )}
-                      </div>
-                    )
-                  })}
-                  {r.items.length > 15 && (
-                    <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>
-                      Showing the latest 15 of {r.items.length}.
-                    </p>
+                        {r.isAvailable ? 'Available' : 'Unavailable'}
+                      </span>
+                    )}
+                    {r.hasAccount && (
+                      <CalendarButton onClick={() => setCalendarFor({ id: r.accountId, name: r.name })} />
+                    )}
+                  </span>
+                </div>
+                <div className="info-line">
+                  {r.hasAccount ? (
+                    <>
+                      Username <b>{r.username || '—'}</b>
+                    </>
+                  ) : r.olderRecords ? (
+                    'Older records saved under this name, before the app account'
+                  ) : (
+                    'From older inspection records'
                   )}
                 </div>
-              )}
-            </div>
-          ))}
+                <div className="info-line">
+                  Last inspection <b>{r.last ? fmtDateTime(r.last) : 'None yet'}</b>
+                </div>
+                {r.hasAccount && <LeaveLine leaves={leaves.filter((l) => l.profile_id === r.accountId)} />}
+
+                {/* Buildings to inspect, from this inspector's assignments */}
+                <div className="assign-box">
+                  <div className="assign-head">
+                    Buildings to inspect
+                    {r.hasAccount && <span className="assign-count">{mine.length}</span>}
+                  </div>
+                  {!r.hasAccount ? (
+                    <div className="info-line">No app account, so inspections can't be assigned.</div>
+                  ) : mine.length === 0 ? (
+                    <div className="info-line">No buildings assigned yet.</div>
+                  ) : (
+                    mine.map((a) => {
+                      const label = `${buildingName(a.building_id)}${a.floor_label ? ` — ${a.floor_label}` : ' (whole building)'}`
+                      const late = a.due_date < today
+                      const dueToday = a.due_date === today
+                      const pct = a.progress.total ? Math.round((a.progress.done / a.progress.total) * 100) : 0
+                      return (
+                        <div key={a.id} className="assign-row">
+                          <div className="assign-row-top">
+                            <b>{label}</b>
+                            <PriorityPill priority={a.priority} />
+                          </div>
+                          <div className="info-line">
+                            Due <b>{formatDay(a.due_date)}</b>{' '}
+                            {late ? (
+                              <span className="tag tag-red">Overdue — still to do</span>
+                            ) : dueToday ? (
+                              <span className="tag tag-blue">Due today</span>
+                            ) : null}
+                            {leaves.some(
+                              (l) => l.profile_id === r.accountId && leaveOverlaps(l, today, a.due_date < today ? today : a.due_date)
+                            ) && (
+                              <span className="tag tag-red" title="The inspector is unavailable before this is due. Reassign it or move the date.">
+                                Inspector unavailable
+                              </span>
+                            )}
+                          </div>
+                          <div className="info-line">
+                            {a.progress.done} of {a.progress.total} unit{a.progress.total === 1 ? '' : 's'} inspected
+                            {a.progress.onHold > 0 && ` · ${a.progress.onHold} on hold (waiting for GSO)`}
+                          </div>
+                          <div className="assign-bar">
+                            <i style={{ width: `${pct}%` }} />
+                          </div>
+                          {a.notes && <div className="info-line">Note: “{a.notes}”</div>}
+                          <button
+                            className="btn btn-outline-red btn-sm assign-cancel"
+                            onClick={() => cancelAssignment(a, label)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+
+                <div className="info-actions">
+                  {r.hasAccount && assignmentsReady && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => openAssignForm(r.accountId)}
+                      disabled={buildings.length === 0}
+                      title={buildings.length === 0 ? 'Add a building first.' : 'Fill in a Job Order Request for this inspector'}
+                    >
+                      Assign inspection
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      setExpandedKey(expandedKey === r.key ? null : r.key)
+                      setHistFilter({ from: '', to: '', priority: '' })
+                    }}
+                    disabled={r.total === 0}
+                  >
+                    {expandedKey === r.key ? 'Hide inspections' : `View inspections (${r.total})`}
+                  </button>
+                  {r.accountId && r.username && (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => setSettingsFor({ id: r.accountId, full_name: r.name, username: r.username })}
+                    >
+                      Account settings
+                    </button>
+                  )}
+                </div>
+
+                {expandedKey === r.key && (() => {
+                  // Filter by date (Philippine calendar day) and priority.
+                  const f = histFilter
+                  const shown = r.items.filter((i) => {
+                    const day = manilaDay(i.inspection_date)
+                    if (f.from && day < f.from) return false
+                    if (f.to && day > f.to) return false
+                    if (f.priority) {
+                      const p = inspectionPriority(i)
+                      if (f.priority === '__none__' ? p : p !== f.priority) return false
+                    }
+                    return true
+                  })
+                  const backwards = f.from && f.to && f.from > f.to
+                  return (
+                  <div style={{ marginTop: '4px', borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
+                    <div className="hist-filters">
+                      <label>
+                        From
+                        <input type="date" value={f.from} onChange={(e) => setHistFilter({ ...f, from: e.target.value })} />
+                      </label>
+                      <label>
+                        To
+                        <input type="date" value={f.to} onChange={(e) => setHistFilter({ ...f, to: e.target.value })} />
+                      </label>
+                      <label>
+                        Priority
+                        <select value={f.priority} onChange={(e) => setHistFilter({ ...f, priority: e.target.value })}>
+                          <option value="">All</option>
+                          {ASSIGN_PRIORITIES.map((p) => (
+                            <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+                          ))}
+                          <option value="__none__">No priority</option>
+                        </select>
+                      </label>
+                    </div>
+                    {(f.from || f.to || f.priority) && (
+                      <div className="info-line" style={{ marginBottom: '8px' }}>
+                        {backwards ? 'The "From" date is after the "To" date.' : `Showing ${shown.length} of ${r.items.length}.`}{' '}
+                        <button className="link-btn" onClick={() => setHistFilter({ from: '', to: '', priority: '' })}>
+                          Clear filters
+                        </button>
+                      </div>
+                    )}
+                    {shown.length === 0 && !backwards && (
+                      <div className="info-line">No inspections match these filters.</div>
+                    )}
+                    {shown.slice(0, 15).map((i) => {                      const failed = i.condition_status === 'defective'
+                      return (
+                        <div
+                          key={i.id}
+                          style={{
+                            borderLeft: `3px solid ${failed ? 'var(--red)' : 'var(--green)'}`,
+                            paddingLeft: '10px',
+                            marginBottom: '8px'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                              {codeById[i.equipment_id] || 'Equipment'} — {failed ? '⚠ Defective' : '✓ Functional'}
+                            </span>
+                            <PriorityPill priority={inspectionPriority(i)} />
+                          </div>
+                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                            {fmtDateTime(i.inspection_date)}
+                          </span>
+                          {i.findings && (
+                            <p style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>{i.findings}</p>
+                          )}
+                          <ReplacementNote
+                            action={actionForInspection(i, actions)}
+                            purchaseItems={purchaseItems}
+                            onOpenPurchaseSummary={onOpenPurchaseSummary}
+                          />
+                        </div>
+                      )
+                    })}
+                    {shown.length > 15 && (
+                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>
+                        Showing the latest 15 of {shown.length}. Use the dates to see older ones.
+                      </p>
+                    )}
+                  </div>
+                  )
+                })()}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -1412,6 +2061,165 @@ const formGrid = {
   border: '1px solid #cbd5e1'
 }
 
+// The Job Order Request form for an INSPECTOR: the admin assigns a building
+// (or one floor) to inspect, with a due date and a priority. Same layout as
+// the technician's Job Order Request below. Saved to inspection_assignments
+// (migration 010); the form's number is made from the saved row's id.
+function InspectionJobOrderModal({
+  form,
+  setForm,
+  profile,
+  inspectors,
+  buildings,
+  floors,
+  coveredCount,
+  error,
+  saving,
+  leaves = [],
+  onCancel,
+  onSubmit
+}) {
+  const joNumber = `IJO-${new Date().getFullYear()}-${form.id.replace(/-/g, '').slice(0, 5).toUpperCase()}`
+  const inspector = inspectors.find((i) => i.accountId === form.inspector_id)
+  const set = (name) => (e) => setForm((prev) => ({ ...prev, [name]: e.target.value }))
+
+  return (
+    <div className="modal-overlay">
+      <div
+        className="modal-box"
+        style={{ maxWidth: '700px', width: '94vw', maxHeight: '92vh', overflowY: 'auto', textAlign: 'left' }}
+      >
+        <img className="print-letterhead" src={nbscHeader} alt="Northern Bukidnon State College" />
+        <div style={{ textAlign: 'center', borderBottom: '2px solid #0f2a4a', paddingBottom: '10px' }}>
+          <div style={{ fontSize: '0.78rem', color: '#475569' }}>General Services Office</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 800, marginTop: '4px', letterSpacing: '0.04em' }}>
+            JOB ORDER REQUEST
+          </div>
+          <div style={{ fontSize: '0.8rem', color: '#475569' }}>Inspection</div>
+        </div>
+
+        <FormBand>I. Request details</FormBand>
+        <div style={formGrid}>
+          <FormCell label="Job Order No.">{joNumber}</FormCell>
+          <FormCell label="Date requested">{fmtDateTime(new Date())}</FormCell>
+          <FormCell label="Requested by">
+            {profile.full_name} ({profile.role})
+          </FormCell>
+          <FormCell label="Status">Pending submission</FormCell>
+        </div>
+
+        <FormBand>II. Area to inspect</FormBand>
+        <div style={{ ...formGrid, background: '#cbd5e1' }}>
+          <FormCell label="Building">
+            <select
+              value={form.building_id}
+              onChange={(e) => setForm((prev) => ({ ...prev, building_id: e.target.value, floor_label: '' }))}
+            >
+              {buildings.map((b) => (
+                <option key={b.id} value={b.id}>{b.building_name}</option>
+              ))}
+            </select>
+          </FormCell>
+          <FormCell label="Floor">
+            <select value={form.floor_label} onChange={set('floor_label')}>
+              <option value="">Whole building</option>
+              {floors.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+          </FormCell>
+          <FormCell label="Equipment covered" span={2}>
+            {coveredCount} unit{coveredCount === 1 ? '' : 's'} in service
+            {coveredCount === 0 && (
+              <span style={{ color: '#b91c1c' }}> — nothing to inspect here, choose another building or floor</span>
+            )}
+          </FormCell>
+        </div>
+
+        <FormBand>III. Inspection requested</FormBand>
+        <div style={formGrid}>
+          <FormCell label="Priority">
+            <select value={form.priority} onChange={set('priority')}>
+              {ASSIGN_PRIORITIES.map((p) => (
+                <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+              ))}
+            </select>
+          </FormCell>
+          <FormCell label="Inspect on or before">
+            <input type="date" value={form.due_date} min={ymdOf(new Date())} onChange={set('due_date')} />
+          </FormCell>
+        </div>
+
+        <div style={{ marginTop: '12px' }}>
+          <label className="field-label">Remarks / special instructions (optional)</label>
+          <textarea
+            rows={3}
+            placeholder="e.g. Check the fire alarms on this floor first"
+            value={form.notes}
+            onChange={set('notes')}
+          />
+        </div>
+
+        <FormBand>IV. Assigned inspector</FormBand>
+        <div style={{ border: '1px solid #cbd5e1', borderTop: 'none', padding: '10px' }}>
+          <select value={form.inspector_id} onChange={set('inspector_id')}>
+            {inspectors.map((i) => (
+              <option key={i.accountId} value={i.accountId}>
+                {i.name}
+                {i.isAvailable === false ? ' (Unavailable)' : i.isAvailable ? ' (Available)' : ''}
+              </option>
+            ))}
+          </select>
+          <LeaveWarning
+            name={inspector?.name || 'This inspector'}
+            leaves={leaves.filter((l) => l.profile_id === form.inspector_id)}
+            from={ymdOf(new Date())}
+            to={form.due_date}
+          />
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: '18px',
+            marginTop: '26px'
+          }}
+        >
+          {[
+            { name: profile.full_name, caption: 'Requested by' },
+            { name: '', caption: 'Noted by (GSO Head)' },
+            { name: inspector?.name || '', caption: 'Received by (Inspector)' }
+          ].map((sig) => (
+            <div key={sig.caption} style={{ textAlign: 'center' }}>
+              <div
+                style={{
+                  borderBottom: '1px solid #1e293b',
+                  minHeight: '24px',
+                  fontSize: '0.84rem',
+                  fontWeight: 600
+                }}
+              >
+                {sig.name}
+              </div>
+              <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '3px' }}>{sig.caption}</div>
+            </div>
+          ))}
+        </div>
+
+        {error && <p className="form-error" style={{ marginTop: '12px' }}>{error}</p>}
+
+        <div className="modal-actions" style={{ gap: '8px', marginTop: '14px' }}>
+          <button className="btn btn-secondary" onClick={onCancel} disabled={saving}>Cancel</button>
+          <button className="btn btn-primary" onClick={onSubmit} disabled={saving || coveredCount === 0}>
+            {saving ? 'Submitting...' : 'Submit Job Order'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function JobOrderRequestModal({
   modal,
   profile,
@@ -1421,10 +2229,22 @@ export function JobOrderRequestModal({
   onSelectTechnician,
   remarks,
   onRemarksChange,
+  leaves = [],
   onCancel,
   onSubmit
 }) {
   const isReassign = !!modal.isReassign
+  // Warn about the chosen technician's unavailable dates in the next 7 days.
+  const chosenTech = technicians.find((t) => t.id === selectedTechnicianId)
+  const weekAhead = ymdOf(new Date(new Date().getTime() + 7 * 24 * 60 * 60 * 1000))
+  const techLeaveWarning = chosenTech?.profile_id ? (
+    <LeaveWarning
+      name={chosenTech.full_name}
+      leaves={leaves.filter((l) => l.profile_id === chosenTech.profile_id)}
+      from={ymdOf(new Date())}
+      to={weekAhead}
+    />
+  ) : null
 
   const technicianSelect = (
     <>
@@ -1452,6 +2272,7 @@ export function JobOrderRequestModal({
           <div style={{ marginBottom: '14px' }}>
             <label className="field-label">Assign Technician</label>
             {technicianSelect}
+            {techLeaveWarning}
           </div>
           <div className="modal-actions" style={{ gap: '8px' }}>
             <button className="btn btn-secondary" onClick={onCancel}>Cancel</button>
@@ -1472,10 +2293,8 @@ export function JobOrderRequestModal({
         style={{ maxWidth: '700px', width: '94vw', maxHeight: '92vh', overflowY: 'auto', textAlign: 'left' }}
       >
         {/* Letterhead */}
+        <img className="print-letterhead" src={nbscHeader} alt="Northern Bukidnon State College" />
         <div style={{ textAlign: 'center', borderBottom: '2px solid #0f2a4a', paddingBottom: '10px' }}>
-          <div style={{ fontSize: '0.72rem', letterSpacing: '0.08em', color: '#475569' }}>
-            NORTHERN BUKIDNON STATE COLLEGE
-          </div>
           <div style={{ fontSize: '0.78rem', color: '#475569' }}>General Services Office</div>
           <div style={{ fontSize: '1.25rem', fontWeight: 800, marginTop: '4px', letterSpacing: '0.04em' }}>
             JOB ORDER REQUEST
@@ -1540,6 +2359,7 @@ export function JobOrderRequestModal({
         <FormBand>IV. Assigned technician</FormBand>
         <div style={{ border: '1px solid #cbd5e1', borderTop: 'none', padding: '10px' }}>
           {technicianSelect}
+          {techLeaveWarning}
         </div>
 
         {/* Signatures */}
