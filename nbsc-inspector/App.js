@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
@@ -12,11 +12,13 @@ import {
   ScrollView,
   StatusBar,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   useWindowDimensions,
   View
 } from 'react-native'
+import { Ionicons } from '@expo/vector-icons'
 import {
   SafeAreaProvider,
   SafeAreaView,
@@ -40,17 +42,25 @@ import {
   daysUntil,
   formatDateTime,
   findEquipmentByQrCode,
+  getEquipmentOverview,
   getInspectorDashboard,
+  addUnavailableDates,
+  getMyInspectionAssignments,
+  getMyStats,
+  getMyUnavailableDates,
+  removeUnavailableDates,
   getTechnicianDashboard,
   onSignedOut,
   relativeTime,
   restoreSession,
+  setMyAvailability,
   signIn,
   signOut,
   submitInspection,
   updateRepairStatus
 } from './lib/inspector'
 import {
+  equipmentCodeFromTitle,
   getMyNotifications,
   markNotificationsRead,
   onNotificationTap,
@@ -105,26 +115,6 @@ function confirmAction(title, message, confirmText, onConfirm, destructive) {
   ])
 }
 
-// These only need to answer "does this fall in the same window the stat box
-// counted?" — used purely to filter the already-fetched recent-inspections
-// list for the tap-to-expand detail views, not to recompute the counts
-// themselves (those come from the server, which knows the true totals).
-function isToday(dateString) {
-  if (!dateString) return false
-  const d = new Date(dateString)
-  const now = new Date()
-  return (
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  )
-}
-
-function isThisWeek(dateString) {
-  if (!dateString) return false
-  const diffMs = new Date() - new Date(dateString)
-  return diffMs >= 0 && diffMs <= 7 * 24 * 60 * 60 * 1000
-}
 
 function greeting() {
   const h = new Date().getHours()
@@ -164,6 +154,14 @@ function useAutoRefresh(load, ms = 30000) {
 function useDashboard(account) {
   const role = account ? account.role : null
   const [data, setData] = useState(null)
+  // The account's own numbers and Available status (migration 009). Stays
+  // null before 009 is run; the screens then use the dashboard's numbers.
+  const [stats, setStats] = useState(null)
+  // Inspector only: job orders from the GSO (migration 011). Null before
+  // 011 is run; the dashboard then hides the card.
+  const [assignments, setAssignments] = useState(null)
+  // Inspector only: per-type equipment overview (migration 013)
+  const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
@@ -172,7 +170,16 @@ function useDashboard(account) {
       if (!role) return
       if (!silent) setError(null)
       try {
-        setData(role === 'technician' ? await getTechnicianDashboard() : await getInspectorDashboard())
+        const [main, mine, orders, totals] = await Promise.all([
+          role === 'technician' ? getTechnicianDashboard() : getInspectorDashboard(),
+          getMyStats().catch(() => null),
+          role === 'inspector' ? getMyInspectionAssignments().catch(() => null) : null,
+          role === 'inspector' ? getEquipmentOverview().catch(() => null) : null
+        ])
+        setData(main)
+        if (mine) setStats(mine)
+        if (orders) setAssignments(orders)
+        if (totals) setOverview(totals)
         if (silent) setError(null)
       } catch (err) {
         if (!silent) setError(err.message)
@@ -184,6 +191,9 @@ function useDashboard(account) {
 
   useEffect(() => {
     setData(null)
+    setStats(null)
+    setAssignments(null)
+    setOverview(null)
     setError(null)
     if (role) {
       setLoading(true)
@@ -193,7 +203,13 @@ function useDashboard(account) {
 
   useAutoRefresh(load)
 
-  return { data, loading, error, reload: load }
+  // Saves the new status, then shows it.
+  const setAvailable = useCallback(async (available) => {
+    const saved = await setMyAvailability(available)
+    setStats((prev) => (prev ? { ...prev, is_available: saved !== false } : prev))
+  }, [])
+
+  return { data, stats, assignments, overview, loading, error, reload: load, setAvailable }
 }
 
 export default function App() {
@@ -219,11 +235,19 @@ function RootApp() {
   const [equipment, setEquipment] = useState(null)
   const [lastResult, setLastResult] = useState(null)
   const [job, setJob] = useState(null)
+  // Where the equipment screen was opened from ('notifications' or null),
+  // so Cancel / Back returns there.
+  const [detailFrom, setDetailFrom] = useState(null)
   // Rows from the `notifications` table (what was pushed to this phone).
   const [history, setHistory] = useState([])
 
   const dashboard = useDashboard(account)
-  const notif = useNotifications(account, dashboard.data)
+  // The inspector's job orders feed the Notifications "To do" list too.
+  const notifData = useMemo(
+    () => (dashboard.data ? { ...dashboard.data, assignments: dashboard.assignments || [] } : null),
+    [dashboard.data, dashboard.assignments]
+  )
+  const notif = useNotifications(account, notifData)
   const historyUnread = history.filter((h) => !h.read_at)
   const unreadCount = notif.unread + historyUnread.length
 
@@ -280,29 +304,49 @@ function RootApp() {
     }
   }, [accountId])
 
-  // Tapping a notification in the phone's tray opens the Notifications screen.
+  // Tapping a notification in the phone's tray opens what it is about (the
+  // job, or the equipment). If that can't be found, the Notifications screen.
   const goToScreenRef = useRef(null)
+  const openHistoryRef = useRef(null)
   const handledTapRef = useRef(null)
   useEffect(() => {
     if (!accountId) return
-    return onNotificationTap((data, id) => {
+    return onNotificationTap(async (data, id, title) => {
       if (id && handledTapRef.current === id) return
       handledTapRef.current = id
       reloadRef.current(true)
-      getMyNotifications().then(setHistory)
-      if (goToScreenRef.current) goToScreenRef.current('notifications')
+      const rows = await getMyNotifications()
+      setHistory(rows)
+      const row = rows.find((r) => r.id === data.notification_id) || {
+        id: data.notification_id,
+        title,
+        action_id: data.action_id || null,
+        read_at: null
+      }
+      try {
+        await openHistoryRef.current(row, { fresh: true })
+      } catch (err) {
+        if (goToScreenRef.current) goToScreenRef.current('notifications')
+      }
     })
   }, [accountId])
 
-  function handleFound(item) {
+  function handleFound(item, from = null) {
     setEquipment(item)
+    setDetailFrom(from)
     goToScreen('detail')
+  }
+
+  // Opens the equipment a notification is about.
+  async function openEquipmentCode(code) {
+    handleFound(await findEquipmentByQrCode(code), 'notifications')
   }
 
   function goHome() {
     setEquipment(null)
     setLastResult(null)
     setJob(null)
+    setDetailFrom(null)
     dashboard.reload(true)
     goToScreen(account ? homeFor(account.role) : 'login')
   }
@@ -336,34 +380,57 @@ function RootApp() {
   goToScreenRef.current = goToScreen
 
   // Notifications: open what the notification is about.
+  // An open job opens the job; everything else opens its equipment.
   async function openNotification(item) {
     notif.markSeen(item.id)
+    // A job order is about a building: "My job orders" is on the dashboard.
+    if (item.kind === 'jobOrder') {
+      goHome()
+      return
+    }
     if (item.kind === 'job') {
       const j = ((dashboard.data && dashboard.data.assigned) || []).find((x) => x.id === item.jobId)
       if (j) {
         setJob(j)
         goToScreen('techJob')
+        return
       }
-      return
     }
-    if (item.kind === 'due' || item.kind === 'hold' || item.kind === 'report') {
-      handleFound(await findEquipmentByQrCode(item.code))
-    }
+    if (item.code) await openEquipmentCode(item.code)
   }
 
-  function openHistory(row) {
-    if (!row.read_at) {
+  // A row from the `notifications` table: marks it read, then opens the job
+  // (technician, job still open) or the equipment it is about.
+  async function openHistory(row, { fresh = false } = {}) {
+    if (row.id && !row.read_at) {
       markNotificationsRead([row.id]).catch(() => {})
       setHistory((prev) =>
         prev.map((h) => (h.id === row.id ? { ...h, read_at: new Date().toISOString() } : h))
       )
     }
-    const j = ((dashboard.data && dashboard.data.assigned) || []).find((x) => x.id === row.action_id)
-    if (j) {
-      setJob(j)
-      goToScreen('techJob')
+    if (account && account.role === 'technician' && row.action_id) {
+      // From the phone's tray the dashboard may not be loaded yet.
+      const assigned = fresh
+        ? ((await getTechnicianDashboard().catch(() => null)) || {}).assigned || []
+        : (dashboard.data && dashboard.data.assigned) || []
+      const j = assigned.find((x) => x.id === row.action_id)
+      if (j) {
+        setJob(j)
+        goToScreen('techJob')
+        return
+      }
     }
+    // An inspection assignment is about a building, not one unit: open the
+    // dashboard (migration 010).
+    if (row.kind === 'inspection_assigned' || row.kind === 'inspection_cancelled') {
+      goHome()
+      return
+    }
+    const code = equipmentCodeFromTitle(row.title)
+    if (!code) throw new Error('This notification is not about a specific unit.')
+    await openEquipmentCode(code)
   }
+  openHistoryRef.current = openHistory
 
   function markAllRead() {
     notif.markAllSeen()
@@ -383,13 +450,17 @@ function RootApp() {
       if (
         screen === 'scan' ||
         screen === 'manual' ||
-        screen === 'detail' ||
+        (screen === 'detail' && detailFrom !== 'notifications') ||
         screen === 'done' ||
         screen === 'techJob' ||
         screen === 'summary' ||
         screen === 'notifications'
       ) {
         goHome()
+        return true
+      }
+      if (screen === 'detail') {
+        setScreen('notifications')
         return true
       }
       if (screen === 'form') {
@@ -400,7 +471,7 @@ function RootApp() {
     }
     const sub = BackHandler.addEventListener('hardwareBackPress', onBack)
     return () => sub.remove()
-  }, [screen, account])
+  }, [screen, account, detailFrom])
 
   const roleLabel = account ? ROLE_LABELS[account.role] || account.role : ''
   const signedIn = account && screen !== 'loading' && screen !== 'login'
@@ -447,12 +518,7 @@ function RootApp() {
       )}
 
       {screen === 'home' && (
-        <HomeScreen
-          account={account}
-          dashboard={dashboard}
-          onManual={() => setScreen('manual')}
-          onOpenEquipment={handleFound}
-        />
+        <HomeScreen account={account} dashboard={dashboard} onOpenEquipment={handleFound} />
       )}
 
       {screen === 'techHome' && (
@@ -499,8 +565,9 @@ function RootApp() {
       {screen === 'detail' && (
         <EquipmentDetail
           equipment={equipment}
+          canInspect={account && account.role === 'inspector'}
           onInspect={() => setScreen('form')}
-          onCancel={goHome}
+          onCancel={detailFrom === 'notifications' ? () => goToScreen('notifications') : goHome}
         />
       )}
 
@@ -549,13 +616,13 @@ function BottomTabs({ role, screen, onNavigate }) {
   const tabs =
     role === 'technician'
       ? [
-          { key: 'techHome', icon: '▦', label: 'Dashboard' },
-          { key: 'summary', icon: '📊', label: 'Summary' }
+          { key: 'techHome', icon: 'home-outline', label: 'Dashboard' },
+          { key: 'summary', icon: 'bar-chart-outline', label: 'Summary' }
         ]
       : [
-          { key: 'home', icon: '▦', label: 'Dashboard' },
-          { key: 'scan', icon: '▣', label: 'Scan QR', center: true },
-          { key: 'summary', icon: '📊', label: 'Summary' }
+          { key: 'home', icon: 'home-outline', label: 'Dashboard' },
+          { key: 'scan', icon: 'scan-outline', label: 'Scan QR', center: true },
+          { key: 'summary', icon: 'bar-chart-outline', label: 'Summary' }
         ]
 
   return (
@@ -566,7 +633,7 @@ function BottomTabs({ role, screen, onNavigate }) {
           return (
             <Pressable key={t.key} style={s.tab} onPress={() => onNavigate(t.key)}>
               <View style={s.scanTabBtn}>
-                <Text style={s.scanTabIcon}>{t.icon}</Text>
+                <Ionicons name={t.icon} size={24} color={C.white} />
               </View>
               <Text style={[s.tabLabel, s.tabLabelActive]}>{t.label}</Text>
             </Pressable>
@@ -574,7 +641,7 @@ function BottomTabs({ role, screen, onNavigate }) {
         }
         return (
           <Pressable key={t.key} style={s.tab} onPress={() => onNavigate(t.key)}>
-            <Text style={[s.tabIcon, active && { color: C.blue }]}>{t.icon}</Text>
+            <Ionicons name={t.icon} size={22} color={active ? C.blue : C.muted} />
             <Text style={[s.tabLabel, active && s.tabLabelActive]}>{t.label}</Text>
           </Pressable>
         )
@@ -697,16 +764,6 @@ function DashTile({ value, label, tone, active, onPress }) {
   )
 }
 
-// A two-colour bar: green part vs red/grey part.
-function SplitBar({ good, bad, badColor = C.red }) {
-  if (good + bad === 0) return null
-  return (
-    <View style={s.splitBar}>
-      {good > 0 && <View style={{ flex: good, backgroundColor: C.green }} />}
-      {bad > 0 && <View style={{ flex: bad, backgroundColor: badColor }} />}
-    </View>
-  )
-}
 
 function ErrorCard({ error }) {
   if (!error) return null
@@ -721,13 +778,15 @@ function ErrorCard({ error }) {
 /* Inspector dashboard                                                 */
 /* ------------------------------------------------------------------ */
 
-function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
-  const { data, loading, error, reload } = dashboard
+function HomeScreen({ account, dashboard, onOpenEquipment }) {
+  const { data, stats, loading, error, reload } = dashboard
   // Separate from `loading` so pull-to-refresh actually shows its spinner.
   const [refreshing, setRefreshing] = useState(false)
   const [openError, setOpenError] = useState(null)
-  // Which stat box's detail list is currently open, if any.
-  const [openStat, setOpenStat] = useState(null)
+  // Which list shows under the boxes.
+  const [listKey, setListKey] = useState('due')
+  const [showAll, setShowAll] = useState(false)
+  const [showAllRecent, setShowAllRecent] = useState(false)
 
   async function onRefresh() {
     setRefreshing(true)
@@ -754,10 +813,7 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
   )
   const onHoldList = (data && data.on_hold) || []
   const recent = (data && data.recent) || []
-  const recentBad = recent.filter((r) => r.condition_status === 'defective').length
-  const recentGood = recent.length - recentBad
   const neverInspectedList = dueList.filter((d) => !d.last_inspected)
-  const lastInspection = recent[0] ? recent[0].inspection_date : null
 
   // The database sends at most 10 rows per list, so the boxes use its real
   // totals (migration 004). Before 004 is run, fall back to the list lengths.
@@ -795,8 +851,7 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
   }
 
   // Open defects: units this inspector reported defective that are still
-  // waiting for GSO. Fixed/replaced ones aren't counted, so the box and its
-  // list always match. Migration 004 sends the complete list; before it,
+  // waiting for GSO. Migration 004 sends the complete list; before it,
   // build it from the recent inspections. One row per unit.
   let openDefects = data && data.open_defects
   if (!openDefects) {
@@ -812,14 +867,29 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
     })
   }
 
-  const toggle = (key) => setOpenStat(openStat === key ? null : key)
+  // My inspections: the same four numbers as this inspector's card on the
+  // web Inspectors page (get_my_stats, migration 009).
+  const mine = {
+    today: stats ? stats.today : data ? data.today_count : 0,
+    week: stats ? stats.week : data ? data.week_count : 0,
+    total: stats ? stats.total : null,
+    defects: stats ? stats.defects : data ? data.defect_count : 0
+  }
 
-  // Lists behind the Due / Never inspected / On hold boxes. `total` is the
-  // real count; the list itself may be capped at 10.
-  const unitLists = {
-    due: { title: 'Can be inspected', items: dueList, total: dueCount },
-    never: { title: 'Never inspected', items: neverInspectedList, total: neverInspected },
-    hold: { title: 'On hold — waiting for GSO', items: onHoldList, total: onHoldCount }
+  // The four boxes pick which list shows below them.
+  const lists = {
+    due: { title: 'Can be inspected', hint: 'Longest since last check first.', items: dueList, total: dueCount, kind: 'unit' },
+    never: { title: 'Never inspected', hint: 'These have no inspection yet.', items: neverInspectedList, total: neverInspected, kind: 'unit' },
+    defects: { title: 'Open defects', hint: 'You reported these. Waiting for GSO.', items: openDefects, total: openDefects.length, kind: 'result' },
+    hold: { title: 'On hold (waiting for GSO)', hint: 'Can be inspected again once GSO records the outcome.', items: onHoldList, total: onHoldCount, kind: 'hold' }
+  }
+  const list = lists[listKey]
+  const shown = showAll ? list.items : list.items.slice(0, 5)
+  const recentShown = showAllRecent ? recent : recent.slice(0, 3)
+
+  function pick(key) {
+    setListKey(key)
+    setShowAll(false)
   }
 
   return (
@@ -836,13 +906,6 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
         }
       />
 
-      <View style={s.quickRow}>
-        <Pressable style={[s.quickBtn, s.quickBtnOutline]} onPress={onManual}>
-          <Text style={[s.quickIcon, { color: C.navy }]}>⌨</Text>
-          <Text style={[s.quickText, { color: C.navy }]}>Enter code</Text>
-        </Pressable>
-      </View>
-
       <ErrorCard error={error || openError} />
 
       {loading && !data ? (
@@ -851,32 +914,67 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
         </View>
       ) : data ? (
         <>
-          <Text style={s.sectionTitle}>Overview</Text>
-          <Text style={s.sectionHint}>Tap a box to see its list.</Text>
-          <View style={s.dashGrid}>
-            <DashTile value={data.today_count} label="Inspected today" tone="blue" active={openStat === 'today'} onPress={() => toggle('today')} />
-            <DashTile value={data.week_count} label="This week" active={openStat === 'week'} onPress={() => toggle('week')} />
-            <DashTile value={openDefects.length} label="Open defects" tone={openDefects.length > 0 ? 'red' : 'green'} active={openStat === 'defects'} onPress={() => toggle('defects')} />
-            <DashTile value={dueCount} label="Can be inspected" tone={dueCount > 0 ? 'amber' : 'green'} active={openStat === 'due'} onPress={() => toggle('due')} />
-            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} active={openStat === 'never'} onPress={() => toggle('never')} />
-            <DashTile value={onHoldCount} label="On hold (GSO)" tone={onHoldCount > 0 ? 'amber' : undefined} active={openStat === 'hold'} onPress={() => toggle('hold')} />
+          <AvailabilityCard dashboard={dashboard} />
+          <UnavailableDatesCard account={account} />
+
+          <JobOrdersCard assignments={dashboard.assignments} />
+
+          <View style={s.card}>
+            <Text style={s.sectionTitle}>My inspections</Text>
+            <View style={s.miniStats}>
+              <MiniStat value={mine.today} label="Today" />
+              <MiniStat value={mine.week} label="This week" />
+              <MiniStat value={mine.total} label="Total" />
+              <MiniStat value={mine.defects} label="Defects" color={mine.defects > 0 ? C.red : undefined} />
+            </View>
+            {mine.total === null && (
+              <Text style={[s.sectionHint, { marginTop: 6, marginBottom: 0 }]}>
+                Total shows once the GSO runs the latest database update.
+              </Text>
+            )}
           </View>
 
-          {openStat && unitLists[openStat] && (
-            <View style={[s.card, { marginBottom: 20 }]}>
-              <View style={s.statPanelHead}>
-                <Text style={s.sectionTitle}>{unitLists[openStat].title}</Text>
-                <Pressable onPress={() => setOpenStat(null)}>
-                  <Text style={s.statPanelClose}>Close</Text>
-                </Pressable>
-              </View>
-              {unitLists[openStat].items.length === 0 ? (
-                <Text style={s.muted}>Nothing here right now.</Text>
-              ) : (
-                unitLists[openStat].items.map((d, i, arr) => (
+          <EquipmentOverviewCard overview={dashboard.overview} />
+
+          <View style={s.dashGrid}>
+            <DashTile value={dueCount} label="Can be inspected" tone={dueCount > 0 ? 'amber' : 'green'} active={listKey === 'due'} onPress={() => pick('due')} />
+            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} active={listKey === 'never'} onPress={() => pick('never')} />
+            <DashTile value={openDefects.length} label="Open defects" tone={openDefects.length > 0 ? 'red' : 'green'} active={listKey === 'defects'} onPress={() => pick('defects')} />
+            <DashTile value={onHoldCount} label="On hold (GSO)" tone={onHoldCount > 0 ? 'amber' : undefined} active={listKey === 'hold'} onPress={() => pick('hold')} />
+          </View>
+
+          <Text style={s.sectionTitle}>{list.title}</Text>
+          <Text style={s.sectionHint}>{list.hint}</Text>
+          <View style={s.card}>
+            {list.items.length === 0 ? (
+              <Text style={s.muted}>
+                {listKey === 'defects'
+                  ? '✓ No open defects. Everything you reported has been resolved by GSO.'
+                  : 'Nothing here right now.'}
+              </Text>
+            ) : (
+              shown.map((d, i) => {
+                const last = i === shown.length - 1
+                if (list.kind === 'result') {
+                  const st = resultState(d)
+                  return (
+                    <View key={d.id} style={[s.listRow, last && s.listRowLast]}>
+                      <View style={s.flex}>
+                        <Text style={s.listCode}>{d.equipment_code}</Text>
+                        <Text style={s.listMeta}>{st.note}</Text>
+                        <Text style={s.listMeta}>Reported {formatDateTime(d.inspection_date)}</Text>
+                      </View>
+                      <View style={[s.tag, st.bg]}>
+                        <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
+                      </View>
+                    </View>
+                  )
+                }
+                const needsAttention = d.current_status && d.current_status !== 'functional'
+                return (
                   <Pressable
                     key={d.id}
-                    style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
+                    style={[s.listRow, last && s.listRowLast]}
                     onPress={() => openFromDue(d.equipment_code)}
                   >
                     <View style={s.flex}>
@@ -887,208 +985,56 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
                       </Text>
                       <Text style={s.listMeta}>{d.exact_location}</Text>
                     </View>
-                    {openStat === 'hold' ? (
+                    {list.kind === 'hold' ? (
                       <View style={[s.tag, s.tagRed]}>
                         <Text style={[s.tagText, { color: C.red }]}>
                           {STATUS_LABELS[d.current_status] || d.current_status}
                         </Text>
                       </View>
                     ) : (
-                      <Text
-                        style={[s.listWhen, !d.last_inspected && { color: C.red, fontWeight: '700' }]}
-                      >
-                        {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
-                      </Text>
+                      <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                        <Text style={[s.listWhen, !d.last_inspected && { color: C.red, fontWeight: '700' }]}>
+                          {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
+                        </Text>
+                        {needsAttention && (
+                          <View style={[s.tag, s.tagRed]}>
+                            <Text style={[s.tagText, { color: C.red }]}>
+                              {STATUS_LABELS[d.current_status] || d.current_status}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
                     )}
-                  </Pressable>
-                ))
-              )}
-              {unitLists[openStat].total > unitLists[openStat].items.length && (
-                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                  Showing {unitLists[openStat].items.length} of {unitLists[openStat].total} — the ones
-                  {openStat === 'hold' ? ' reported most recently' : ' waiting longest'} come first.
-                </Text>
-              )}
-            </View>
-          )}
-
-          {openStat && !unitLists[openStat] &&
-            (() => {
-              const filtered =
-                openStat === 'today'
-                  ? recent.filter((r) => isToday(r.inspection_date))
-                  : openStat === 'week'
-                  ? recent.filter((r) => isThisWeek(r.inspection_date))
-                  : openDefects
-
-              const totalForStat =
-                openStat === 'today'
-                  ? data.today_count
-                  : openStat === 'week'
-                  ? data.week_count
-                  : openDefects.length
-
-              const titleMap = {
-                today: "Today's inspections",
-                week: "This week's inspections",
-                defects: 'Open defects — waiting for GSO'
-              }
-
-              return (
-                <View style={[s.card, { marginBottom: 20 }]}>
-                  <View style={s.statPanelHead}>
-                    <Text style={s.sectionTitle}>{titleMap[openStat]}</Text>
-                    <Pressable onPress={() => setOpenStat(null)}>
-                      <Text style={s.statPanelClose}>Close</Text>
-                    </Pressable>
-                  </View>
-
-                  {filtered.length === 0 ? (
-                    <Text style={s.muted}>
-                      {openStat === 'defects'
-                        ? '✓ No open defects. Everything you reported has been resolved by GSO.'
-                        : totalForStat > 0
-                        ? 'None of these are in your recent list — check your full inspection history.'
-                        : 'Nothing here yet.'}
-                    </Text>
-                  ) : (
-                    filtered.map((r, i) => {
-                      const st = resultState(r)
-                      return (
-                        <View
-                          key={r.id}
-                          style={[s.listRow, i === filtered.length - 1 && s.listRowLast]}
-                        >
-                          <View style={s.flex}>
-                            <Text style={s.listCode}>{r.equipment_code}</Text>
-                            <Text style={s.listMeta}>{st.note}</Text>
-                            <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
-                          </View>
-                          <View style={[s.tag, st.bg]}>
-                            <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
-                          </View>
-                        </View>
-                      )
-                    })
-                  )}
-
-                  {totalForStat > filtered.length && (
-                    <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                      Showing your most recent — the full count ({totalForStat}) may include
-                      older entries not listed here.
-                    </Text>
-                  )}
-                </View>
-              )
-            })()}
-
-          {recent.length > 0 && (
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>Results of your last {recent.length} inspections</Text>
-              <SplitBar good={recentGood} bad={recentBad} />
-              <View style={s.legendRow}>
-                <Text style={[s.legend, { color: C.green }]}>{recentGood} functional</Text>
-                <Text style={[s.legend, { color: C.red }]}>{recentBad} defective</Text>
-              </View>
-              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                Last inspection: {lastInspection ? formatDateTime(lastInspection) : 'none yet'}
-              </Text>
-            </View>
-          )}
-
-          <Text style={s.sectionTitle}>Can be inspected</Text>
-          <Text style={s.sectionHint}>Longest since last check — start here.</Text>
-          <View style={s.card}>
-            {dueList.length === 0 ? (
-              <Text style={s.muted}>Nothing due right now.</Text>
-            ) : (
-              dueList.map((d, i) => {
-                const needsAttention = d.current_status && d.current_status !== 'functional'
-                return (
-                  <Pressable
-                    key={d.id}
-                    style={[s.listRow, i === dueList.length - 1 && s.listRowLast]}
-                    onPress={() => openFromDue(d.equipment_code)}
-                  >
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{d.equipment_code}</Text>
-                      <Text style={s.listMeta}>
-                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
-                        {d.building_name ? ` · ${d.building_name}` : ''}
-                      </Text>
-                      <Text style={s.listMeta}>{d.exact_location}</Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                      <Text
-                        style={[
-                          s.listWhen,
-                          !d.last_inspected && { color: C.red, fontWeight: '700' }
-                        ]}
-                      >
-                        {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
-                      </Text>
-                      {needsAttention && (
-                        <View style={[s.tag, s.tagRed]}>
-                          <Text style={[s.tagText, { color: C.red }]}>
-                            {STATUS_LABELS[d.current_status] || d.current_status}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
                   </Pressable>
                 )
               })
             )}
-          </View>
-
-          {onHoldList.length > 0 && (
-            <>
-              <Text style={s.sectionTitle}>On hold — waiting for GSO</Text>
-              <Text style={s.sectionHint}>
-                A defect was reported on these. They can be inspected again once GSO records the outcome.
+            {list.items.length > 5 && (
+              <Pressable onPress={() => setShowAll(!showAll)} hitSlop={6}>
+                <Text style={s.seeAll}>{showAll ? 'Show less' : `See all ${list.items.length} →`}</Text>
+              </Pressable>
+            )}
+            {list.total > list.items.length && (
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                The app lists {list.items.length} of {list.total}. The ones
+                {listKey === 'hold' ? ' reported most recently' : ' waiting longest'} come first.
               </Text>
-              <View style={s.card}>
-                {onHoldList.map((d, i) => (
-                  <Pressable
-                    key={d.id}
-                    style={[s.listRow, i === onHoldList.length - 1 && s.listRowLast]}
-                    onPress={() => openFromDue(d.equipment_code)}
-                  >
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{d.equipment_code}</Text>
-                      <Text style={s.listMeta}>
-                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
-                        {d.building_name ? ` · ${d.building_name}` : ''}
-                      </Text>
-                      <Text style={s.listMeta}>{d.exact_location}</Text>
-                    </View>
-                    <View style={[s.tag, s.tagRed]}>
-                      <Text style={[s.tagText, { color: C.red }]}>
-                        {STATUS_LABELS[d.current_status] || d.current_status}
-                      </Text>
-                    </View>
-                  </Pressable>
-                ))}
-              </View>
-            </>
-          )}
+            )}
+          </View>
 
           <Text style={s.sectionTitle}>Your recent inspections</Text>
           <View style={[s.card, { marginTop: 8 }]}>
             {recent.length === 0 ? (
               <Text style={s.muted}>Nothing submitted yet.</Text>
             ) : (
-              recent.map((r, i) => {
+              recentShown.map((r, i) => {
                 const st = resultState(r)
                 return (
-                  <View
-                    key={r.id}
-                    style={[s.listRow, i === recent.length - 1 && s.listRowLast]}
-                  >
+                  <View key={r.id} style={[s.listRow, i === recentShown.length - 1 && s.listRowLast]}>
                     <View style={s.flex}>
                       <Text style={s.listCode}>{r.equipment_code}</Text>
                       <Text style={s.listMeta}>{st.note}</Text>
-                      <Text style={s.listMeta}>{relativeTime(r.inspection_date)}</Text>
+                      <Text style={s.listMeta}>{formatDateTime(r.inspection_date)}</Text>
                     </View>
                     <View style={[s.tag, st.bg]}>
                       <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
@@ -1097,10 +1043,449 @@ function HomeScreen({ account, dashboard, onManual, onOpenEquipment }) {
                 )
               })
             )}
+            {recent.length > 3 && (
+              <Pressable onPress={() => setShowAllRecent(!showAllRecent)} hitSlop={6}>
+                <Text style={s.seeAll}>{showAllRecent ? 'Show less' : `See your last ${recent.length} →`}</Text>
+              </Pressable>
+            )}
           </View>
         </>
       ) : null}
     </ScrollView>
+  )
+}
+
+// 'YYYY-MM-DD' for today on this phone, and a date-only string shown as
+// "Nov 12, 2026" without the one-day shift a bare date gets when read as UTC.
+function todayYmd() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+function formatYmd(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '')
+  if (!m) return ymd || ''
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
+// Inspector: the job orders the GSO gave them (a building or one floor to
+// inspect, by a date). Most urgent first, then the earliest due date — the
+// database sends them in that order. Tap one to see its units and which are
+// ready to inspect (by scanning their QR sticker). A job order leaves the
+// list once every unit is inspected.
+function JobOrdersCard({ assignments }) {
+  const [openId, setOpenId] = useState(null)
+  // Before migration 011 there is nothing to show.
+  if (!assignments) return null
+  const today = todayYmd()
+
+  return (
+    <View style={s.card}>
+      <Text style={s.sectionTitle}>My job orders</Text>
+      <Text style={[s.sectionHint, { marginBottom: 4 }]}>
+        From the GSO. Most urgent first. Tap one to see what to inspect.
+      </Text>
+      {assignments.length === 0 ? (
+        <Text style={s.muted}>No job orders right now.</Text>
+      ) : (
+        assignments.map((a, idx) => {
+          const pc = PRIORITY_COLORS[a.priority] || PRIORITY_COLORS.medium
+          const late = a.due_date < today
+          const dueToday = a.due_date === today
+          const total = Number(a.total || 0)
+          const done = Number(a.done || 0)
+          const onHold = Number(a.on_hold || 0)
+          const open = openId === a.id
+          return (
+            <View key={a.id} style={[s.jobOrder, { borderLeftColor: pc.fg }, idx === 0 && { marginTop: 6 }]}>
+              <Pressable onPress={() => setOpenId(open ? null : a.id)}>
+                <View style={s.jobOrderTop}>
+                  <Text style={[s.listCode, s.flex]}>
+                    {a.building_name}
+                    {a.floor_label ? ` — ${a.floor_label}` : ' (whole building)'}
+                  </Text>
+                  <View style={[s.tag, { backgroundColor: pc.bg }]}>
+                    <Text style={[s.tagText, { color: pc.fg }]}>
+                      {a.priority.charAt(0).toUpperCase() + a.priority.slice(1)}
+                    </Text>
+                  </View>
+                </View>
+                <View style={s.jobOrderLine}>
+                  <Text style={s.listMeta}>Inspect on or before {formatYmd(a.due_date)}</Text>
+                  {late ? (
+                    <View style={[s.tag, s.tagRed]}>
+                      <Text style={[s.tagText, { color: C.red }]}>Overdue</Text>
+                    </View>
+                  ) : dueToday ? (
+                    <View style={[s.tag, { backgroundColor: C.blueBg }]}>
+                      <Text style={[s.tagText, { color: C.blue }]}>Due today</Text>
+                    </View>
+                  ) : null}
+                </View>
+                <Text style={s.listMeta}>
+                  {done} of {total} unit{total === 1 ? '' : 's'} inspected
+                  {onHold > 0 ? ` · ${onHold} on hold (waiting for GSO)` : ''}
+                </Text>
+                <View style={s.jobOrderBar}>
+                  <View style={{ width: `${total ? (done / total) * 100 : 0}%`, height: '100%', backgroundColor: C.green }} />
+                </View>
+                {a.notes ? <Text style={[s.listMeta, { color: C.text }]}>GSO says: “{a.notes}”</Text> : null}
+                <Text style={s.jobOrderToggle}>{open ? 'Hide units ▲' : 'Show units ▼'}</Text>
+              </Pressable>
+
+              {open && (
+                <Text style={[s.sectionHint, { marginTop: 6, marginBottom: 0 }]}>
+                  Go to each unit and scan its QR sticker to inspect it.
+                </Text>
+              )}
+
+              {open &&
+                (a.units || []).map((u, i, arr) => {
+                  const hold = !u.inspected && OPEN_PROBLEM_STATUSES.includes(u.current_status)
+                  return (
+                    <View key={u.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
+                      <View style={s.flex}>
+                        <Text style={s.listCode}>{u.equipment_code}</Text>
+                        <Text style={s.listMeta}>
+                          {TYPE_LABELS[u.equipment_type] || u.equipment_type} · {u.exact_location}
+                        </Text>
+                      </View>
+                      {u.inspected ? (
+                        <View style={[s.tag, s.tagGreen]}>
+                          <Text style={[s.tagText, { color: C.green }]}>✓ Inspected</Text>
+                        </View>
+                      ) : hold ? (
+                        <View style={[s.tag, { backgroundColor: C.amberBg }]}>
+                          <Text style={[s.tagText, { color: C.amber }]}>On hold</Text>
+                        </View>
+                      ) : (
+                        // Only a label: the inspection starts by scanning the
+                        // unit's QR sticker, which proves the inspector is there.
+                        <View style={[s.tag, { backgroundColor: C.blueBg }]}>
+                          <Text style={[s.tagText, { color: C.blue }]} numberOfLines={1}>
+                            Ready to inspect
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  )
+                })}
+            </View>
+          )
+        })
+      )}
+    </View>
+  )
+}
+
+// Inspector: per equipment type, how many units in service there are, how
+// many were inspected this month, and how many work / need attention. The
+// system counts these from every inspection and repair — the same numbers
+// as the web Stock page. Example: "Fire Extinguisher — 1 of 20 inspected
+// this month · 18 functional · 2 need attention".
+function EquipmentOverviewCard({ overview }) {
+  // Before migration 013 there is nothing to show.
+  if (!overview || overview.length === 0) return null
+  return (
+    <View style={s.card}>
+      <Text style={s.sectionTitle}>Equipment overview</Text>
+      <Text style={[s.sectionHint, { marginBottom: 4 }]}>All units in service, by type. Updated with every inspection.</Text>
+      {overview.map((o, i) => {
+        const total = Number(o.total || 0)
+        const ok = Number(o.functional || 0)
+        const bad = Number(o.needs_attention || 0)
+        const inspected = Number(o.inspected || 0)
+        return (
+          <View key={o.equipment_type} style={[s.overviewRow, i === 0 && { borderTopWidth: 0 }]}>
+            <View style={s.jobOrderTop}>
+              <Text style={[s.listCode, s.flex]}>{TYPE_LABELS[o.equipment_type] || o.equipment_type}</Text>
+              <Text style={s.listCode}>{total}</Text>
+            </View>
+            <Text style={s.listMeta}>
+              Inspected this month: <Text style={{ fontWeight: '700', color: C.text }}>{inspected} of {total}</Text>
+              {inspected > 0 ? ` · ${o.inspected_ok} functional · ${o.inspected_bad} defective` : ''}
+            </Text>
+            <View style={s.jobOrderBar}>
+              {ok > 0 && <View style={{ width: `${(ok / Math.max(1, total)) * 100}%`, height: '100%', backgroundColor: C.green }} />}
+              {bad > 0 && <View style={{ width: `${(bad / Math.max(1, total)) * 100}%`, height: '100%', backgroundColor: C.red }} />}
+            </View>
+            <Text style={s.listMeta}>
+              <Text style={{ color: C.green, fontWeight: '700' }}>{ok} functional ({total ? Math.round((ok / total) * 100) : 0}%)</Text>
+              {'  ·  '}
+              <Text style={{ color: C.red, fontWeight: '700' }}>{bad} need attention ({total ? Math.round((bad / total) * 100) : 0}%)</Text>
+            </Text>
+          </View>
+        )
+      })}
+    </View>
+  )
+}
+
+// One number with its label, in the "My inspections" / "My jobs" row. The
+// same numbers, in the same order, as the person's card on the web.
+function MiniStat({ value, label, color }) {
+  return (
+    <View style={s.miniStat}>
+      <Text style={[s.miniStatValue, color && { color }]}>{value == null ? '—' : value}</Text>
+      <Text style={s.miniStatLabel}>{label}</Text>
+    </View>
+  )
+}
+
+const CAL_WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
+
+function ymdOfDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// Dates the inspector / technician will be unavailable (migration 012).
+// Tap "Add dates", tap the first day and the last day on the calendar, add a
+// reason if you like, then Save. The GSO sees them on the web (calendar
+// button on your card).
+function UnavailableDatesCard({ account }) {
+  const [rows, setRows] = useState(undefined) // undefined = loading, null = not set up yet
+  const [open, setOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [month, setMonth] = useState(() => {
+    const d = new Date()
+    return new Date(d.getFullYear(), d.getMonth(), 1)
+  })
+  const [start, setStart] = useState(null)
+  const [end, setEnd] = useState(null)
+  const [reason, setReason] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await getMyUnavailableDates())
+    } catch (e) {
+      setErr(e.message)
+      setRows([])
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  // Before migration 012 there is nothing to show.
+  if (rows === undefined || rows === null) return null
+
+  const today = ymdOfDate(new Date())
+  const upcoming = rows.filter((r) => r.end_date >= today)
+
+  function pickDay(ymd) {
+    if (ymd < today) return
+    // First tap = first day; second tap = last day (either order).
+    if (!start || end) {
+      setStart(ymd)
+      setEnd(null)
+    } else if (ymd < start) {
+      setEnd(start)
+      setStart(ymd)
+    } else {
+      setEnd(ymd)
+    }
+  }
+
+  function startAdding() {
+    setAdding(true)
+    setStart(null)
+    setEnd(null)
+    setReason('')
+    setErr(null)
+  }
+
+  async function save() {
+    if (!start) return
+    setErr(null)
+    setSaving(true)
+    try {
+      await addUnavailableDates(account.id, start, end || start, reason)
+      setAdding(false)
+      await load()
+    } catch (e) {
+      setErr(e.message)
+    }
+    setSaving(false)
+  }
+
+  function remove(r) {
+    const label = r.end_date !== r.start_date ? `${formatYmd(r.start_date)} – ${formatYmd(r.end_date)}` : formatYmd(r.start_date)
+    confirmAction('Remove these dates?', `${label}\n\nThe GSO will see you as available on these days again.`, 'Remove', async () => {
+      try {
+        await removeUnavailableDates(r.id)
+        await load()
+      } catch (e) {
+        setErr(e.message)
+      }
+    }, true)
+  }
+
+  const first = month.getDay()
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate()
+  const cells = [
+    ...Array.from({ length: first }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) => ymdOfDate(new Date(month.getFullYear(), month.getMonth(), i + 1)))
+  ]
+  const last = end || start
+  const isPicked = (ymd) => start && ymd >= start && ymd <= last
+  const isSaved = (ymd) => rows.some((r) => r.start_date <= ymd && ymd <= r.end_date)
+
+  return (
+    <View style={s.card}>
+      <Pressable style={s.availCard} onPress={() => setOpen(!open)}>
+        <Ionicons name="calendar-outline" size={22} color={C.navy} />
+        <View style={s.flex}>
+          <Text style={s.availLabel}>Unavailable dates</Text>
+          <Text style={s.availHint}>
+            {upcoming.length === 0
+              ? 'None set. Tap to add the days you will be away.'
+              : `${upcoming.length} upcoming · next: ${formatYmd(upcoming[0].start_date)}`}
+          </Text>
+        </View>
+        <Text style={s.jobOrderToggle}>{open ? '▲' : '▼'}</Text>
+      </Pressable>
+
+      {open && (
+        <View style={{ marginTop: 10 }}>
+          {upcoming.map((r) => (
+            <View key={r.id} style={s.listRow}>
+              <View style={s.flex}>
+                <Text style={s.listCode}>
+                  {formatYmd(r.start_date)}
+                  {r.end_date !== r.start_date ? ` – ${formatYmd(r.end_date)}` : ''}
+                </Text>
+                {r.reason ? <Text style={s.listMeta}>{r.reason}</Text> : null}
+              </View>
+              <Pressable onPress={() => remove(r)} hitSlop={8}>
+                <Text style={[s.statPanelClose, { color: C.red }]}>Remove</Text>
+              </Pressable>
+            </View>
+          ))}
+
+          {!adding ? (
+            <Pressable style={[s.smallBtn, s.smallBtnPrimary, { marginTop: 10 }]} onPress={startAdding}>
+              <Text style={s.smallBtnPrimaryText}>+ Add dates</Text>
+            </Pressable>
+          ) : (
+            <View style={{ marginTop: 10 }}>
+              <View style={s.calHead}>
+                <Pressable hitSlop={8} onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>
+                  <Ionicons name="chevron-back" size={20} color={C.text} />
+                </Pressable>
+                <Text style={s.listCode}>
+                  {month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+                </Text>
+                <Pressable hitSlop={8} onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>
+                  <Ionicons name="chevron-forward" size={20} color={C.text} />
+                </Pressable>
+              </View>
+              <View style={s.calGrid}>
+                {CAL_WEEKDAYS.map((w, i) => (
+                  <Text key={`w${i}`} style={s.calWeekday}>{w}</Text>
+                ))}
+                {cells.map((ymd, i) => {
+                  if (!ymd) return <View key={`b${i}`} style={s.calCell} />
+                  const past = ymd < today
+                  const picked = isPicked(ymd)
+                  const saved = isSaved(ymd)
+                  return (
+                    <Pressable
+                      key={ymd}
+                      style={[s.calCell, saved && s.calSaved, picked && s.calPicked, ymd === today && s.calToday]}
+                      onPress={() => pickDay(ymd)}
+                      disabled={past}
+                    >
+                      <Text style={[s.calDayText, past && { color: C.border }, (picked || saved) && { color: C.white, fontWeight: '800' }]}>
+                        {Number(ymd.slice(8))}
+                      </Text>
+                    </Pressable>
+                  )
+                })}
+              </View>
+              <Text style={[s.availHint, { marginTop: 6 }]}>
+                {!start
+                  ? 'Tap the first day you will be unavailable.'
+                  : !end
+                  ? `${formatYmd(start)} · tap the last day (or Save for one day).`
+                  : `${formatYmd(start)} – ${formatYmd(end)}`}
+              </Text>
+              <TextInput
+                style={[s.input, { marginTop: 8 }]}
+                value={reason}
+                onChangeText={setReason}
+                placeholder="Reason (optional), e.g. Sick leave"
+              />
+              <View style={s.nextJobActions}>
+                <Pressable style={[s.smallBtn, s.smallBtnGhost]} onPress={() => setAdding(false)} disabled={saving}>
+                  <Text style={s.smallBtnGhostText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[s.smallBtn, s.smallBtnPrimary, (!start || saving) && { opacity: 0.5 }]}
+                  onPress={save}
+                  disabled={!start || saving}
+                >
+                  <Text style={s.smallBtnPrimaryText}>{saving ? 'Saving...' : 'Save dates'}</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+          {err ? <Text style={[s.error, { marginTop: 8 }]}>{err}</Text> : null}
+        </View>
+      )}
+    </View>
+  )
+}
+
+// Available / Unavailable, set by the inspector or technician themselves.
+// The GSO sees it on the web Inspectors / Technicians page.
+function AvailabilityCard({ dashboard }) {
+  const { stats, setAvailable } = dashboard
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState(null)
+  // Before migration 009 there is nothing to switch.
+  if (!stats) return null
+  const available = stats.is_available !== false
+
+  async function change(next) {
+    setErr(null)
+    setSaving(true)
+    try {
+      await setAvailable(next)
+    } catch (e) {
+      setErr(e.message)
+    }
+    setSaving(false)
+  }
+
+  return (
+    <View style={[s.card, s.availCard]}>
+      <View style={s.flex}>
+        <Text style={s.availLabel}>My status</Text>
+        <Text style={[s.availValue, { color: available ? C.green : C.muted }]}>
+          {available ? '● Available' : '○ Unavailable'}
+        </Text>
+        <Text style={s.availHint}>
+          {available ? 'The GSO sees you as available.' : 'The GSO sees you as unavailable.'}
+        </Text>
+        {err ? <Text style={[s.error, { marginTop: 4 }]}>{err}</Text> : null}
+      </View>
+      {saving ? (
+        <ActivityIndicator color={C.blue} />
+      ) : (
+        <Switch
+          value={available}
+          onValueChange={change}
+          trackColor={{ false: C.border, true: '#86EFAC' }}
+          thumbColor={available ? C.green : '#F1F5F9'}
+        />
+      )}
+    </View>
   )
 }
 
@@ -1120,8 +1505,11 @@ function PriorityTag({ priority }) {
 }
 
 function TechnicianHome({ account, dashboard, onOpenJob }) {
-  const { data, loading, error, reload } = dashboard
+  const { data, stats, loading, error, reload } = dashboard
   const [refreshing, setRefreshing] = useState(false)
+  const [listKey, setListKey] = useState('todo')
+  const [starting, setStarting] = useState(false)
+  const [startError, setStartError] = useState(null)
 
   async function onRefresh() {
     setRefreshing(true)
@@ -1130,39 +1518,47 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
   }
 
   const jobs = (data && data.assigned) || []
-  const todo = (data && data.to_do_count) || 0
-  const awaiting = (data && data.awaiting_gso_count) || 0
-  const done = (data && data.done_count) || 0
-  const working = jobs.filter((j) => j.repair_status === 'working').length
-  const notStarted = jobs.filter((j) => (j.repair_status || 'assigned') === 'assigned').length
-  const urgent = jobs.filter((j) => j.priority === 'critical' || j.priority === 'high').length
-  const total = todo + awaiting + done
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0
-  // The database returns assigned jobs highest priority first.
-  const nextJob = jobs.find((j) => j.repair_status !== 'repaired')
-
-  // Which box's list is open, and the lists behind the boxes. `total` is the
-  // box's number; if the list holds fewer, a "Showing X of N" note appears.
-  const [openStat, setOpenStat] = useState(null)
-  const toggle = (key) => setOpenStat(openStat === key ? null : key)
   const recentDone = (data && data.recent_done) || []
-  const jobLists = {
-    todo: { title: 'To do', items: jobs.filter((j) => j.repair_status !== 'repaired'), total: todo },
-    notStarted: {
-      title: 'Not started',
-      items: jobs.filter((j) => (j.repair_status || 'assigned') === 'assigned'),
-      total: notStarted
-    },
-    working: { title: 'Working on it', items: jobs.filter((j) => j.repair_status === 'working'), total: working },
-    urgent: {
-      title: 'High / critical',
-      items: jobs.filter((j) => j.priority === 'critical' || j.priority === 'high'),
-      total: urgent
-    },
-    awaiting: { title: 'Awaiting GSO', items: jobs.filter((j) => j.repair_status === 'repaired'), total: awaiting },
-    done: { title: 'Completed', items: recentDone, total: done, completed: true }
+  const todoJobs = jobs.filter((j) => j.repair_status !== 'repaired')
+  const awaitingJobs = jobs.filter((j) => j.repair_status === 'repaired')
+  const urgent = todoJobs.filter((j) => j.priority === 'critical' || j.priority === 'high').length
+  // The database returns assigned jobs highest priority first.
+  const nextJob = todoJobs[0]
+
+  // My jobs: the same three numbers as this technician's card on the web
+  // Technicians page (get_my_stats, migration 009).
+  const mine = {
+    assigned: stats ? stats.assigned : data ? data.to_do_count || 0 : 0,
+    working: stats ? stats.working : todoJobs.filter((j) => j.repair_status === 'working').length,
+    completed: stats ? stats.completed : data ? data.done_count || 0 : 0
   }
-  const openList = openStat ? jobLists[openStat] : null
+  const awaitingCount = stats ? stats.awaiting_gso : data ? data.awaiting_gso_count || 0 : 0
+
+  const lists = {
+    todo: { label: 'To do', items: todoJobs, total: mine.assigned },
+    awaiting: { label: 'Awaiting GSO', items: awaitingJobs, total: awaitingCount },
+    done: { label: 'Done', items: recentDone, total: mine.completed, completed: true }
+  }
+  const list = lists[listKey]
+
+  function startWorking(job) {
+    confirmAction(
+      'Start working',
+      `Mark ${job.equipment_code} as "Working on it"? The GSO will see that you started.`,
+      'Start',
+      async () => {
+        setStartError(null)
+        setStarting(true)
+        try {
+          await updateRepairStatus(job.id, 'working')
+          await reload(true)
+        } catch (err) {
+          setStartError(err.message)
+        }
+        setStarting(false)
+      }
+    )
+  }
 
   return (
     <ScrollView
@@ -1173,14 +1569,14 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
         name={account.full_name}
         line={
           data
-            ? todo > 0
-              ? `You have ${todo} job${todo === 1 ? '' : 's'} to do${urgent > 0 ? ` · ${urgent} urgent` : ''}`
+            ? todoJobs.length > 0
+              ? `You have ${mine.assigned} job${mine.assigned === 1 ? '' : 's'} to do${urgent > 0 ? ` · ${urgent} urgent` : ''}`
               : 'No open jobs right now.'
             : null
         }
       />
 
-      <ErrorCard error={error} />
+      <ErrorCard error={error || startError} />
 
       {loading && !data ? (
         <View style={[s.card, s.centerPad]}>
@@ -1188,84 +1584,23 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
         </View>
       ) : data ? (
         <>
-          <Text style={s.sectionTitle}>Overview</Text>
-          <View style={[s.dashGrid, { marginTop: 8 }]}>
-            <DashTile value={todo} label="To do" tone={todo > 0 ? 'red' : undefined} active={openStat === 'todo'} onPress={() => toggle('todo')} />
-            <DashTile value={notStarted} label="Not started" tone={notStarted > 0 ? 'amber' : undefined} active={openStat === 'notStarted'} onPress={() => toggle('notStarted')} />
-            <DashTile value={working} label="Working on it" tone={working > 0 ? 'blue' : undefined} active={openStat === 'working'} onPress={() => toggle('working')} />
-            <DashTile value={urgent} label="High / critical" tone={urgent > 0 ? 'red' : undefined} active={openStat === 'urgent'} onPress={() => toggle('urgent')} />
-            <DashTile value={awaiting} label="Awaiting GSO" active={openStat === 'awaiting'} onPress={() => toggle('awaiting')} />
-            <DashTile value={done} label="Completed" tone="green" active={openStat === 'done'} onPress={() => toggle('done')} />
+          <AvailabilityCard dashboard={dashboard} />
+          <UnavailableDatesCard account={account} />
+
+          <View style={s.card}>
+            <Text style={s.sectionTitle}>My jobs</Text>
+            <View style={s.miniStats}>
+              <MiniStat value={mine.assigned} label="Assigned" />
+              <MiniStat value={mine.working} label="Working" />
+              <MiniStat value={mine.completed} label="Completed" color={mine.completed > 0 ? C.green : undefined} />
+            </View>
           </View>
 
-          {openList && (
-            <View style={[s.card, { marginBottom: 20 }]}>
-              <View style={s.statPanelHead}>
-                <Text style={s.sectionTitle}>{openList.title}</Text>
-                <Pressable onPress={() => setOpenStat(null)}>
-                  <Text style={s.statPanelClose}>Close</Text>
-                </Pressable>
-              </View>
-              {openList.items.length === 0 ? (
-                <Text style={s.muted}>Nothing here right now.</Text>
-              ) : openList.completed ? (
-                openList.items.map((r, i, arr) => (
-                  <View key={r.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{r.equipment_code}</Text>
-                      <Text style={s.listMeta}>{r.description}</Text>
-                      <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
-                    </View>
-                    <View style={[s.tag, s.tagGreen]}>
-                      <Text style={[s.tagText, { color: C.green }]}>Done</Text>
-                    </View>
-                  </View>
-                ))
-              ) : (
-                openList.items.map((j, i, arr) => (
-                  <Pressable
-                    key={j.id}
-                    style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
-                    onPress={() => onOpenJob(j)}
-                  >
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{j.equipment_code}</Text>
-                      <Text style={s.listMeta}>
-                        {TYPE_LABELS[j.equipment_type] || j.equipment_type}
-                        {j.building_name ? ` · ${j.building_name}` : ''}
-                      </Text>
-                      <Text style={[s.listMeta, { color: C.text }]}>{j.description}</Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                      <PriorityTag priority={j.priority} />
-                      <Text style={s.listWhen}>
-                        {REPAIR_STATUS_LABELS[j.repair_status] || j.repair_status}
-                      </Text>
-                    </View>
-                  </Pressable>
-                ))
-              )}
-              {openList.total > openList.items.length && (
-                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                  Showing the {openList.items.length} most recent of {openList.total}.
-                </Text>
-              )}
-            </View>
-          )}
-
-          {total > 0 && (
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>Your progress</Text>
-              <SplitBar good={done} bad={total - done} badColor={C.border} />
-              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                {pct}% of the {total} job{total === 1 ? '' : 's'} assigned to you are completed.
-              </Text>
-            </View>
-          )}
-
           {nextJob && (
-            <Pressable style={[s.card, s.nextJob]} onPress={() => onOpenJob(nextJob)}>
-              <Text style={s.nextJobLabel}>NEXT UP</Text>
+            <View style={[s.card, s.nextJob, { borderLeftColor: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
+              <Text style={[s.nextJobLabel, { color: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
+                NEXT UP
+              </Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
                 <Text style={[s.listCode, { fontSize: 18 }]}>{nextJob.equipment_code}</Text>
                 <PriorityTag priority={nextJob.priority} />
@@ -1276,20 +1611,64 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
                 {nextJob.exact_location ? ` · ${nextJob.exact_location}` : ''}
               </Text>
               <Text style={[s.listMeta, { color: C.text, marginTop: 4 }]}>{nextJob.description}</Text>
-              <Text style={s.nextJobLink}>Open job →</Text>
-            </Pressable>
+              <View style={s.nextJobActions}>
+                <Pressable style={[s.smallBtn, s.smallBtnGhost]} onPress={() => onOpenJob(nextJob)}>
+                  <Text style={s.smallBtnGhostText}>Open job</Text>
+                </Pressable>
+                {(nextJob.repair_status || 'assigned') === 'assigned' ? (
+                  <Pressable
+                    style={[s.smallBtn, s.smallBtnPrimary, starting && { opacity: 0.6 }]}
+                    onPress={() => startWorking(nextJob)}
+                    disabled={starting}
+                  >
+                    <Text style={s.smallBtnPrimaryText}>{starting ? 'Saving...' : 'Start working'}</Text>
+                  </Pressable>
+                ) : (
+                  <View style={[s.smallBtn, { backgroundColor: C.blueBg }]}>
+                    <Text style={[s.smallBtnGhostText, { color: C.blue }]}>Working on it</Text>
+                  </View>
+                )}
+              </View>
+            </View>
           )}
 
-          <Text style={s.sectionTitle}>Assigned to you</Text>
-          <Text style={s.sectionHint}>Highest priority first. Tap a job to open it.</Text>
+          <View style={s.chipRow}>
+            {Object.entries(lists).map(([key, l]) => (
+              <Pressable key={key} style={[s.chip, listKey === key && s.chipActive]} onPress={() => setListKey(key)}>
+                <Text style={[s.chipText, listKey === key && s.chipTextActive]}>
+                  {l.label} · {l.total}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
           <View style={s.card}>
-            {jobs.length === 0 ? (
-              <Text style={s.muted}>No repairs assigned right now. Pull down to refresh.</Text>
+            {list.items.length === 0 ? (
+              <Text style={s.muted}>
+                {listKey === 'todo'
+                  ? 'No repairs assigned right now. Pull down to refresh.'
+                  : listKey === 'awaiting'
+                  ? 'Nothing waiting for the GSO.'
+                  : 'Nothing completed yet.'}
+              </Text>
+            ) : list.completed ? (
+              list.items.map((r, i, arr) => (
+                <View key={r.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{r.equipment_code}</Text>
+                    <Text style={s.listMeta}>{r.description}</Text>
+                    <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
+                  </View>
+                  <View style={[s.tag, s.tagGreen]}>
+                    <Text style={[s.tagText, { color: C.green }]}>Done</Text>
+                  </View>
+                </View>
+              ))
             ) : (
-              jobs.map((j, i) => (
+              list.items.map((j, i, arr) => (
                 <Pressable
                   key={j.id}
-                  style={[s.listRow, i === jobs.length - 1 && s.listRowLast]}
+                  style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
                   onPress={() => onOpenJob(j)}
                 >
                   <View style={s.flex}>
@@ -1310,28 +1689,10 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
                 </Pressable>
               ))
             )}
-          </View>
-
-          <Text style={s.sectionTitle}>Recently completed</Text>
-          <View style={[s.card, { marginTop: 8 }]}>
-            {(data.recent_done || []).length === 0 ? (
-              <Text style={s.muted}>Nothing completed yet.</Text>
-            ) : (
-              data.recent_done.map((r, i) => (
-                <View
-                  key={r.id}
-                  style={[s.listRow, i === data.recent_done.length - 1 && s.listRowLast]}
-                >
-                  <View style={s.flex}>
-                    <Text style={s.listCode}>{r.equipment_code}</Text>
-                    <Text style={s.listMeta}>{r.description}</Text>
-                    <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
-                  </View>
-                  <View style={[s.tag, s.tagGreen]}>
-                    <Text style={[s.tagText, { color: C.green }]}>Done</Text>
-                  </View>
-                </View>
-              ))
+            {list.total > list.items.length && (
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                Showing the {list.items.length} most recent of {list.total}.
+              </Text>
             )}
           </View>
         </>
@@ -1679,7 +2040,7 @@ function ManualEntry({ onFound, onCancel }) {
 /* What the scan reveals                                               */
 /* ------------------------------------------------------------------ */
 
-function EquipmentDetail({ equipment, onInspect, onCancel }) {
+function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) {
   const left = daysUntil(equipment.expiration_date)
   // Permanently retired equipment has nothing left to inspect — a disposed
   // fire extinguisher is physically gone, and anything else in this state
@@ -1710,7 +2071,10 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
 
         <Row label="Building" value={equipment.buildings?.building_name ?? '—'} />
         <Row label="Location" value={equipment.exact_location ?? '—'} />
-        <Row label="Expiration" value={equipment.expiration_date ?? 'Not applicable'} />
+        <Row
+          label="Expiration"
+          value={equipment.expiration_date ? formatYmd(equipment.expiration_date) : 'Not applicable'}
+        />
         {equipment.description ? <Row label="Notes" value={equipment.description} /> : null}
 
         {expired && (
@@ -1743,7 +2107,7 @@ function EquipmentDetail({ equipment, onInspect, onCancel }) {
               This equipment has been retired and is no longer in service.
             </Text>
           </View>
-        ) : (
+        ) : !canInspect ? null : (
           <Pressable
             style={[s.btn, s.btnPrimary, onHold && s.btnDisabled]}
             onPress={onInspect}
@@ -2139,7 +2503,7 @@ const s = StyleSheet.create({
 
   dashGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
   dashTile: {
-    flexBasis: '30%',
+    flexBasis: '45%',
     flexGrow: 1,
     backgroundColor: C.white,
     borderRadius: 12,
@@ -2152,6 +2516,60 @@ const s = StyleSheet.create({
   dashTileValue: { fontSize: 24, fontWeight: '800', color: C.text },
   dashTileLabel: { fontSize: 11, color: C.muted, marginTop: 3, textAlign: 'center' },
   statActive: { borderColor: C.blue, borderWidth: 2, backgroundColor: C.blueBg },
+
+  // "My inspections" / "My jobs": the same numbers as the person's web card
+  miniStats: {
+    flexDirection: 'row',
+    gap: 18,
+    marginTop: 8,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: C.border
+  },
+  miniStat: { minWidth: 52 },
+  miniStatValue: { fontSize: 22, fontWeight: '800', color: C.text },
+  miniStatLabel: { fontSize: 12, color: C.muted, marginTop: 1 },
+
+  availCard: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  availLabel: { fontSize: 12, color: C.muted, fontWeight: '600' },
+  availValue: { fontSize: 16, fontWeight: '800', marginTop: 2 },
+  availHint: { fontSize: 12, color: C.muted, marginTop: 2 },
+
+  jobOrder: {
+    borderWidth: 1,
+    borderColor: C.border,
+    borderLeftWidth: 4,
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 10,
+    backgroundColor: C.white
+  },
+  jobOrderTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  jobOrderLine: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' },
+  jobOrderBar: { height: 6, borderRadius: 3, backgroundColor: C.border, overflow: 'hidden', marginTop: 6, marginBottom: 4, flexDirection: 'row' },
+  overviewRow: { paddingVertical: 10, borderTopWidth: 1, borderTopColor: C.border },
+  jobOrderToggle: { fontSize: 13, fontWeight: '700', color: C.blue, marginTop: 6 },
+
+  // Unavailable dates calendar
+  calHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  calGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  calWeekday: { width: '14.28%', textAlign: 'center', fontSize: 11, fontWeight: '700', color: C.muted, paddingVertical: 4 },
+  calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 8, borderWidth: 2, borderColor: 'transparent' },
+  calSaved: { backgroundColor: C.red },
+  calPicked: { backgroundColor: C.blue },
+  calToday: { borderColor: C.navy },
+  calDayText: { fontSize: 14, color: C.text },
+
+  seeAll: { fontSize: 14, fontWeight: '700', color: C.blue, textAlign: 'center', paddingTop: 12 },
+
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+
+  nextJobActions: { flexDirection: 'row', gap: 10, marginTop: 12 },
+  smallBtn: { flex: 1, borderRadius: 10, paddingVertical: 11, alignItems: 'center' },
+  smallBtnGhost: { borderWidth: 1, borderColor: C.border, backgroundColor: C.white },
+  smallBtnGhostText: { fontSize: 14, fontWeight: '700', color: C.text },
+  smallBtnPrimary: { backgroundColor: C.blue },
+  smallBtnPrimaryText: { fontSize: 14, fontWeight: '700', color: C.white },
 
   splitBar: {
     flexDirection: 'row',

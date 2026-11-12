@@ -104,8 +104,39 @@ function buildTechnicianNotifications(data) {
   return list
 }
 
+// 'YYYY-MM-DD' -> "Nov 12, 2026", without the one-day shift of a UTC read.
+function dueText(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '')
+  if (!m) return ymd || ''
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
 function buildInspectorNotifications(data) {
   const list = []
+
+  // Job orders from the GSO (migration 011), like a technician's job orders.
+  // The id includes the progress, so it shows as unread again when it changes.
+  ;(data.assignments || []).forEach((a) => {
+    const where = `${a.building_name}${a.floor_label ? ` — ${a.floor_label}` : ' (whole building)'}`
+    const prio = a.priority.charAt(0).toUpperCase() + a.priority.slice(1)
+    list.push({
+      id: `order-${a.id}-${a.done}`,
+      kind: 'jobOrder',
+      code: null,
+      title: `Job order: inspect ${where}`,
+      gso: null,
+      detail: `${prio} priority · inspect on or before ${dueText(a.due_date)} · ${a.done} of ${a.total} inspected`,
+      next: a.notes
+        ? `GSO says: "${a.notes}". Open "My job orders" on your dashboard and inspect each unit.`
+        : 'Open "My job orders" on your dashboard and inspect each unit.',
+      time: a.created_at,
+      tone: a.priority === 'critical' || a.priority === 'high' ? 'red' : 'amber'
+    })
+  })
 
   ;(data.on_hold || []).forEach((d) => {
     list.push({
@@ -163,9 +194,10 @@ function buildInspectorNotifications(data) {
     .filter((n) => n.time && n.kind === 'report')
     .sort((a, b) => new Date(b.time) - new Date(a.time))
   const rest = list.filter((n) => !(n.time && n.kind === 'report'))
+  const orders = rest.filter((n) => n.kind === 'jobOrder')
   const holds = rest.filter((n) => n.kind === 'hold')
   const dues = rest.filter((n) => n.kind === 'due')
-  return [...holds, ...dated, ...dues]
+  return [...orders, ...holds, ...dated, ...dues]
 }
 
 /* ------------------------------------------------------------------ */
@@ -264,10 +296,20 @@ export function NotificationsScreen({
   const unread =
     items.filter((i) => i.unread).length + history.filter((h) => !h.read_at).length
 
+  // Tapping opens the job or equipment the notification is about.
   async function open(item) {
     setError(null)
     try {
       await onOpen(item)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function openRow(row) {
+    setError(null)
+    try {
+      if (onOpenHistory) await onOpenHistory(row)
     } catch (err) {
       setError(err.message)
     }
@@ -298,7 +340,7 @@ export function NotificationsScreen({
             return (
               <Pressable
                 key={h.id}
-                onPress={() => onOpenHistory && onOpenHistory(h)}
+                onPress={() => openRow(h)}
                 style={[
                   n.card,
                   { borderLeftWidth: 5, borderLeftColor: tone.bar },
