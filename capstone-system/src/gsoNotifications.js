@@ -117,9 +117,36 @@ export function buildGsoNotifications({
   actions = [],
   expiring = [],
   completed = [],
-  purchaseRequests = []
+  purchaseRequests = [],
+  leaves = []
 }) {
   const list = []
+
+  // Unavailable dates sent by inspectors / technicians from the app
+  // (migration 012). Only ones that are still current or coming up.
+  // leaves: [{ id, start_date, end_date, reason, created_at, name, role }]
+  leaves.forEach((l) => {
+    const when =
+      l.end_date !== l.start_date
+        ? `${formatDateOnly(l.start_date)} – ${formatDateOnly(l.end_date)}`
+        : formatDateOnly(l.start_date)
+    const roleLabel = l.role === 'technician' ? 'Technician' : 'Inspector'
+    list.push({
+      id: `leave-${l.id}`,
+      tone: 'blue',
+      title: `${l.name} will be unavailable`,
+      detail: `${roleLabel} · ${when}${l.reason ? ` · ${l.reason}` : ''}`,
+      next:
+        l.role === 'technician'
+          ? 'Check their job orders. Give urgent ones to another technician if they can’t wait.'
+          : 'Check their inspection job orders due on these dates. Reassign or move the date if needed.',
+      time: l.created_at,
+      timeLabel: 'Sent',
+      target: 'leave',
+      role: l.role,
+      profileId: l.profile_id
+    })
+  })
 
   actions.forEach((a) => {
     const code = a.equipment?.equipment_code || 'Equipment'
@@ -133,6 +160,7 @@ export function buildGsoNotifications({
         detail: `${a.description} (${a.priority} priority) · ${where}`,
         next: 'File a Job Order Request so a technician can be assigned.',
         time: a.reported_date,
+        timeLabel: 'Reported',
         target: 'jobOrder',
         actionId: a.id
       })
@@ -146,6 +174,7 @@ export function buildGsoNotifications({
         detail: a.repair_note ? `Technician note: "${a.repair_note}"` : where,
         next: 'Verify the unit, then open Record Outcome / Close Work.',
         time: a.repaired_at || a.reported_date,
+        timeLabel: a.repaired_at ? 'Marked repaired' : 'Reported',
         target: 'inProgress',
         actionId: a.id
       })
@@ -159,6 +188,7 @@ export function buildGsoNotifications({
         detail: where,
         next: 'No action needed yet. You will be notified when it is repaired.',
         time: a.decided_at || a.reported_date,
+        timeLabel: a.decided_at ? 'Job order filed' : 'Reported',
         target: 'inProgress',
         actionId: a.id
       })
@@ -172,6 +202,7 @@ export function buildGsoNotifications({
         detail: a.outcome_reason ? `Reason: "${a.outcome_reason}"` : where,
         next: 'Reassess the action to try a different repair route.',
         time: a.outcome_at || a.reported_date,
+        timeLabel: a.outcome_at ? 'Marked unresolved' : 'Reported',
         target: 'unresolved',
         actionId: a.id
       })
@@ -196,6 +227,7 @@ export function buildGsoNotifications({
           ? 'The old unit is retired. Make sure its replacement is added in Equipment.'
           : 'No action needed. The record is in the Summary.',
         time: a.completed_date,
+        timeLabel: 'Completed',
         target: 'summary'
       })
     })
@@ -208,6 +240,7 @@ export function buildGsoNotifications({
       detail: `${TYPE_LABELS[p.type] || p.type} · ${p.building ?? 'N/A'} — ${p.location ?? ''}`,
       next: `${p.stockOnHand} ${TYPE_LABELS[p.type] || p.type} in stock. Coordinate a Purchase Request with the Supply Office.`,
       time: p.date,
+      timeLabel: p.status === 'expired' ? 'Expired' : 'Reported',
       target: 'purchase'
     })
   })
@@ -223,10 +256,13 @@ export function buildGsoNotifications({
       detail: `${TYPE_LABELS[item.equipment_type] || item.equipment_type} · ${item.buildings?.building_name ?? 'N/A'} — ${item.exact_location ?? ''}`,
       next: 'Arrange a replacement or refill with the Supply Office.',
       time: item.expiration_date,
+      timeLabel: 'Expiry date',
       target: 'expiry'
     })
   })
 
+  // The bell re-sorts these by when each one arrived (newest first); this
+  // event-time order is only the starting point.
   return list.sort((x, y) => {
     if (!x.time && !y.time) return 0
     if (!x.time) return 1
