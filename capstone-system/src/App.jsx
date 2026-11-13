@@ -1336,12 +1336,16 @@ function Dashboard({ profile, onLogout }) {
           .eq('equipment_id', eq.id)
           .in('status', ['pending', 'in_progress', 'delayed', 'for_disposal', 'unresolved'])
 
-        if (!remainingActions || remainingActions.length === 0) {
+        const noneLeft = !remainingActions || remainingActions.length === 0
+        if (noneLeft) {
           const finalStatus = isFE ? 'no_longer_in_service' : 'functional'
           await supabase.from('equipment').update({ current_status: finalStatus }).eq('id', eq.id)
         }
 
-        if (isFE) {
+        // Only when the unit was actually retired: a fire extinguisher with
+        // another open action stays in service, so no unit leaves the
+        // storeroom and no replacement is needed yet.
+        if (isFE && noneLeft) {
           // Decrement stock. Read the current count from the database rather
           // than the copy on screen, which can be out of date if stock was
           // changed elsewhere since the page loaded.
@@ -1350,7 +1354,8 @@ function Dashboard({ profile, onLogout }) {
             .select('quantity_available')
             .eq('equipment_type', 'fire_extinguisher')
             .maybeSingle()
-          if (currentStock && currentStock.quantity_available > 0) {
+          const stockEmpty = !currentStock || currentStock.quantity_available <= 0
+          if (!stockEmpty) {
             const { error: stockError } = await supabase
               .from('equipment_stock')
               .update({
@@ -1367,7 +1372,8 @@ function Dashboard({ profile, onLogout }) {
             oldCode: eq.equipment_code,
             equipment_type: eq.equipment_type,
             building_id: eq.building_id,
-            exact_location: eq.exact_location
+            exact_location: eq.exact_location,
+            stockEmpty
           })
         }
       }
@@ -4211,6 +4217,11 @@ function Dashboard({ profile, onLogout }) {
               the same location and a 2-year expiration? You can still adjust the details
               afterward.
             </p>
+            {replacementPrompt.stockEmpty && (
+              <div style={{ fontSize: '0.85rem', color: 'var(--red)', margin: '0 0 14px 0', background: 'var(--red-bg)', border: '1px solid var(--red-border)', padding: '10px 12px', borderRadius: '8px' }}>
+                ⚠ The storeroom has no fire extinguishers, so no unit was deducted from stock. Add stock on the Stock page first.
+              </div>
+            )}
             <div className="modal-actions" style={{ gap: '8px' }}>
               <button className="btn btn-secondary" onClick={() => setReplacementPrompt(null)}>
                 Not now
