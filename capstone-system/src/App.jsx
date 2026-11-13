@@ -552,6 +552,9 @@ function Dashboard({ profile, onLogout }) {
   const [jobPickFor, setJobPickFor] = useState(null)
   // Which technician's repair History is open
   const [techHistoryFor, setTechHistoryFor] = useState(null)
+  // Filters and page for the repair history window
+  const [techHistFilter, setTechHistFilter] = useState({ from: '', to: '', priority: '' })
+  const [techHistPage, setTechHistPage] = useState(0)
   // Whose unavailable dates are open (calendar button on a technician card)
   const [calendarFor, setCalendarFor] = useState(null)
   // Which report the Reports page opens on (n changes to reopen it)
@@ -3721,69 +3724,16 @@ function Dashboard({ profile, onLogout }) {
                           </div>
                         )}
 
-                        {/* Repair history: every job this technician was given,
-                            newest first. Units that need a new unit are tagged. */}
-                        {techHistoryFor === t.id && (() => {
-                          const jobs = allActions
-                            .filter((a) => a.assigned_technician_id === t.id)
-                            .sort((a, b) => new Date(b.reported_date) - new Date(a.reported_date))
-                          return (
-                            <div className="assign-box">
-                              <div className="assign-head">
-                                Repair history
-                                <span className="assign-count">{jobs.length}</span>
-                              </div>
-                              {jobs.length === 0 ? (
-                                <div className="info-line">No jobs given to this technician yet.</div>
-                              ) : (
-                                jobs.slice(0, 15).map((a) => {
-                                  const done = a.status === 'completed'
-                                  let status = ACTION_STATUS_LABELS[a.status] || a.status
-                                  if (a.status === 'in_progress' && a.repair_status === 'working') status += ' (working)'
-                                  if (a.status === 'in_progress' && a.repair_status === 'repaired') status += ' (marked repaired)'
-                                  return (
-                                    <div
-                                      key={a.id}
-                                      style={{
-                                        borderLeft: `3px solid ${done ? 'var(--green)' : 'var(--amber)'}`,
-                                        paddingLeft: '10px'
-                                      }}
-                                    >
-                                      <div className="assign-row-top">
-                                        <b>
-                                          {a.equipment?.equipment_code} — {typeLabel(a.equipment?.equipment_type)}
-                                        </b>
-                                        <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
-                                          {a.priority} priority
-                                        </span>
-                                      </div>
-                                      <div className="info-line">{a.description}</div>
-                                      <div className="info-line">
-                                        <b>{status}</b> · reported {formatTimestamp(a.reported_date)}
-                                        {done && a.completed_date ? ` · completed ${formatTimestamp(a.completed_date)}` : ''}
-                                      </div>
-                                      <ReplacementNote
-                                        action={a}
-                                        purchaseItems={purchaseRequestItems}
-                                        onOpenPurchaseSummary={openPurchaseSummary}
-                                      />
-                                    </div>
-                                  )
-                                })
-                              )}
-                              {jobs.length > 15 && (
-                                <div className="info-line">Showing the latest 15 of {jobs.length}.</div>
-                              )}
-                            </div>
-                          )
-                        })()}
-
                         <div className="info-actions">
                           <button
                             className="btn btn-secondary btn-sm"
-                            onClick={() => setTechHistoryFor(techHistoryFor === t.id ? null : t.id)}
+                            onClick={() => {
+                              setTechHistoryFor(t.id)
+                              setTechHistFilter({ from: '', to: '', priority: '' })
+                              setTechHistPage(0)
+                            }}
                           >
-                            {techHistoryFor === t.id ? 'Hide history' : 'History'}
+                            History ({allActions.filter((a) => a.assigned_technician_id === t.id).length})
                           </button>
                           <button
                             className={`btn btn-sm ${jobPickFor === t.id ? 'btn-secondary' : 'btn-primary'}`}
@@ -4034,6 +3984,149 @@ function Dashboard({ profile, onLogout }) {
           </div>
         </div>
       )}
+
+      {/* Repair history: its own window with a compact table, like the
+          inspectors' Inspection history, so the card stays short. */}
+      {techHistoryFor && (() => {
+        const tech = technicians.find((x) => x.id === techHistoryFor)
+        if (!tech) return null
+        const jobs = allActions
+          .filter((a) => a.assigned_technician_id === tech.id)
+          .sort((a, b) => new Date(b.reported_date) - new Date(a.reported_date))
+        // Filter by the day it was reported (Philippine calendar day) and priority.
+        const f = techHistFilter
+        const shown = jobs.filter((a) => {
+          const day = a.reported_date ? manilaDay(a.reported_date) : ''
+          if (f.from && day < f.from) return false
+          if (f.to && day > f.to) return false
+          if (f.priority && a.priority !== f.priority) return false
+          return true
+        })
+        const backwards = f.from && f.to && f.from > f.to
+        const pageSize = 10
+        const pages = Math.max(1, Math.ceil(shown.length / pageSize))
+        const page = Math.min(techHistPage, pages - 1)
+        const pageItems = shown.slice(page * pageSize, (page + 1) * pageSize)
+        const setFilter = (next) => {
+          setTechHistFilter(next)
+          setTechHistPage(0)
+        }
+        return (
+          <div className="modal-overlay" onClick={() => setTechHistoryFor(null)}>
+            <div className="modal-box history-box" onClick={(e) => e.stopPropagation()}>
+              <div className="history-head">
+                <div>
+                  <div className="modal-title" style={{ marginBottom: '2px' }}>Repair history</div>
+                  <div className="info-line">
+                    {tech.full_name} · {jobs.length} job{jobs.length === 1 ? '' : 's'}
+                  </div>
+                </div>
+                <button className="btn btn-secondary btn-sm" onClick={() => setTechHistoryFor(null)}>Close</button>
+              </div>
+
+              <div className="hist-filters">
+                <label>
+                  Reported from
+                  <input type="date" value={f.from} onChange={(e) => setFilter({ ...f, from: e.target.value })} />
+                </label>
+                <label>
+                  To
+                  <input type="date" value={f.to} onChange={(e) => setFilter({ ...f, to: e.target.value })} />
+                </label>
+                <label>
+                  Priority
+                  <select value={f.priority} onChange={(e) => setFilter({ ...f, priority: e.target.value })}>
+                    <option value="">All</option>
+                    {['critical', 'high', 'medium', 'low'].map((p) => (
+                      <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {(f.from || f.to || f.priority) && (
+                <div className="info-line" style={{ marginBottom: '8px' }}>
+                  {backwards ? 'The "From" date is after the "To" date.' : `Showing ${shown.length} of ${jobs.length}.`}{' '}
+                  <button className="link-btn" onClick={() => setFilter({ from: '', to: '', priority: '' })}>
+                    Clear filters
+                  </button>
+                </div>
+              )}
+
+              {backwards ? null : jobs.length === 0 ? (
+                <div className="info-line">No jobs given to this technician yet.</div>
+              ) : shown.length === 0 ? (
+                <div className="info-line">No jobs match these filters.</div>
+              ) : (
+                <div className="history-table-wrap">
+                  <table className="data-table history-table">
+                    <thead>
+                      <tr>
+                        <th>Reported</th>
+                        <th>Code</th>
+                        <th>Problem</th>
+                        <th>Priority</th>
+                        <th>Status</th>
+                        <th>Completed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageItems.map((a) => {
+                        const done = a.status === 'completed'
+                        let status = ACTION_STATUS_LABELS[a.status] || a.status
+                        if (a.status === 'in_progress' && a.repair_status === 'working') status += ' (working)'
+                        if (a.status === 'in_progress' && a.repair_status === 'repaired') status += ' (marked repaired)'
+                        return (
+                          <tr key={a.id}>
+                            <td style={{ whiteSpace: 'nowrap' }}>{formatTimestamp(a.reported_date)}</td>
+                            <td>
+                              <b>{a.equipment?.equipment_code || '—'}</b>
+                              <div className="info-line">{typeLabel(a.equipment?.equipment_type)}</div>
+                            </td>
+                            <td>
+                              {a.description || '—'}
+                              <ReplacementNote
+                                action={a}
+                                purchaseItems={purchaseRequestItems}
+                                onOpenPurchaseSummary={() => {
+                                  setTechHistoryFor(null)
+                                  openPurchaseSummary()
+                                }}
+                              />
+                            </td>
+                            <td>
+                              <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
+                                {a.priority}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`tag ${done ? 'tag-green' : 'tag-amber'}`}>{status}</span>
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>{done && a.completed_date ? formatTimestamp(a.completed_date) : '—'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {!backwards && pages > 1 && (
+                <div className="history-pager">
+                  <button className="btn btn-secondary btn-sm" disabled={page === 0} onClick={() => setTechHistPage(page - 1)}>
+                    ‹ Newer
+                  </button>
+                  <span className="info-line">
+                    Page {page + 1} of {pages} · {page * pageSize + 1}–{Math.min(shown.length, (page + 1) * pageSize)} of {shown.length}
+                  </span>
+                  <button className="btn btn-secondary btn-sm" disabled={page >= pages - 1} onClick={() => setTechHistPage(page + 1)}>
+                    Older ›
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
       {calendarFor && (
         <AvailabilityModal
