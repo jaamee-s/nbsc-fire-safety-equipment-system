@@ -1385,6 +1385,41 @@ input::-ms-clear {
   background: var(--blue-light);
 }
 
+/* Inspection history window */
+.history-box {
+  max-width: 960px;
+  width: 94vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.history-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.history-table td {
+  vertical-align: middle;
+}
+
+.history-pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 /* Filters above an inspector's inspection history */
 .hist-filters {
   display: grid;

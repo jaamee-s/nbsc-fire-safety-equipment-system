@@ -1171,6 +1171,8 @@ function formatDay(ymd) {
 }
 
 const ASSIGN_PRIORITIES = ['critical', 'high', 'medium', 'low']
+// Inspections per page in the inspection history window
+const HISTORY_PAGE_SIZE = 10
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 }
 
 /* ------------------------------------------------------------------ */
@@ -1441,8 +1443,9 @@ export function InspectorsTab({
   const [assignSaving, setAssignSaving] = useState(false)
   // Whose unavailable dates are open (calendar button)
   const [calendarFor, setCalendarFor] = useState(null)
-  // Filters for the open inspection history (dates and priority)
+  // Filters and page for the open inspection history window
   const [histFilter, setHistFilter] = useState({ from: '', to: '', priority: '' })
+  const [histPage, setHistPage] = useState(0)
 
   // Inspector accounts, with their usernames (migration 005). Before 005,
   // fall back to reading profiles directly; if the database rules don't
@@ -1894,12 +1897,13 @@ export function InspectorsTab({
                   <button
                     className="btn btn-secondary btn-sm"
                     onClick={() => {
-                      setExpandedKey(expandedKey === r.key ? null : r.key)
+                      setExpandedKey(r.key)
                       setHistFilter({ from: '', to: '', priority: '' })
+                      setHistPage(0)
                     }}
                     disabled={r.total === 0}
                   >
-                    {expandedKey === r.key ? 'Hide inspections' : `View inspections (${r.total})`}
+                    View inspections ({r.total})
                   </button>
                   {r.accountId && r.username && (
                     <button
@@ -1911,96 +1915,138 @@ export function InspectorsTab({
                   )}
                 </div>
 
-                {expandedKey === r.key && (() => {
-                  // Filter by date (Philippine calendar day) and priority.
-                  const f = histFilter
-                  const shown = r.items.filter((i) => {
-                    const day = manilaDay(i.inspection_date)
-                    if (f.from && day < f.from) return false
-                    if (f.to && day > f.to) return false
-                    if (f.priority) {
-                      const p = inspectionPriority(i)
-                      if (f.priority === '__none__' ? p : p !== f.priority) return false
-                    }
-                    return true
-                  })
-                  const backwards = f.from && f.to && f.from > f.to
-                  return (
-                  <div style={{ marginTop: '4px', borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
-                    <div className="hist-filters">
-                      <label>
-                        From
-                        <input type="date" value={f.from} onChange={(e) => setHistFilter({ ...f, from: e.target.value })} />
-                      </label>
-                      <label>
-                        To
-                        <input type="date" value={f.to} onChange={(e) => setHistFilter({ ...f, to: e.target.value })} />
-                      </label>
-                      <label>
-                        Priority
-                        <select value={f.priority} onChange={(e) => setHistFilter({ ...f, priority: e.target.value })}>
-                          <option value="">All</option>
-                          {ASSIGN_PRIORITIES.map((p) => (
-                            <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
-                          ))}
-                          <option value="__none__">No priority</option>
-                        </select>
-                      </label>
-                    </div>
-                    {(f.from || f.to || f.priority) && (
-                      <div className="info-line" style={{ marginBottom: '8px' }}>
-                        {backwards ? 'The "From" date is after the "To" date.' : `Showing ${shown.length} of ${r.items.length}.`}{' '}
-                        <button className="link-btn" onClick={() => setHistFilter({ from: '', to: '', priority: '' })}>
-                          Clear filters
-                        </button>
-                      </div>
-                    )}
-                    {shown.length === 0 && !backwards && (
-                      <div className="info-line">No inspections match these filters.</div>
-                    )}
-                    {shown.slice(0, 15).map((i) => {                      const failed = i.condition_status === 'defective'
-                      return (
-                        <div
-                          key={i.id}
-                          style={{
-                            borderLeft: `3px solid ${failed ? 'var(--red)' : 'var(--green)'}`,
-                            paddingLeft: '10px',
-                            marginBottom: '8px'
-                          }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' }}>
-                            <span style={{ fontSize: '0.84rem', fontWeight: 600 }}>
-                              {codeById[i.equipment_id] || 'Equipment'} — {failed ? '⚠ Defective' : '✓ Functional'}
-                            </span>
-                            <PriorityPill priority={inspectionPriority(i)} />
-                          </div>
-                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                            {fmtDateTime(i.inspection_date)}
-                          </span>
-                          {i.findings && (
-                            <p style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>{i.findings}</p>
-                          )}
-                          <ReplacementNote
-                            action={actionForInspection(i, actions)}
-                            purchaseItems={purchaseItems}
-                            onOpenPurchaseSummary={onOpenPurchaseSummary}
-                          />
-                        </div>
-                      )
-                    })}
-                    {shown.length > 15 && (
-                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>
-                        Showing the latest 15 of {shown.length}. Use the dates to see older ones.
-                      </p>
-                    )}
-                  </div>
-                  )
-                })()}
               </div>
             )
           })}
         </div>
       )}
+      {/* Inspection history: its own window with a compact table, so the
+          card stays short and the page doesn't need long scrolling. */}
+      {expandedKey && (() => {
+        const r = rows.find((x) => x.key === expandedKey)
+        if (!r) return null
+        // Filter by date (Philippine calendar day) and priority.
+        const f = histFilter
+        const shown = r.items.filter((i) => {
+          const day = manilaDay(i.inspection_date)
+          if (f.from && day < f.from) return false
+          if (f.to && day > f.to) return false
+          if (f.priority) {
+            const p = inspectionPriority(i)
+            if (f.priority === '__none__' ? p : p !== f.priority) return false
+          }
+          return true
+        })
+        const backwards = f.from && f.to && f.from > f.to
+        const pages = Math.max(1, Math.ceil(shown.length / HISTORY_PAGE_SIZE))
+        const page = Math.min(histPage, pages - 1)
+        const pageItems = shown.slice(page * HISTORY_PAGE_SIZE, (page + 1) * HISTORY_PAGE_SIZE)
+        const setFilter = (next) => {
+          setHistFilter(next)
+          setHistPage(0)
+        }
+        return (
+          <div className="modal-overlay" onClick={() => setExpandedKey(null)}>
+            <div className="modal-box history-box" onClick={(e) => e.stopPropagation()}>
+              <div className="history-head">
+                <div>
+                  <div className="modal-title" style={{ marginBottom: '2px' }}>Inspection history</div>
+                  <div className="info-line">
+                    {r.name} · {r.items.length} inspection{r.items.length === 1 ? '' : 's'}
+                  </div>
+                </div>
+                <button className="btn btn-secondary btn-sm" onClick={() => setExpandedKey(null)}>Close</button>
+              </div>
+
+              <div className="hist-filters">
+                <label>
+                  From
+                  <input type="date" value={f.from} onChange={(e) => setFilter({ ...f, from: e.target.value })} />
+                </label>
+                <label>
+                  To
+                  <input type="date" value={f.to} onChange={(e) => setFilter({ ...f, to: e.target.value })} />
+                </label>
+                <label>
+                  Priority
+                  <select value={f.priority} onChange={(e) => setFilter({ ...f, priority: e.target.value })}>
+                    <option value="">All</option>
+                    {ASSIGN_PRIORITIES.map((p) => (
+                      <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+                    ))}
+                    <option value="__none__">No priority</option>
+                  </select>
+                </label>
+              </div>
+              {(f.from || f.to || f.priority) && (
+                <div className="info-line" style={{ marginBottom: '8px' }}>
+                  {backwards ? 'The "From" date is after the "To" date.' : `Showing ${shown.length} of ${r.items.length}.`}{' '}
+                  <button className="link-btn" onClick={() => setFilter({ from: '', to: '', priority: '' })}>
+                    Clear filters
+                  </button>
+                </div>
+              )}
+
+              {backwards ? null : shown.length === 0 ? (
+                <div className="info-line">No inspections match these filters.</div>
+              ) : (
+                <div className="history-table-wrap">
+                  <table className="data-table history-table">
+                    <thead>
+                      <tr>
+                        <th>Date and time</th>
+                        <th>Code</th>
+                        <th>Status</th>
+                        <th>Priority</th>
+                        <th>Findings</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageItems.map((i) => {
+                        const failed = i.condition_status === 'defective'
+                        return (
+                          <tr key={i.id}>
+                            <td style={{ whiteSpace: 'nowrap' }}>{fmtDateTime(i.inspection_date)}</td>
+                            <td><b>{codeById[i.equipment_id] || '—'}</b></td>
+                            <td>
+                              <span className={`tag ${failed ? 'tag-red' : 'tag-green'}`}>
+                                {failed ? 'Defective' : 'Functional'}
+                              </span>
+                            </td>
+                            <td><PriorityPill priority={inspectionPriority(i)} /></td>
+                            <td>
+                              {i.findings || '—'}
+                              <ReplacementNote
+                                action={actionForInspection(i, actions)}
+                                purchaseItems={purchaseItems}
+                                onOpenPurchaseSummary={onOpenPurchaseSummary}
+                              />
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {!backwards && pages > 1 && (
+                <div className="history-pager">
+                  <button className="btn btn-secondary btn-sm" disabled={page === 0} onClick={() => setHistPage(page - 1)}>
+                    ‹ Newer
+                  </button>
+                  <span className="info-line">
+                    Page {page + 1} of {pages} · {page * HISTORY_PAGE_SIZE + 1}–{Math.min(shown.length, (page + 1) * HISTORY_PAGE_SIZE)} of {shown.length}
+                  </span>
+                  <button className="btn btn-secondary btn-sm" disabled={page >= pages - 1} onClick={() => setHistPage(page + 1)}>
+                    Older ›
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }
