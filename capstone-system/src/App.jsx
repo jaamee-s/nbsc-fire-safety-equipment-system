@@ -632,37 +632,100 @@ function Dashboard({ profile, onLogout }) {
     ]).then(() => setInitialLoaded(true))
   }, [])
 
-  // Real-time updates: when a technician marks a repair or an inspector
-  // submits a defect, the GSO dashboard refreshes by itself.
+  // Real-time updates: when a technician marks a repair, an inspector
+  // submits a defect or someone sends unavailable dates, the GSO dashboard
+  // refreshes by itself and the bell rings, with no need to reload.
+  // Three layers, so it keeps working even if one fails:
+  //   1. Live channel: Supabase pushes each change the moment it happens.
+  //   2. If the channel drops (Wi-Fi blip, laptop asleep), it reconnects
+  //      after 5 seconds and catches up on anything missed meanwhile.
+  //   3. Safety net: every 20 seconds while the page is open, and whenever
+  //      the tab comes back into view, the live data is fetched again.
   useEffect(() => {
-    const channel = supabase
-      .channel('gso-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_actions' }, () => {
-        getMaintenanceActions()
-        getCompletedActions()
-        getAllActions()
-        getEquipment()
+    let channel = null
+    let retryTimer = null
+    let stopped = false
+
+    function refreshLive() {
+      getMaintenanceActions()
+      getCompletedActions()
+      getAllActions()
+      getEquipment(true)
+      getInspections()
+      getTechnicians()
+      getUnavailability()
+      getStock()
+    }
+
+    function connect() {
+      const ch = supabase
+        .channel('gso-live')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'maintenance_actions' }, () => {
+          getMaintenanceActions()
+          getCompletedActions()
+          getAllActions()
+          getEquipment(true)
+        })
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inspections' }, () => {
+          getInspections()
+          getEquipment(true)
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment' }, () => {
+          getEquipment(true)
+        })
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment_stock' }, () => {
+          getStock()
+        })
+        // A technician changed their availability on the phone (migration 009).
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'technicians' }, () => {
+          getTechnicians()
+        })
+        // Someone sent (or removed) unavailable dates from the app (migration 013).
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_unavailability' }, () => {
+          getUnavailability()
+        })
+      channel = ch
+      ch.subscribe((status) => {
+        if (stopped || ch !== channel) return
+        // Connected (or reconnected): catch up on anything that changed
+        // while there was no connection.
+        if (status === 'SUBSCRIBED') refreshLive()
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          channel = null
+          supabase.removeChannel(ch)
+          clearTimeout(retryTimer)
+          retryTimer = setTimeout(() => {
+            if (!stopped) connect()
+          }, 5000)
+        }
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'inspections' }, () => {
-        getInspections()
-        getEquipment()
-      })
-      // A technician changed their availability on the phone (migration 009).
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'technicians' }, () => {
-        getTechnicians()
-      })
-      // Someone sent (or removed) unavailable dates from the app (migration 013).
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_unavailability' }, () => {
-        getUnavailability()
-      })
-      .subscribe()
+    }
+
+    connect()
+
+    const safetyNet = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshLive()
+    }, 20000)
+    function onBackInView() {
+      if (document.visibilityState === 'visible') refreshLive()
+    }
+    document.addEventListener('visibilitychange', onBackInView)
+    window.addEventListener('focus', onBackInView)
+
     return () => {
-      supabase.removeChannel(channel)
+      stopped = true
+      clearTimeout(retryTimer)
+      clearInterval(safetyNet)
+      document.removeEventListener('visibilitychange', onBackInView)
+      window.removeEventListener('focus', onBackInView)
+      if (channel) supabase.removeChannel(channel)
     }
   }, [])
 
-  async function getEquipment() {
-    setLoading(true)
+  // quiet: a background refresh, so the Equipment table does not flash
+  // its loading state.
+  async function getEquipment(quiet = false) {
+    if (!quiet) setLoading(true)
     const { data, error } = await supabase
       .from('equipment')
       .select(`
