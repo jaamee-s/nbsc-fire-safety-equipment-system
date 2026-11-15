@@ -1012,7 +1012,70 @@ input::-ms-clear {
   flex-direction: column;
   gap: 16px;
   overflow-y: auto;
+  overflow-x: hidden;
   z-index: 90;
+}
+
+/* ===== Sidebar: icons only, expands when the mouse is on it =====
+   On a computer with a mouse (wider than 860px) the sidebar rests at
+   68px showing only the icons. Pointing at it (or tabbing into it) slides
+   it open to full width over the page (a mouse click does not keep it open;
+   only keyboard focus does): the negative margin keeps its place
+   in the layout at 68px, so the page underneath does not move. */
+@media (min-width: 861px) and (hover: hover) {
+  .app-sidebar {
+    width: 68px;
+    transition: width 0.25s ease, margin-right 0.25s ease, box-shadow 0.25s ease;
+  }
+
+  .app-sidebar:hover,
+  .app-sidebar:has(:focus-visible) {
+    width: 220px;
+    margin-right: -152px;
+    box-shadow: 6px 0 18px rgba(15, 42, 74, 0.12);
+  }
+
+  .app-sidebar .side-item,
+  .app-sidebar .side-logout,
+  .app-sidebar .side-group-title,
+  .app-sidebar .side-user strong,
+  .app-sidebar .side-user > span {
+    white-space: nowrap;
+  }
+
+  .app-sidebar .side-text,
+  .app-sidebar .side-group-title,
+  .app-sidebar .side-user strong,
+  .app-sidebar .side-user > span {
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .app-sidebar:hover .side-text,
+  .app-sidebar:hover .side-group-title,
+  .app-sidebar:hover .side-user strong,
+  .app-sidebar:hover .side-user > span,
+  .app-sidebar:has(:focus-visible) .side-text,
+  .app-sidebar:has(:focus-visible) .side-group-title,
+  .app-sidebar:has(:focus-visible) .side-user strong,
+  .app-sidebar:has(:focus-visible) .side-user > span {
+    opacity: 1;
+  }
+
+  .app-sidebar .side-item,
+  .app-sidebar .side-logout {
+    padding-left: 13px;
+  }
+
+  /* Closed, the expiring count sits as a small badge on the Dashboard icon */
+  .app-sidebar:not(:hover):not(:has(:focus-visible)) .side-badge {
+    position: absolute;
+    top: 2px;
+    left: 26px;
+    min-width: 16px;
+    font-size: 0.62rem;
+    padding: 0 4px;
+  }
 }
 
 .side-group {
@@ -1166,7 +1229,10 @@ input::-ms-clear {
     transform: none;
   }
   .side-item::before,
-  .side-logout::before {
+  .side-logout::before,
+  .app-sidebar,
+  .app-sidebar .side-text,
+  .app-sidebar .side-group-title {
     transition: none;
   }
 }

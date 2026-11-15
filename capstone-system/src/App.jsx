@@ -2169,7 +2169,7 @@ function Dashboard({ profile, onLogout }) {
                 <path d="M16 17l5-5-5-5" />
                 <path d="M21 12H9" />
               </svg>
-              Log out
+              <span className="side-text">Log out</span>
             </button>
           </div>
         </aside>
