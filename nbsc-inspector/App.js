@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   BackHandler,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Platform,
@@ -92,8 +93,14 @@ const C = {
   bg: '#F3F5F8',
   text: '#1E293B',
   muted: '#64748B',
-  white: '#FFFFFF'
+  white: '#FFFFFF',
+  flame: '#F4511E'
 }
+
+// FireScan logo: the symbol alone, white frame for the navy header and navy
+// frame for white cards.
+const LOGO_DARK_BG = require('./assets/logo-mark-dark-bg.png')
+const LOGO_LIGHT_BG = require('./assets/logo-mark-light-bg.png')
 
 const PRIORITY_COLORS = {
   critical: { bg: '#FDEEEE', fg: '#B91C1C' },
@@ -379,6 +386,7 @@ function RootApp() {
   }
   goToScreenRef.current = goToScreen
 
+
   // Notifications: open what the notification is about.
   // An open job opens the job; everything else opens its equipment.
   async function openNotification(item) {
@@ -483,10 +491,13 @@ function RootApp() {
 
       {screen !== 'scan' && (
         <View style={s.header}>
+          <Image source={LOGO_DARK_BG} style={s.headerLogo} accessibilityLabel="FireScan logo" />
           <View style={s.flex}>
-            <Text style={s.headerTitle}>FireSafety Tech&Inspect</Text>
+            <Text style={s.headerTitle}>
+              Fire<Text style={s.brandScan}>Scan</Text>
+            </Text>
             <Text style={s.headerSub}>
-              {account ? `${roleLabel}: ${account.full_name}` : 'NBSC Fire Safety Equipment'}
+              {account ? `${roleLabel}: ${account.full_name}` : 'NBSC Fire Safety Equipment Monitoring and Inspection'}
             </Text>
           </View>
           {signedIn && (
@@ -680,6 +691,13 @@ function LoginScreen({ onSignedIn }) {
     >
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
         <View style={s.card}>
+          <View style={s.loginBrand}>
+            <Image source={LOGO_LIGHT_BG} style={s.loginLogo} accessibilityLabel="FireScan logo" />
+            <Text style={s.loginBrandName}>
+              Fire<Text style={s.brandScan}>Scan</Text>
+            </Text>
+            <Text style={s.loginTagline}>NBSC Fire Safety Equipment Monitoring and Inspection</Text>
+          </View>
           <Text style={s.h1}>Sign in</Text>
           <Text style={s.muted}>
             Use the account the GSO created for you. Inspectors scan and inspect equipment;
@@ -2422,6 +2440,12 @@ const s = StyleSheet.create({
   logoutText: { color: C.white, fontSize: 12, fontWeight: '700' },
   headerTitle: { color: C.white, fontSize: 18, fontWeight: '700' },
   headerSub: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 2 },
+  headerLogo: { width: 36, height: 36 },
+  brandScan: { color: C.flame },
+  loginBrand: { alignItems: 'center', marginBottom: 18 },
+  loginLogo: { width: 72, height: 72, marginBottom: 6 },
+  loginBrandName: { fontSize: 28, fontWeight: '800', color: C.navy },
+  loginTagline: { fontSize: 12, color: C.muted, textAlign: 'center', marginTop: 2 },
 
   card: {
     backgroundColor: C.white,
