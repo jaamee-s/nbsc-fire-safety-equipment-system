@@ -1422,6 +1422,7 @@ export function InspectorsTab({
   purchaseItems = [],
   onOpenPurchaseSummary,
   leaves = [],
+  availabilityKey = '',
   adminName = '',
   adminRole = 'admin'
 }) {
@@ -1484,8 +1485,13 @@ export function InspectorsTab({
     return data || []
   }
 
+  // Reloaded whenever an inspector switches Available / Unavailable on the
+  // phone (availabilityKey is the latest switch), so the cards stay current.
   useEffect(() => {
     fetchInspectors().then(setProfiles)
+  }, [availabilityKey])
+
+  useEffect(() => {
     fetchAssignments().then((list) => {
       setAssignmentsReady(list !== null)
       setAssignments(list || [])

@@ -118,9 +118,36 @@ export function buildGsoNotifications({
   expiring = [],
   completed = [],
   purchaseRequests = [],
-  leaves = []
+  leaves = [],
+  availability = []
 }) {
   const list = []
+
+  // Available / Unavailable switched on the phone (migration 017): each
+  // person's latest switch from the last 3 days.
+  // availability: [{ id, profile_id, is_available, changed_at, name, role }]
+  availability.forEach((c) => {
+    const roleLabel = c.role === 'technician' ? 'Technician' : 'Inspector'
+    const isTech = c.role === 'technician'
+    list.push({
+      id: `availability-${c.id}`,
+      tone: c.is_available ? 'green' : 'amber',
+      title: c.is_available ? `${c.name} is now available` : `${c.name} is now unavailable`,
+      detail: `${roleLabel} · switched in the app`,
+      next: c.is_available
+        ? isTech
+          ? 'They can take new job orders again.'
+          : 'They can take new inspection job orders again.'
+        : isTech
+          ? 'Avoid giving them new job orders for now. Give urgent ones to another technician.'
+          : 'Avoid giving them new inspection job orders for now. Reassign urgent ones if needed.',
+      time: c.changed_at,
+      timeLabel: 'Changed',
+      target: 'leave',
+      role: c.role,
+      profileId: c.profile_id
+    })
+  })
 
   // Unavailable dates sent by inspectors / technicians from the app
   // (migration 012). Only ones that are still current or coming up.

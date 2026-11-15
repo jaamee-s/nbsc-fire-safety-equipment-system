@@ -429,6 +429,8 @@ function Dashboard({ profile, onLogout }) {
   const [allActions, setAllActions] = useState([])
   // Unavailable dates sent by inspectors / technicians (migration 012)
   const [unavailability, setUnavailability] = useState([])
+  // Available / Unavailable switches made on the phone (migration 017)
+  const [availabilityChanges, setAvailabilityChanges] = useState([])
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState(null)
@@ -628,7 +630,8 @@ function Dashboard({ profile, onLogout }) {
       getCompletedActions(),
       getAllActions(),
       getStaffAccounts(),
-      getUnavailability()
+      getUnavailability(),
+      getAvailabilityChanges()
     ]).then(() => setInitialLoaded(true))
   }, [])
 
@@ -654,6 +657,7 @@ function Dashboard({ profile, onLogout }) {
       getInspections()
       getTechnicians()
       getUnavailability()
+      getAvailabilityChanges()
       getStock()
     }
 
@@ -683,6 +687,10 @@ function Dashboard({ profile, onLogout }) {
         // Someone sent (or removed) unavailable dates from the app (migration 013).
         .on('postgres_changes', { event: '*', schema: 'public', table: 'staff_unavailability' }, () => {
           getUnavailability()
+        })
+        // Someone switched Available / Unavailable on the phone (migration 017).
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'staff_availability_changes' }, () => {
+          getAvailabilityChanges()
         })
       channel = ch
       ch.subscribe((status) => {
@@ -1051,6 +1059,19 @@ function Dashboard({ profile, onLogout }) {
       .order('start_date', { ascending: true })
     // Before migration 012 the table doesn't exist; there is simply nothing.
     if (!error) setUnavailability(data || [])
+  }
+
+  // Availability switches from the last 3 days, newest first. Before
+  // migration 017 the table doesn't exist; there is simply nothing.
+  async function getAvailabilityChanges() {
+    const since = new Date(new Date().getTime() - 3 * 24 * 60 * 60 * 1000).toISOString()
+    const { data, error } = await supabase
+      .from('staff_availability_changes')
+      .select('id, profile_id, is_available, changed_at')
+      .gte('changed_at', since)
+      .order('changed_at', { ascending: false })
+      .limit(200)
+    if (!error) setAvailabilityChanges(data || [])
   }
 
   async function getAllActions() {
@@ -1909,6 +1930,16 @@ function Dashboard({ profile, onLogout }) {
       const acc = staffAccounts.find((a) => a.id === l.profile_id)
       return { ...l, name: acc ? acc.full_name : 'A staff member', role: acc ? acc.role : 'inspector' }
     })
+  // Each person's latest Available / Unavailable switch, with who it is.
+  // Only the latest counts: switching off and on again shows one alert
+  // with where they ended up.
+  const latestAvailability = []
+  availabilityChanges.forEach((c) => {
+    if (latestAvailability.some((x) => x.profile_id === c.profile_id)) return
+    const acc = staffAccounts.find((a) => a.id === c.profile_id)
+    latestAvailability.push({ ...c, name: acc ? acc.full_name : 'A staff member', role: acc ? acc.role : 'inspector' })
+  })
+
   // A person's current / upcoming unavailable dates, earliest first.
   const leavesFor = (profileId) => (profileId ? upcomingLeaves.filter((l) => l.profile_id === profileId) : [])
 
@@ -1918,7 +1949,8 @@ function Dashboard({ profile, onLogout }) {
     expiring: expiringEquipment,
     completed: completedActions,
     purchaseRequests: purchaseRequestItems,
-    leaves: upcomingLeaves
+    leaves: upcomingLeaves,
+    availability: latestAvailability
   })
 
   // Shared by the Reports page and the Equipment page's Print Report.
@@ -3488,6 +3520,7 @@ function Dashboard({ profile, onLogout }) {
             purchaseItems={purchaseRequestItems}
             onOpenPurchaseSummary={openPurchaseSummary}
             leaves={upcomingLeaves}
+            availabilityKey={availabilityChanges[0]?.id || ''}
             adminName={profile.full_name}
             adminRole={profile.role}
           />
