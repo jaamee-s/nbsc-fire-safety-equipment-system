@@ -940,6 +940,36 @@ input::-ms-clear {
   font-size: 1.15rem;
 }
 
+/* ===== FireScan logo ===== */
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+}
+
+.brand-name span {
+  color: #F4511E;
+}
+
+.app-header .brand-name {
+  font-weight: 800;
+  letter-spacing: -0.3px;
+}
+
+.login-brand-mark {
+  width: 72px;
+  height: 72px;
+  display: block;
+  margin: 0 auto 8px;
+}
+
+.login-card .brand-name {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #0F2A4A;
+  letter-spacing: -0.5px;
+}
+
 /* ===== App layout: header on top, sidebar on the left ===== */
 .app-layout {
   display: flex;

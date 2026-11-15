@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from './supabaseClient'
+import logoMarkLightBg from './assets/logo-mark-light-bg.svg'
 
 function Login({ onLoginSuccess }) {
   const [email, setEmail] = useState('')
@@ -31,9 +32,9 @@ function Login({ onLoginSuccess }) {
   return (
     <div className="login-wrap">
       <div className="login-card">
-        <div className="login-logo">🔥</div>
-        <h1>NBSC Fire Safety Equipment System</h1>
-        <p className="login-subtitle">Equipment Inventory · Inspection · Maintenance Monitoring</p>
+        <img className="login-brand-mark" src={logoMarkLightBg} alt="FireScan logo" />
+        <h1 className="brand-name">Fire<span>Scan</span></h1>
+        <p className="login-subtitle">NBSC Fire Safety Equipment Monitoring and Inspection</p>
 
         <form onSubmit={handleLogin} className="form-grid" style={{ marginTop: '20px' }}>
           <div>

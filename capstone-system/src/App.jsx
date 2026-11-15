@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { supabase } from './supabaseClient'
 import Login from './Login'
+import logoMarkDarkBg from './assets/logo-mark-dark-bg.svg'
 import {
   AccountSettingsModal,
   NotificationBell,
@@ -2084,8 +2085,8 @@ function Dashboard({ profile, onLogout }) {
     <div>
       <header className="app-header app-header-compact">
         <div className="title-block">
-          <div className="badge-icon">🔥</div>
-          <h1>NBSC Fire Safety Equipment System</h1>
+          <img className="brand-mark" src={logoMarkDarkBg} alt="FireScan logo" />
+          <h1 className="brand-name">Fire<span>Scan</span></h1>
         </div>
 
         <div className="header-search">
