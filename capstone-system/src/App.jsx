@@ -1798,8 +1798,9 @@ function Dashboard({ profile, onLogout }) {
     if (priorityFilter === 'pending') return a.status === 'pending'
     if (priorityFilter === 'in_progress') return a.status === 'in_progress'
     if (priorityFilter === 'unresolved') return a.status === 'unresolved'
-    // "All" shows only the Purchase Request summary, no cards.
-    return false
+    // "All" lists every active card (read-only) under the Purchase Request
+    // summary, so the count on the chip matches what is shown.
+    return true
   })
 
   const today = new Date()
@@ -2259,10 +2260,10 @@ function Dashboard({ profile, onLogout }) {
           */}
         </div>
 
-        {/* "All" is an overview: the action buttons live in the stage filters
-            (Needs Job Order / In Progress / Unresolved). Here, everything that
-            needs a Job Order Request or a Purchase Request is gathered into
-            one summary instead. */}
+        {/* "All" is an overview: the Purchase Request summary, then every
+            active card read-only. The action buttons live in the stage filters
+            (Needs Job Order / In Progress / Unresolved), opened from
+            notifications. */}
         {priorityFilter === 'all' && (
           <PriorityActionsSummary
             purchaseItems={purchaseRequestItems}
