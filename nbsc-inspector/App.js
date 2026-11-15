@@ -5,7 +5,7 @@ import {
   AppState,
   BackHandler,
   Image,
-  KeyboardAvoidingView,
+  Keyboard,
   Linking,
   Platform,
   Pressable,
@@ -683,6 +683,80 @@ function BottomTabs({ role, screen, onNavigate }) {
 /* Login (inspector and technician accounts)                           */
 /* ------------------------------------------------------------------ */
 
+// A ScrollView that stays usable while the keyboard is open, on every phone.
+// Android phones handle the keyboard differently (and since edge-to-edge the
+// screen no longer shrinks by itself), so this does not rely on them:
+//   - the keyboard's height is added as extra space at the bottom, so you
+//     can always scroll down past the last field;
+//   - the box you are typing in is scrolled up above the keyboard, also when
+//     you move to the next box while the keyboard stays open.
+function KeyboardScroll({ children, contentContainerStyle, onScroll, ...props }) {
+  const ref = useRef(null)
+  const scrollY = useRef(0)
+  const keyboardTop = useRef(null)
+  const [keyboardHeight, setKeyboardHeight] = useState(0)
+
+  useEffect(() => {
+    let watch = null
+    let lastInput = null
+
+    function revealFocused() {
+      const input = TextInput.State.currentlyFocusedInput && TextInput.State.currentlyFocusedInput()
+      if (!input || !input.measureInWindow || !ref.current || keyboardTop.current === null) return
+      input.measureInWindow((x, y, w, h) => {
+        const overlap = y + h + 24 - keyboardTop.current
+        if (overlap > 0) ref.current.scrollTo({ y: scrollY.current + overlap, animated: true })
+      })
+    }
+
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow'
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide'
+    const onShow = Keyboard.addListener(showEvent, (e) => {
+      const height = (e.endCoordinates && e.endCoordinates.height) || 0
+      keyboardTop.current = (e.endCoordinates && e.endCoordinates.screenY) || null
+      setKeyboardHeight(height)
+      // Wait a moment for the extra space to be laid out, then scroll.
+      setTimeout(revealFocused, 120)
+      clearInterval(watch)
+      lastInput = TextInput.State.currentlyFocusedInput && TextInput.State.currentlyFocusedInput()
+      // Moving to another box doesn't reopen the keyboard, so watch for it.
+      watch = setInterval(() => {
+        const now = TextInput.State.currentlyFocusedInput && TextInput.State.currentlyFocusedInput()
+        if (now && now !== lastInput) {
+          lastInput = now
+          revealFocused()
+        }
+      }, 250)
+    })
+    const onHide = Keyboard.addListener(hideEvent, () => {
+      clearInterval(watch)
+      keyboardTop.current = null
+      setKeyboardHeight(0)
+    })
+    return () => {
+      clearInterval(watch)
+      onShow.remove()
+      onHide.remove()
+    }
+  }, [])
+
+  return (
+    <ScrollView
+      ref={ref}
+      keyboardShouldPersistTaps="handled"
+      scrollEventThrottle={16}
+      onScroll={(e) => {
+        scrollY.current = e.nativeEvent.contentOffset.y
+        if (onScroll) onScroll(e)
+      }}
+      contentContainerStyle={[contentContainerStyle, keyboardHeight ? { paddingBottom: keyboardHeight + 48 } : null]}
+      {...props}
+    >
+      {children}
+    </ScrollView>
+  )
+}
+
 function LoginScreen({ onSignedIn }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -703,70 +777,65 @@ function LoginScreen({ onSignedIn }) {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={s.flex}
-      behavior="padding"
-    >
-      <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <View style={s.card}>
-          <View style={s.loginBrand}>
-            <Image source={LOGO_LIGHT_BG} style={s.loginLogo} accessibilityLabel="FireScan logo" />
-            <Text style={s.loginBrandName}>
-              Fire<Text style={s.brandScan}>Scan</Text>
-            </Text>
-            <Text style={s.loginTagline}>NBSC Fire Safety Equipment Monitoring and Inspection</Text>
-          </View>
-          <Text style={s.h1}>Sign in</Text>
-          <Text style={s.muted}>
-            Use the account the GSO created for you. Inspectors scan and inspect equipment;
-            technicians see and update their assigned repairs.
+    <KeyboardScroll contentContainerStyle={s.scroll}>
+      <View style={s.card}>
+        <View style={s.loginBrand}>
+          <Image source={LOGO_LIGHT_BG} style={s.loginLogo} accessibilityLabel="FireScan logo" />
+          <Text style={s.loginBrandName}>
+            Fire<Text style={s.brandScan}>Scan</Text>
           </Text>
-
-          <Text style={s.label}>Username</Text>
-          <TextInput
-            style={s.input}
-            value={email}
-            onChangeText={setEmail}
-            placeholder="Username (or email)"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="default"
-            textContentType="username"
-          />
-
-          <Text style={s.label}>Password</Text>
-          <TextInput
-            style={s.input}
-            value={password}
-            onChangeText={setPassword}
-            placeholder="Password"
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry={!showPassword}
-            textContentType="password"
-            onSubmitEditing={submit}
-            returnKeyType="go"
-          />
-          <Pressable onPress={() => setShowPassword((v) => !v)}>
-            <Text style={s.autoChange}>{showPassword ? 'Hide password' : 'Show password'}</Text>
-          </Pressable>
-
-          {error && <Text style={s.error}>{error}</Text>}
-
-          <Pressable
-            style={[s.btn, s.btnPrimary, (busy || !email.trim() || !password) && s.btnDisabled]}
-            onPress={submit}
-            disabled={busy || !email.trim() || !password}
-          >
-            <Text style={s.btnPrimaryText}>{busy ? 'Signing in...' : 'Sign in'}</Text>
-          </Pressable>
-
-          <Text style={[s.muted, { marginTop: 16, fontSize: 12 }]}>
-            No account yet? Ask the General Services Office to create one for you.
-          </Text>
+          <Text style={s.loginTagline}>NBSC Fire Safety Equipment Monitoring and Inspection</Text>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        <Text style={s.h1}>Sign in</Text>
+        <Text style={s.muted}>
+          Use the account the GSO created for you. Inspectors scan and inspect equipment;
+          technicians see and update their assigned repairs.
+        </Text>
+
+        <Text style={s.label}>Username</Text>
+        <TextInput
+          style={s.input}
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Username (or email)"
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="default"
+          textContentType="username"
+        />
+
+        <Text style={s.label}>Password</Text>
+        <TextInput
+          style={s.input}
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry={!showPassword}
+          textContentType="password"
+          onSubmitEditing={submit}
+          returnKeyType="go"
+        />
+        <Pressable onPress={() => setShowPassword((v) => !v)}>
+          <Text style={s.autoChange}>{showPassword ? 'Hide password' : 'Show password'}</Text>
+        </Pressable>
+
+        {error && <Text style={s.error}>{error}</Text>}
+
+        <Pressable
+          style={[s.btn, s.btnPrimary, (busy || !email.trim() || !password) && s.btnDisabled]}
+          onPress={submit}
+          disabled={busy || !email.trim() || !password}
+        >
+          <Text style={s.btnPrimaryText}>{busy ? 'Signing in...' : 'Sign in'}</Text>
+        </Pressable>
+
+        <Text style={[s.muted, { marginTop: 16, fontSize: 12 }]}>
+          No account yet? Ask the General Services Office to create one for you.
+        </Text>
+      </View>
+    </KeyboardScroll>
   )
 }
 
@@ -929,168 +998,165 @@ function HomeScreen({ account, dashboard, onOpenEquipment }) {
   }
 
   return (
-    <KeyboardAvoidingView style={s.flex} behavior="padding">
-      <ScrollView
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={s.scroll}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      >
-        <DashHero
-          name={account.full_name}
-          line={
-            data
-              ? `${dueCount} unit${dueCount === 1 ? '' : 's'} can be inspected · ${onHoldCount} on hold`
-              : null
-          }
-        />
+    <KeyboardScroll
+      contentContainerStyle={s.scroll}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
+      <DashHero
+        name={account.full_name}
+        line={
+          data
+            ? `${dueCount} unit${dueCount === 1 ? '' : 's'} can be inspected · ${onHoldCount} on hold`
+            : null
+        }
+      />
 
-        <ErrorCard error={error || openError} />
+      <ErrorCard error={error || openError} />
 
-        {loading && !data ? (
-          <View style={[s.card, s.centerPad]}>
-            <ActivityIndicator color={C.blue} />
+      {loading && !data ? (
+        <View style={[s.card, s.centerPad]}>
+          <ActivityIndicator color={C.blue} />
+        </View>
+      ) : data ? (
+        <>
+          <AvailabilityCard dashboard={dashboard} />
+          <UnavailableDatesCard account={account} />
+
+          <JobOrdersCard assignments={dashboard.assignments} />
+
+          <View style={s.card}>
+            <Text style={s.sectionTitle}>My inspections</Text>
+            <View style={s.miniStats}>
+              <MiniStat value={mine.today} label="Today" />
+              <MiniStat value={mine.week} label="This week" />
+              <MiniStat value={mine.total} label="Total" />
+              <MiniStat value={mine.defects} label="Defects" color={mine.defects > 0 ? C.red : undefined} />
+            </View>
+            {mine.total === null && (
+              <Text style={[s.sectionHint, { marginTop: 6, marginBottom: 0 }]}>
+                Total shows once the GSO runs the latest database update.
+              </Text>
+            )}
           </View>
-        ) : data ? (
-          <>
-            <AvailabilityCard dashboard={dashboard} />
-            <UnavailableDatesCard account={account} />
 
-            <JobOrdersCard assignments={dashboard.assignments} />
+          <EquipmentOverviewCard overview={dashboard.overview} />
 
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>My inspections</Text>
-              <View style={s.miniStats}>
-                <MiniStat value={mine.today} label="Today" />
-                <MiniStat value={mine.week} label="This week" />
-                <MiniStat value={mine.total} label="Total" />
-                <MiniStat value={mine.defects} label="Defects" color={mine.defects > 0 ? C.red : undefined} />
-              </View>
-              {mine.total === null && (
-                <Text style={[s.sectionHint, { marginTop: 6, marginBottom: 0 }]}>
-                  Total shows once the GSO runs the latest database update.
-                </Text>
-              )}
-            </View>
+          <View style={s.dashGrid}>
+            <DashTile value={dueCount} label="Can be inspected" tone={dueCount > 0 ? 'amber' : 'green'} active={listKey === 'due'} onPress={() => pick('due')} />
+            <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} active={listKey === 'never'} onPress={() => pick('never')} />
+            <DashTile value={openDefects.length} label="Open defects" tone={openDefects.length > 0 ? 'red' : 'green'} active={listKey === 'defects'} onPress={() => pick('defects')} />
+            <DashTile value={onHoldCount} label="On hold (GSO)" tone={onHoldCount > 0 ? 'amber' : undefined} active={listKey === 'hold'} onPress={() => pick('hold')} />
+          </View>
 
-            <EquipmentOverviewCard overview={dashboard.overview} />
-
-            <View style={s.dashGrid}>
-              <DashTile value={dueCount} label="Can be inspected" tone={dueCount > 0 ? 'amber' : 'green'} active={listKey === 'due'} onPress={() => pick('due')} />
-              <DashTile value={neverInspected} label="Never inspected" tone={neverInspected > 0 ? 'red' : undefined} active={listKey === 'never'} onPress={() => pick('never')} />
-              <DashTile value={openDefects.length} label="Open defects" tone={openDefects.length > 0 ? 'red' : 'green'} active={listKey === 'defects'} onPress={() => pick('defects')} />
-              <DashTile value={onHoldCount} label="On hold (GSO)" tone={onHoldCount > 0 ? 'amber' : undefined} active={listKey === 'hold'} onPress={() => pick('hold')} />
-            </View>
-
-            <Text style={s.sectionTitle}>{list.title}</Text>
-            <Text style={s.sectionHint}>{list.hint}</Text>
-            <View style={s.card}>
-              {list.items.length === 0 ? (
-                <Text style={s.muted}>
-                  {listKey === 'defects'
-                    ? '✓ No open defects. Everything you reported has been resolved by GSO.'
-                    : 'Nothing here right now.'}
-                </Text>
-              ) : (
-                shown.map((d, i) => {
-                  const last = i === shown.length - 1
-                  if (list.kind === 'result') {
-                    const st = resultState(d)
-                    return (
-                      <View key={d.id} style={[s.listRow, last && s.listRowLast]}>
-                        <View style={s.flex}>
-                          <Text style={s.listCode}>{d.equipment_code}</Text>
-                          <Text style={s.listMeta}>{st.note}</Text>
-                          <Text style={s.listMeta}>Reported {formatDateTime(d.inspection_date)}</Text>
-                        </View>
-                        <View style={[s.tag, st.bg]}>
-                          <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
-                        </View>
-                      </View>
-                    )
-                  }
-                  const needsAttention = d.current_status && d.current_status !== 'functional'
+          <Text style={s.sectionTitle}>{list.title}</Text>
+          <Text style={s.sectionHint}>{list.hint}</Text>
+          <View style={s.card}>
+            {list.items.length === 0 ? (
+              <Text style={s.muted}>
+                {listKey === 'defects'
+                  ? '✓ No open defects. Everything you reported has been resolved by GSO.'
+                  : 'Nothing here right now.'}
+              </Text>
+            ) : (
+              shown.map((d, i) => {
+                const last = i === shown.length - 1
+                if (list.kind === 'result') {
+                  const st = resultState(d)
                   return (
-                    <Pressable
-                      key={d.id}
-                      style={[s.listRow, last && s.listRowLast]}
-                      onPress={() => openFromDue(d.equipment_code)}
-                    >
+                    <View key={d.id} style={[s.listRow, last && s.listRowLast]}>
                       <View style={s.flex}>
                         <Text style={s.listCode}>{d.equipment_code}</Text>
-                        <Text style={s.listMeta}>
-                          {TYPE_LABELS[d.equipment_type] || d.equipment_type}
-                          {d.building_name ? ` · ${d.building_name}` : ''}
-                        </Text>
-                        <Text style={s.listMeta}>{d.exact_location}</Text>
-                      </View>
-                      {list.kind === 'hold' ? (
-                        <View style={[s.tag, s.tagRed]}>
-                          <Text style={[s.tagText, { color: C.red }]}>
-                            {STATUS_LABELS[d.current_status] || d.current_status}
-                          </Text>
-                        </View>
-                      ) : (
-                        <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                          <Text style={[s.listWhen, !d.last_inspected && { color: C.red, fontWeight: '700' }]}>
-                            {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
-                          </Text>
-                          {needsAttention && (
-                            <View style={[s.tag, s.tagRed]}>
-                              <Text style={[s.tagText, { color: C.red }]}>
-                                {STATUS_LABELS[d.current_status] || d.current_status}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      )}
-                    </Pressable>
-                  )
-                })
-              )}
-              {list.items.length > 5 && (
-                <Pressable onPress={() => setShowAll(!showAll)} hitSlop={6}>
-                  <Text style={s.seeAll}>{showAll ? 'Show less' : `See all ${list.items.length} →`}</Text>
-                </Pressable>
-              )}
-              {list.total > list.items.length && (
-                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                  The app lists {list.items.length} of {list.total}. The ones
-                  {listKey === 'hold' ? ' reported most recently' : ' waiting longest'} come first.
-                </Text>
-              )}
-            </View>
-
-            <Text style={s.sectionTitle}>Your recent inspections</Text>
-            <View style={[s.card, { marginTop: 8 }]}>
-              {recent.length === 0 ? (
-                <Text style={s.muted}>Nothing submitted yet.</Text>
-              ) : (
-                recentShown.map((r, i) => {
-                  const st = resultState(r)
-                  return (
-                    <View key={r.id} style={[s.listRow, i === recentShown.length - 1 && s.listRowLast]}>
-                      <View style={s.flex}>
-                        <Text style={s.listCode}>{r.equipment_code}</Text>
                         <Text style={s.listMeta}>{st.note}</Text>
-                        <Text style={s.listMeta}>{formatDateTime(r.inspection_date)}</Text>
+                        <Text style={s.listMeta}>Reported {formatDateTime(d.inspection_date)}</Text>
                       </View>
                       <View style={[s.tag, st.bg]}>
                         <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
                       </View>
                     </View>
                   )
-                })
-              )}
-              {recent.length > 3 && (
-                <Pressable onPress={() => setShowAllRecent(!showAllRecent)} hitSlop={6}>
-                  <Text style={s.seeAll}>{showAllRecent ? 'Show less' : `See your last ${recent.length} →`}</Text>
-                </Pressable>
-              )}
-            </View>
-          </>
-        ) : null}
-      </ScrollView>
-    </KeyboardAvoidingView>
+                }
+                const needsAttention = d.current_status && d.current_status !== 'functional'
+                return (
+                  <Pressable
+                    key={d.id}
+                    style={[s.listRow, last && s.listRowLast]}
+                    onPress={() => openFromDue(d.equipment_code)}
+                  >
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{d.equipment_code}</Text>
+                      <Text style={s.listMeta}>
+                        {TYPE_LABELS[d.equipment_type] || d.equipment_type}
+                        {d.building_name ? ` · ${d.building_name}` : ''}
+                      </Text>
+                      <Text style={s.listMeta}>{d.exact_location}</Text>
+                    </View>
+                    {list.kind === 'hold' ? (
+                      <View style={[s.tag, s.tagRed]}>
+                        <Text style={[s.tagText, { color: C.red }]}>
+                          {STATUS_LABELS[d.current_status] || d.current_status}
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                        <Text style={[s.listWhen, !d.last_inspected && { color: C.red, fontWeight: '700' }]}>
+                          {d.last_inspected ? formatDateTime(d.last_inspected) : 'Never inspected'}
+                        </Text>
+                        {needsAttention && (
+                          <View style={[s.tag, s.tagRed]}>
+                            <Text style={[s.tagText, { color: C.red }]}>
+                              {STATUS_LABELS[d.current_status] || d.current_status}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
+                  </Pressable>
+                )
+              })
+            )}
+            {list.items.length > 5 && (
+              <Pressable onPress={() => setShowAll(!showAll)} hitSlop={6}>
+                <Text style={s.seeAll}>{showAll ? 'Show less' : `See all ${list.items.length} →`}</Text>
+              </Pressable>
+            )}
+            {list.total > list.items.length && (
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                The app lists {list.items.length} of {list.total}. The ones
+                {listKey === 'hold' ? ' reported most recently' : ' waiting longest'} come first.
+              </Text>
+            )}
+          </View>
+
+          <Text style={s.sectionTitle}>Your recent inspections</Text>
+          <View style={[s.card, { marginTop: 8 }]}>
+            {recent.length === 0 ? (
+              <Text style={s.muted}>Nothing submitted yet.</Text>
+            ) : (
+              recentShown.map((r, i) => {
+                const st = resultState(r)
+                return (
+                  <View key={r.id} style={[s.listRow, i === recentShown.length - 1 && s.listRowLast]}>
+                    <View style={s.flex}>
+                      <Text style={s.listCode}>{r.equipment_code}</Text>
+                      <Text style={s.listMeta}>{st.note}</Text>
+                      <Text style={s.listMeta}>{formatDateTime(r.inspection_date)}</Text>
+                    </View>
+                    <View style={[s.tag, st.bg]}>
+                      <Text style={[s.tagText, { color: st.color }]}>{st.tag}</Text>
+                    </View>
+                  </View>
+                )
+              })
+            )}
+            {recent.length > 3 && (
+              <Pressable onPress={() => setShowAllRecent(!showAllRecent)} hitSlop={6}>
+                <Text style={s.seeAll}>{showAllRecent ? 'Show less' : `See your last ${recent.length} →`}</Text>
+              </Pressable>
+            )}
+          </View>
+        </>
+      ) : null}
+    </KeyboardScroll>
   )
 }
 
@@ -1600,146 +1666,143 @@ function TechnicianHome({ account, dashboard, onOpenJob }) {
   }
 
   return (
-    <KeyboardAvoidingView style={s.flex} behavior="padding">
-      <ScrollView
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={s.scroll}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      >
-        <DashHero
-          name={account.full_name}
-          line={
-            data
-              ? todoJobs.length > 0
-                ? `You have ${mine.assigned} job${mine.assigned === 1 ? '' : 's'} to do${urgent > 0 ? ` · ${urgent} urgent` : ''}`
-                : 'No open jobs right now.'
-              : null
-          }
-        />
+    <KeyboardScroll
+      contentContainerStyle={s.scroll}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
+      <DashHero
+        name={account.full_name}
+        line={
+          data
+            ? todoJobs.length > 0
+              ? `You have ${mine.assigned} job${mine.assigned === 1 ? '' : 's'} to do${urgent > 0 ? ` · ${urgent} urgent` : ''}`
+              : 'No open jobs right now.'
+            : null
+        }
+      />
 
-        <ErrorCard error={error || startError} />
+      <ErrorCard error={error || startError} />
 
-        {loading && !data ? (
-          <View style={[s.card, s.centerPad]}>
-            <ActivityIndicator color={C.blue} />
+      {loading && !data ? (
+        <View style={[s.card, s.centerPad]}>
+          <ActivityIndicator color={C.blue} />
+        </View>
+      ) : data ? (
+        <>
+          <AvailabilityCard dashboard={dashboard} />
+          <UnavailableDatesCard account={account} />
+
+          <View style={s.card}>
+            <Text style={s.sectionTitle}>My jobs</Text>
+            <View style={s.miniStats}>
+              <MiniStat value={mine.assigned} label="Assigned" />
+              <MiniStat value={mine.working} label="Working" />
+              <MiniStat value={mine.completed} label="Completed" color={mine.completed > 0 ? C.green : undefined} />
+            </View>
           </View>
-        ) : data ? (
-          <>
-            <AvailabilityCard dashboard={dashboard} />
-            <UnavailableDatesCard account={account} />
 
-            <View style={s.card}>
-              <Text style={s.sectionTitle}>My jobs</Text>
-              <View style={s.miniStats}>
-                <MiniStat value={mine.assigned} label="Assigned" />
-                <MiniStat value={mine.working} label="Working" />
-                <MiniStat value={mine.completed} label="Completed" color={mine.completed > 0 ? C.green : undefined} />
+          {nextJob && (
+            <View style={[s.card, s.nextJob, { borderLeftColor: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
+              <Text style={[s.nextJobLabel, { color: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
+                NEXT UP
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                <Text style={[s.listCode, { fontSize: 18 }]}>{nextJob.equipment_code}</Text>
+                <PriorityTag priority={nextJob.priority} />
               </View>
-            </View>
-
-            {nextJob && (
-              <View style={[s.card, s.nextJob, { borderLeftColor: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
-                <Text style={[s.nextJobLabel, { color: (PRIORITY_COLORS[nextJob.priority] || PRIORITY_COLORS.medium).fg }]}>
-                  NEXT UP
-                </Text>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                  <Text style={[s.listCode, { fontSize: 18 }]}>{nextJob.equipment_code}</Text>
-                  <PriorityTag priority={nextJob.priority} />
-                </View>
-                <Text style={s.listMeta}>
-                  {TYPE_LABELS[nextJob.equipment_type] || nextJob.equipment_type}
-                  {nextJob.building_name ? ` · ${nextJob.building_name}` : ''}
-                  {nextJob.exact_location ? ` · ${nextJob.exact_location}` : ''}
-                </Text>
-                <Text style={[s.listMeta, { color: C.text, marginTop: 4 }]}>{nextJob.description}</Text>
-                <View style={s.nextJobActions}>
-                  <Pressable style={[s.smallBtn, s.smallBtnGhost]} onPress={() => onOpenJob(nextJob)}>
-                    <Text style={s.smallBtnGhostText}>Open job</Text>
-                  </Pressable>
-                  {(nextJob.repair_status || 'assigned') === 'assigned' ? (
-                    <Pressable
-                      style={[s.smallBtn, s.smallBtnPrimary, starting && { opacity: 0.6 }]}
-                      onPress={() => startWorking(nextJob)}
-                      disabled={starting}
-                    >
-                      <Text style={s.smallBtnPrimaryText}>{starting ? 'Saving...' : 'Start working'}</Text>
-                    </Pressable>
-                  ) : (
-                    <View style={[s.smallBtn, { backgroundColor: C.blueBg }]}>
-                      <Text style={[s.smallBtnGhostText, { color: C.blue }]}>Working on it</Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            )}
-
-            <View style={s.chipRow}>
-              {Object.entries(lists).map(([key, l]) => (
-                <Pressable key={key} style={[s.chip, listKey === key && s.chipActive]} onPress={() => setListKey(key)}>
-                  <Text style={[s.chipText, listKey === key && s.chipTextActive]}>
-                    {l.label} · {l.total}
-                  </Text>
+              <Text style={s.listMeta}>
+                {TYPE_LABELS[nextJob.equipment_type] || nextJob.equipment_type}
+                {nextJob.building_name ? ` · ${nextJob.building_name}` : ''}
+                {nextJob.exact_location ? ` · ${nextJob.exact_location}` : ''}
+              </Text>
+              <Text style={[s.listMeta, { color: C.text, marginTop: 4 }]}>{nextJob.description}</Text>
+              <View style={s.nextJobActions}>
+                <Pressable style={[s.smallBtn, s.smallBtnGhost]} onPress={() => onOpenJob(nextJob)}>
+                  <Text style={s.smallBtnGhostText}>Open job</Text>
                 </Pressable>
-              ))}
-            </View>
-
-            <View style={s.card}>
-              {list.items.length === 0 ? (
-                <Text style={s.muted}>
-                  {listKey === 'todo'
-                    ? 'No repairs assigned right now. Pull down to refresh.'
-                    : listKey === 'awaiting'
-                    ? 'Nothing waiting for the GSO.'
-                    : 'Nothing completed yet.'}
-                </Text>
-              ) : list.completed ? (
-                list.items.map((r, i, arr) => (
-                  <View key={r.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{r.equipment_code}</Text>
-                      <Text style={s.listMeta}>{r.description}</Text>
-                      <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
-                    </View>
-                    <View style={[s.tag, s.tagGreen]}>
-                      <Text style={[s.tagText, { color: C.green }]}>Done</Text>
-                    </View>
-                  </View>
-                ))
-              ) : (
-                list.items.map((j, i, arr) => (
+                {(nextJob.repair_status || 'assigned') === 'assigned' ? (
                   <Pressable
-                    key={j.id}
-                    style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
-                    onPress={() => onOpenJob(j)}
+                    style={[s.smallBtn, s.smallBtnPrimary, starting && { opacity: 0.6 }]}
+                    onPress={() => startWorking(nextJob)}
+                    disabled={starting}
                   >
-                    <View style={s.flex}>
-                      <Text style={s.listCode}>{j.equipment_code}</Text>
-                      <Text style={s.listMeta}>
-                        {TYPE_LABELS[j.equipment_type] || j.equipment_type}
-                        {j.building_name ? ` · ${j.building_name}` : ''}
-                      </Text>
-                      <Text style={s.listMeta}>{j.exact_location}</Text>
-                      <Text style={[s.listMeta, { color: C.text }]}>{j.description}</Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end', gap: 4 }}>
-                      <PriorityTag priority={j.priority} />
-                      <Text style={s.listWhen}>
-                        {REPAIR_STATUS_LABELS[j.repair_status] || j.repair_status}
-                      </Text>
-                    </View>
+                    <Text style={s.smallBtnPrimaryText}>{starting ? 'Saving...' : 'Start working'}</Text>
                   </Pressable>
-                ))
-              )}
-              {list.total > list.items.length && (
-                <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
-                  Showing the {list.items.length} most recent of {list.total}.
-                </Text>
-              )}
+                ) : (
+                  <View style={[s.smallBtn, { backgroundColor: C.blueBg }]}>
+                    <Text style={[s.smallBtnGhostText, { color: C.blue }]}>Working on it</Text>
+                  </View>
+                )}
+              </View>
             </View>
-          </>
-        ) : null}
-      </ScrollView>
-    </KeyboardAvoidingView>
+          )}
+
+          <View style={s.chipRow}>
+            {Object.entries(lists).map(([key, l]) => (
+              <Pressable key={key} style={[s.chip, listKey === key && s.chipActive]} onPress={() => setListKey(key)}>
+                <Text style={[s.chipText, listKey === key && s.chipTextActive]}>
+                  {l.label} · {l.total}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <View style={s.card}>
+            {list.items.length === 0 ? (
+              <Text style={s.muted}>
+                {listKey === 'todo'
+                  ? 'No repairs assigned right now. Pull down to refresh.'
+                  : listKey === 'awaiting'
+                  ? 'Nothing waiting for the GSO.'
+                  : 'Nothing completed yet.'}
+              </Text>
+            ) : list.completed ? (
+              list.items.map((r, i, arr) => (
+                <View key={r.id} style={[s.listRow, i === arr.length - 1 && s.listRowLast]}>
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{r.equipment_code}</Text>
+                    <Text style={s.listMeta}>{r.description}</Text>
+                    <Text style={s.listMeta}>{formatDateTime(r.completed_date)}</Text>
+                  </View>
+                  <View style={[s.tag, s.tagGreen]}>
+                    <Text style={[s.tagText, { color: C.green }]}>Done</Text>
+                  </View>
+                </View>
+              ))
+            ) : (
+              list.items.map((j, i, arr) => (
+                <Pressable
+                  key={j.id}
+                  style={[s.listRow, i === arr.length - 1 && s.listRowLast]}
+                  onPress={() => onOpenJob(j)}
+                >
+                  <View style={s.flex}>
+                    <Text style={s.listCode}>{j.equipment_code}</Text>
+                    <Text style={s.listMeta}>
+                      {TYPE_LABELS[j.equipment_type] || j.equipment_type}
+                      {j.building_name ? ` · ${j.building_name}` : ''}
+                    </Text>
+                    <Text style={s.listMeta}>{j.exact_location}</Text>
+                    <Text style={[s.listMeta, { color: C.text }]}>{j.description}</Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                    <PriorityTag priority={j.priority} />
+                    <Text style={s.listWhen}>
+                      {REPAIR_STATUS_LABELS[j.repair_status] || j.repair_status}
+                    </Text>
+                  </View>
+                </Pressable>
+              ))
+            )}
+            {list.total > list.items.length && (
+              <Text style={[s.sectionHint, { marginTop: 8, marginBottom: 0 }]}>
+                Showing the {list.items.length} most recent of {list.total}.
+              </Text>
+            )}
+          </View>
+        </>
+      ) : null}
+    </KeyboardScroll>
   )
 }
 
@@ -1772,84 +1835,82 @@ function TechnicianJob({ job, onBack, onUpdated }) {
   }
 
   return (
-    <KeyboardAvoidingView style={s.flex} behavior="padding">
-      <ScrollView
-        contentContainerStyle={s.scroll}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={s.card}>
-          <Text style={s.code}>{job.equipment_code}</Text>
-          <Text style={s.type}>{TYPE_LABELS[job.equipment_type] || job.equipment_type}</Text>
+    <KeyboardScroll
+      contentContainerStyle={s.scroll}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={s.card}>
+        <Text style={s.code}>{job.equipment_code}</Text>
+        <Text style={s.type}>{TYPE_LABELS[job.equipment_type] || job.equipment_type}</Text>
 
-          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
-            <PriorityTag priority={job.priority} />
-            <View style={[s.tag, repaired ? s.tagGreen : { backgroundColor: C.blueBg }]}>
-              <Text style={[s.tagText, { color: repaired ? C.green : C.blue }]}>
-                {REPAIR_STATUS_LABELS[job.repair_status] || job.repair_status}
-              </Text>
-            </View>
+        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
+          <PriorityTag priority={job.priority} />
+          <View style={[s.tag, repaired ? s.tagGreen : { backgroundColor: C.blueBg }]}>
+            <Text style={[s.tagText, { color: repaired ? C.green : C.blue }]}>
+              {REPAIR_STATUS_LABELS[job.repair_status] || job.repair_status}
+            </Text>
           </View>
-
-          <Row label="Building" value={job.building_name ?? '—'} />
-          <Row label="Location" value={job.exact_location ?? '—'} />
-          <Row label="Problem" value={job.description} />
-          <Row label="Work type" value={ACTION_TYPE_LABELS[job.action_type] || job.action_type} />
-          {job.job_order_remarks ? <Row label="GSO notes" value={job.job_order_remarks} /> : null}
-          {job.decided_at ? <Row label="Job order" value={relativeTime(job.decided_at)} /> : null}
-
-          {repaired && (
-            <View style={[s.banner, s.bannerGreen]}>
-              <Text style={s.bannerGreenText}>
-                Marked as repaired. This job has been completed automatically.
-              </Text>
-            </View>
-          )}
-
-          <Text style={s.label}>Note for GSO (optional)</Text>
-          <TextInput
-            style={[s.input, s.textarea]}
-            value={note}
-            onChangeText={setNote}
-            placeholder="e.g. Replaced the battery and tested the unit"
-            multiline
-          />
-
-          {error && <Text style={s.error}>{error}</Text>}
-
-          {!repaired && !working && (
-            <Pressable
-              style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
-              onPress={() => apply('working')}
-              disabled={saving}
-            >
-              <Text style={s.btnOutlineText}>Start working</Text>
-            </Pressable>
-          )}
-
-          {!repaired ? (
-            <Pressable
-              style={[s.btn, { backgroundColor: C.green }, saving && s.btnDisabled]}
-              onPress={markRepaired}
-              disabled={saving}
-            >
-              <Text style={s.btnPrimaryText}>{saving ? 'Saving...' : 'Mark as repaired'}</Text>
-            </Pressable>
-          ) : (
-            <Pressable
-              style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
-              onPress={() => apply('working')}
-              disabled={saving}
-            >
-              <Text style={s.btnOutlineText}>Not fixed yet — back to working</Text>
-            </Pressable>
-          )}
-
-          <Pressable style={[s.btn, s.btnGhost]} onPress={onBack} disabled={saving}>
-            <Text style={s.btnGhostText}>Back</Text>
-          </Pressable>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+
+        <Row label="Building" value={job.building_name ?? '—'} />
+        <Row label="Location" value={job.exact_location ?? '—'} />
+        <Row label="Problem" value={job.description} />
+        <Row label="Work type" value={ACTION_TYPE_LABELS[job.action_type] || job.action_type} />
+        {job.job_order_remarks ? <Row label="GSO notes" value={job.job_order_remarks} /> : null}
+        {job.decided_at ? <Row label="Job order" value={relativeTime(job.decided_at)} /> : null}
+
+        {repaired && (
+          <View style={[s.banner, s.bannerGreen]}>
+            <Text style={s.bannerGreenText}>
+              Marked as repaired. This job has been completed automatically.
+            </Text>
+          </View>
+        )}
+
+        <Text style={s.label}>Note for GSO (optional)</Text>
+        <TextInput
+          style={[s.input, s.textarea]}
+          value={note}
+          onChangeText={setNote}
+          placeholder="e.g. Replaced the battery and tested the unit"
+          multiline
+        />
+
+        {error && <Text style={s.error}>{error}</Text>}
+
+        {!repaired && !working && (
+          <Pressable
+            style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
+            onPress={() => apply('working')}
+            disabled={saving}
+          >
+            <Text style={s.btnOutlineText}>Start working</Text>
+          </Pressable>
+        )}
+
+        {!repaired ? (
+          <Pressable
+            style={[s.btn, { backgroundColor: C.green }, saving && s.btnDisabled]}
+            onPress={markRepaired}
+            disabled={saving}
+          >
+            <Text style={s.btnPrimaryText}>{saving ? 'Saving...' : 'Mark as repaired'}</Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            style={[s.btn, s.btnOutline, saving && s.btnDisabled]}
+            onPress={() => apply('working')}
+            disabled={saving}
+          >
+            <Text style={s.btnOutlineText}>Not fixed yet — back to working</Text>
+          </Pressable>
+        )}
+
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onBack} disabled={saving}>
+          <Text style={s.btnGhostText}>Back</Text>
+        </Pressable>
+      </View>
+    </KeyboardScroll>
   )
 }
 
@@ -2038,48 +2099,43 @@ function ManualEntry({ onFound, onCancel }) {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={s.flex}
-      behavior="padding"
-    >
-      <ScrollView contentContainerStyle={s.scroll}>
-        <View style={s.card}>
-          <Text style={s.h1}>Enter code</Text>
-          <Text style={s.muted}>
-            Type the code printed under the QR sticker. Use this when a sticker is
-            scratched, faded or painted over.
+    <KeyboardScroll contentContainerStyle={s.scroll}>
+      <View style={s.card}>
+        <Text style={s.h1}>Enter code</Text>
+        <Text style={s.muted}>
+          Type the code printed under the QR sticker. Use this when a sticker is
+          scratched, faded or painted over.
+        </Text>
+
+        <TextInput
+          style={[s.input, s.inputCode, { marginTop: 16 }]}
+          value={code}
+          onChangeText={(t) => setCode(t.toUpperCase())}
+          placeholder="FE-001"
+          autoCapitalize="characters"
+          autoCorrect={false}
+          autoFocus
+          onSubmitEditing={() => code.trim() && lookup()}
+          returnKeyType="search"
+        />
+
+        {error && <Text style={s.error}>{error}</Text>}
+
+        <Pressable
+          style={[s.btn, s.btnPrimary, (looking || !code.trim()) && s.btnDisabled]}
+          onPress={lookup}
+          disabled={looking || !code.trim()}
+        >
+          <Text style={s.btnPrimaryText}>
+            {looking ? 'Looking up...' : 'Find Equipment'}
           </Text>
+        </Pressable>
 
-          <TextInput
-            style={[s.input, s.inputCode, { marginTop: 16 }]}
-            value={code}
-            onChangeText={(t) => setCode(t.toUpperCase())}
-            placeholder="FE-001"
-            autoCapitalize="characters"
-            autoCorrect={false}
-            autoFocus
-            onSubmitEditing={() => code.trim() && lookup()}
-            returnKeyType="search"
-          />
-
-          {error && <Text style={s.error}>{error}</Text>}
-
-          <Pressable
-            style={[s.btn, s.btnPrimary, (looking || !code.trim()) && s.btnDisabled]}
-            onPress={lookup}
-            disabled={looking || !code.trim()}
-          >
-            <Text style={s.btnPrimaryText}>
-              {looking ? 'Looking up...' : 'Find Equipment'}
-            </Text>
-          </Pressable>
-
-          <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
-            <Text style={s.btnGhostText}>Back</Text>
-          </Pressable>
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel}>
+          <Text style={s.btnGhostText}>Back</Text>
+        </Pressable>
+      </View>
+    </KeyboardScroll>
   )
 }
 
@@ -2237,169 +2293,164 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
   }
 
   return (
-    <KeyboardAvoidingView
-      style={s.flex}
-      behavior="padding"
-    >
-      <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <View style={s.card}>
-          <Text style={s.h1}>{equipment.equipment_code}</Text>
-          <Text style={s.muted}>
-            {equipment.buildings?.building_name} · {equipment.exact_location}
-          </Text>
+    <KeyboardScroll contentContainerStyle={s.scroll}>
+      <View style={s.card}>
+        <Text style={s.h1}>{equipment.equipment_code}</Text>
+        <Text style={s.muted}>
+          {equipment.buildings?.building_name} · {equipment.exact_location}
+        </Text>
 
-          <Text style={s.label}>Condition</Text>
-          <View style={s.choiceRow}>
-            <Pressable
-              style={[s.choice, condition === 'functional' && s.choiceGreen]}
-              onPress={() => setCondition('functional')}
-            >
-              <Text style={[s.choiceText, condition === 'functional' && s.choiceTextActive]}>
-                Functional
-              </Text>
-            </Pressable>
-            <Pressable
-              style={[s.choice, defective && s.choiceRed]}
-              onPress={() => setCondition('defective')}
-            >
-              <Text style={[s.choiceText, defective && s.choiceTextActive]}>Defective</Text>
-            </Pressable>
-          </View>
-
-          {defective && (
-            <>
-              <Text style={s.label}>What is wrong?</Text>
-              <View style={s.findingWrap}>
-                {presets.map((p) => {
-                  const active = selectedFinding === p.label
-                  return (
-                    <Pressable
-                      key={p.label}
-                      style={[s.finding, active && s.findingActive]}
-                      onPress={() => pickFinding(p)}
-                    >
-                      <Text style={[s.findingText, active && s.findingTextActive]}>
-                        {p.label}
-                      </Text>
-                    </Pressable>
-                  )
-                })}
-                <Pressable
-                  style={[s.finding, isOther && s.findingActive]}
-                  onPress={() => {
-                    // Don't carry over the action/priority of a preset picked
-                    // before — a custom finding starts from neutral defaults
-                    // and the override rows open so the inspector sets them.
-                    setSelectedFinding(OTHER_FINDING)
-                    setActionType('other')
-                    setPriority('medium')
-                    setShowOverrides(true)
-                  }}
-                >
-                  <Text style={[s.findingText, isOther && s.findingTextActive]}>
-                    Something else...
-                  </Text>
-                </Pressable>
-              </View>
-
-              {isOther && (
-                <TextInput
-                  style={[s.input, s.textarea, { marginTop: 10 }]}
-                  value={otherText}
-                  onChangeText={setOtherText}
-                  placeholder="Describe what you found"
-                  multiline
-                  autoFocus
-                />
-              )}
-
-              <Text style={s.label}>Action required</Text>
-              <View style={s.autoBox}>
-                <View style={s.autoRow}>
-                  <Text style={s.autoLabel}>Action</Text>
-                  <Text style={s.autoValue}>{ACTION_TYPE_LABELS[actionType]}</Text>
-                </View>
-                <View style={[s.autoRow, { borderBottomWidth: 0 }]}>
-                  <Text style={s.autoLabel}>Priority</Text>
-                  <Text
-                    style={[
-                      s.autoValue,
-                      (priority === 'critical' || priority === 'high') && { color: C.red }
-                    ]}
-                  >
-                    {priority.charAt(0).toUpperCase() + priority.slice(1)}
-                  </Text>
-                </View>
-                <Pressable onPress={() => setShowOverrides((v) => !v)}>
-                  <Text style={s.autoChange}>
-                    {showOverrides ? 'Done' : 'Set automatically · Change'}
-                  </Text>
-                </Pressable>
-              </View>
-
-              {showOverrides && (
-                <>
-                  <Text style={s.label}>Action type</Text>
-                  <View style={s.chipWrap}>
-                    {ACTION_TYPES.map((t) => (
-                      <Pressable
-                        key={t}
-                        style={[s.chip, actionType === t && s.chipActive]}
-                        onPress={() => setActionType(t)}
-                      >
-                        <Text style={[s.chipText, actionType === t && s.chipTextActive]}>
-                          {ACTION_TYPE_LABELS[t]}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-
-                  <Text style={s.label}>Priority</Text>
-                  <View style={s.chipWrap}>
-                    {PRIORITY_OPTIONS.map((p) => (
-                      <Pressable
-                        key={p}
-                        style={[s.chip, priority === p && s.chipActive]}
-                        onPress={() => setPriority(p)}
-                      >
-                        <Text style={[s.chipText, priority === p && s.chipTextActive]}>
-                          {p.charAt(0).toUpperCase() + p.slice(1)}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </>
-              )}
-            </>
-          )}
-
-          <Text style={s.label}>Notes (optional)</Text>
-          <TextInput
-            style={[s.input, s.textarea]}
-            value={notes}
-            onChangeText={setNotes}
-            placeholder="Anything else worth recording"
-            multiline
-          />
-
-          {error && <Text style={s.error}>{error}</Text>}
-
+        <Text style={s.label}>Condition</Text>
+        <View style={s.choiceRow}>
           <Pressable
-            style={[s.btn, s.btnPrimary, (saving || !canSubmit) && s.btnDisabled]}
-            onPress={submit}
-            disabled={saving || !canSubmit}
+            style={[s.choice, condition === 'functional' && s.choiceGreen]}
+            onPress={() => setCondition('functional')}
           >
-            <Text style={s.btnPrimaryText}>
-              {saving ? 'Submitting...' : 'Submit Inspection'}
+            <Text style={[s.choiceText, condition === 'functional' && s.choiceTextActive]}>
+              Functional
             </Text>
           </Pressable>
-
-          <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel} disabled={saving}>
-            <Text style={s.btnGhostText}>Back</Text>
+          <Pressable
+            style={[s.choice, defective && s.choiceRed]}
+            onPress={() => setCondition('defective')}
+          >
+            <Text style={[s.choiceText, defective && s.choiceTextActive]}>Defective</Text>
           </Pressable>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+
+        {defective && (
+          <>
+            <Text style={s.label}>What is wrong?</Text>
+            <View style={s.findingWrap}>
+              {presets.map((p) => {
+                const active = selectedFinding === p.label
+                return (
+                  <Pressable
+                    key={p.label}
+                    style={[s.finding, active && s.findingActive]}
+                    onPress={() => pickFinding(p)}
+                  >
+                    <Text style={[s.findingText, active && s.findingTextActive]}>
+                      {p.label}
+                    </Text>
+                  </Pressable>
+                )
+              })}
+              <Pressable
+                style={[s.finding, isOther && s.findingActive]}
+                onPress={() => {
+                  // Don't carry over the action/priority of a preset picked
+                  // before — a custom finding starts from neutral defaults
+                  // and the override rows open so the inspector sets them.
+                  setSelectedFinding(OTHER_FINDING)
+                  setActionType('other')
+                  setPriority('medium')
+                  setShowOverrides(true)
+                }}
+              >
+                <Text style={[s.findingText, isOther && s.findingTextActive]}>
+                  Something else...
+                </Text>
+              </Pressable>
+            </View>
+
+            {isOther && (
+              <TextInput
+                style={[s.input, s.textarea, { marginTop: 10 }]}
+                value={otherText}
+                onChangeText={setOtherText}
+                placeholder="Describe what you found"
+                multiline
+                autoFocus
+              />
+            )}
+
+            <Text style={s.label}>Action required</Text>
+            <View style={s.autoBox}>
+              <View style={s.autoRow}>
+                <Text style={s.autoLabel}>Action</Text>
+                <Text style={s.autoValue}>{ACTION_TYPE_LABELS[actionType]}</Text>
+              </View>
+              <View style={[s.autoRow, { borderBottomWidth: 0 }]}>
+                <Text style={s.autoLabel}>Priority</Text>
+                <Text
+                  style={[
+                    s.autoValue,
+                    (priority === 'critical' || priority === 'high') && { color: C.red }
+                  ]}
+                >
+                  {priority.charAt(0).toUpperCase() + priority.slice(1)}
+                </Text>
+              </View>
+              <Pressable onPress={() => setShowOverrides((v) => !v)}>
+                <Text style={s.autoChange}>
+                  {showOverrides ? 'Done' : 'Set automatically · Change'}
+                </Text>
+              </Pressable>
+            </View>
+
+            {showOverrides && (
+              <>
+                <Text style={s.label}>Action type</Text>
+                <View style={s.chipWrap}>
+                  {ACTION_TYPES.map((t) => (
+                    <Pressable
+                      key={t}
+                      style={[s.chip, actionType === t && s.chipActive]}
+                      onPress={() => setActionType(t)}
+                    >
+                      <Text style={[s.chipText, actionType === t && s.chipTextActive]}>
+                        {ACTION_TYPE_LABELS[t]}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={s.label}>Priority</Text>
+                <View style={s.chipWrap}>
+                  {PRIORITY_OPTIONS.map((p) => (
+                    <Pressable
+                      key={p}
+                      style={[s.chip, priority === p && s.chipActive]}
+                      onPress={() => setPriority(p)}
+                    >
+                      <Text style={[s.chipText, priority === p && s.chipTextActive]}>
+                        {p.charAt(0).toUpperCase() + p.slice(1)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </>
+            )}
+          </>
+        )}
+
+        <Text style={s.label}>Notes (optional)</Text>
+        <TextInput
+          style={[s.input, s.textarea]}
+          value={notes}
+          onChangeText={setNotes}
+          placeholder="Anything else worth recording"
+          multiline
+        />
+
+        {error && <Text style={s.error}>{error}</Text>}
+
+        <Pressable
+          style={[s.btn, s.btnPrimary, (saving || !canSubmit) && s.btnDisabled]}
+          onPress={submit}
+          disabled={saving || !canSubmit}
+        >
+          <Text style={s.btnPrimaryText}>
+            {saving ? 'Submitting...' : 'Submit Inspection'}
+          </Text>
+        </Pressable>
+
+        <Pressable style={[s.btn, s.btnGhost]} onPress={onCancel} disabled={saving}>
+          <Text style={s.btnGhostText}>Back</Text>
+        </Pressable>
+      </View>
+    </KeyboardScroll>
   )
 }
 
