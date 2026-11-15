@@ -1044,11 +1044,47 @@ input::-ms-clear {
   font-weight: 500;
   text-align: left;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.18s ease;
 }
 
-.side-item:hover {
+/* Slides a little to the right when the cursor is on it */
+.side-item:hover,
+.side-logout:hover {
+  transform: translateX(5px);
+}
+
+/* The hover box slides in from the left behind the icon and text */
+.side-item,
+.side-logout {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.side-item::before,
+.side-logout::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
   background: var(--gray-bg);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.22s ease;
+}
+
+.side-logout::before {
+  background: var(--red-bg);
+}
+
+.side-item:hover::before,
+.side-logout:hover::before {
+  transform: scaleX(1);
+}
+
+.side-item.active::before {
+  display: none;
 }
 
 .side-item.active {
@@ -1117,10 +1153,25 @@ input::-ms-clear {
   font-weight: 600;
   text-align: left;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-item,
+  .side-logout {
+    transition: none;
+  }
+  .side-item:hover,
+  .side-logout:hover {
+    transform: none;
+  }
+  .side-item::before,
+  .side-logout::before {
+    transition: none;
+  }
 }
 
 .side-logout:hover {
-  background: var(--red-bg);
   color: var(--red);
 }
 
