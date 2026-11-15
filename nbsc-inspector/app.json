@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "FireSafety Tech&Inspect",
+    "name": "FireScan",
     "slug": "nbsc-inspector",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -24,7 +24,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "FireSafety Tech&Inspect needs camera access to scan equipment QR codes."
+          "cameraPermission": "FireScan needs camera access to scan equipment QR codes."
         }
       ],
       [

@@ -291,7 +291,7 @@ export default function SummaryScreen({ role, account, onBack }) {
 
   function shareText() {
     if (!data) return ''
-    const head = `FireSafety Tech&Inspect summary\n${account.full_name} (${isTech ? 'Technician' : 'Inspector'})\n${generated.toLocaleString()}\n`
+    const head = `FireScan summary\n${account.full_name} (${isTech ? 'Technician' : 'Inspector'})\n${generated.toLocaleString()}\n`
     if (isTech) {
       return (
         head +
