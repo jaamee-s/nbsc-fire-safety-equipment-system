@@ -398,8 +398,8 @@ function App() {
             <h1>{profile.role === 'technician' ? 'Technician Account' : 'Inspector Account'}</h1>
             <p className="login-subtitle">
               {profile.role === 'technician'
-                ? 'Repair work is handled in the FireSafety Tech&Inspect mobile app. Please sign in there to see your assigned equipment and update repair status.'
-                : 'Inspections are performed in the FireSafety Tech&Inspect mobile app. Please sign in there to scan equipment and submit inspections.'}
+                ? 'Repair work is handled in the FireScan mobile app. Please sign in there to see your assigned equipment and update repair status.'
+                : 'Inspections are performed in the FireScan mobile app. Please sign in there to scan equipment and submit inspections.'}
             </p>
             <button className="btn btn-secondary" style={{ marginTop: '16px' }} onClick={handleLogout}>
               Log out
