@@ -954,6 +954,25 @@ input::-ms-clear {
 .app-header .brand-name {
   font-weight: 800;
   letter-spacing: -0.3px;
+  line-height: 1.1;
+}
+
+.brand-lockup {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.brand-tagline {
+  font-size: 0.72rem;
+  color: #A9B8CE;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .brand-tagline {
+    display: none;
+  }
 }
 
 .login-brand-mark {

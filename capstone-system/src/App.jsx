@@ -2086,7 +2086,10 @@ function Dashboard({ profile, onLogout }) {
       <header className="app-header app-header-compact">
         <div className="title-block">
           <img className="brand-mark" src={logoMarkDarkBg} alt="FireScan logo" />
-          <h1 className="brand-name">Fire<span>Scan</span></h1>
+          <div className="brand-lockup">
+            <h1 className="brand-name">Fire<span>Scan</span></h1>
+            <div className="brand-tagline">NBSC Fire Safety Equipment Monitoring and Inspection</div>
+          </div>
         </div>
 
         <div className="header-search">
