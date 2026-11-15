@@ -386,6 +386,20 @@ function RootApp() {
   }
   goToScreenRef.current = goToScreen
 
+  // The bell opens Notifications, and tapping it again closes them: back to
+  // the tab it was opened from (Summary), otherwise the home screen.
+  const notifReturnTo = useRef(null)
+  function toggleNotifications() {
+    if (screen === 'notifications') {
+      const back = notifReturnTo.current
+      notifReturnTo.current = null
+      if (back === 'summary') goToScreen('summary')
+      else goHome()
+    } else {
+      notifReturnTo.current = screen
+      goToScreen('notifications')
+    }
+  }
 
   // Notifications: open what the notification is about.
   // An open job opens the job; everything else opens its equipment.
@@ -501,7 +515,11 @@ function RootApp() {
             </Text>
           </View>
           {signedIn && (
-            <NotificationBell count={unreadCount} onPress={() => goToScreen('notifications')} />
+            <NotificationBell
+              count={unreadCount}
+              open={screen === 'notifications'}
+              onPress={toggleNotifications}
+            />
           )}
           {signedIn && (
             <Pressable onPress={handleLogout} style={s.logoutBtn} hitSlop={8}>

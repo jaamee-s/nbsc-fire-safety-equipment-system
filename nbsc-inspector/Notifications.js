@@ -259,10 +259,17 @@ export function useNotifications(account, data) {
 /* UI                                                                  */
 /* ------------------------------------------------------------------ */
 
-export function NotificationBell({ count, onPress }) {
+// open: Notifications are showing, so the bell is filled in and tapping it
+// closes them.
+export function NotificationBell({ count, open, onPress }) {
   return (
-    <Pressable onPress={onPress} style={n.bell} hitSlop={8} accessibilityLabel="Notifications">
-      <Ionicons name="notifications-outline" size={19} color={C.white} />
+    <Pressable
+      onPress={onPress}
+      style={[n.bell, open && n.bellOpen]}
+      hitSlop={8}
+      accessibilityLabel={open ? "Close notifications" : "Notifications"}
+    >
+      <Ionicons name={open ? "notifications" : "notifications-outline"} size={19} color={C.white} />
       {count > 0 && (
         <View style={n.badge}>
           <Text style={n.badgeText}>{count > 9 ? '9+' : count}</Text>
@@ -540,6 +547,7 @@ const n = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.4)',
     borderRadius: 999
   },
+  bellOpen: { backgroundColor: 'rgba(255,255,255,0.18)', borderColor: C.white },
   badge: {
     position: 'absolute',
     top: -6,
