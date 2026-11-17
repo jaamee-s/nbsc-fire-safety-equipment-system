@@ -531,6 +531,10 @@ function Dashboard({ profile, onLogout }) {
   const [roomFloorMode, setRoomFloorMode] = useState('select')
   const [roomSubmitting, setRoomSubmitting] = useState(false)
   const [roomError, setRoomError] = useState(null)
+  // Editing one room's name in place (✎ on the room chip)
+  const [editingRoom, setEditingRoom] = useState(null) // { id, label }
+  const [editRoomSaving, setEditRoomSaving] = useState(false)
+  const [editRoomError, setEditRoomError] = useState(null)
 
   // Stock tracking state
   const [stock, setStock] = useState([])
@@ -1015,6 +1019,80 @@ function Dashboard({ profile, onLogout }) {
       getBuildingLocations()
     }
     setRoomSubmitting(false)
+  }
+
+  // Renames a room, e.g. when another office moves into it. Equipment saves
+  // its room as text ("1st Floor - Rm105 - ..."), so equipment in this room
+  // is updated to the new name too, or it would keep showing the old one.
+  async function saveRoomEdit(loc, buildingId) {
+    setEditRoomError(null)
+    const label = (editingRoom?.label || '').trim()
+    if (!label) {
+      setEditRoomError('The room name cannot be empty.')
+      return
+    }
+    if (label === loc.location_label.trim()) {
+      setEditingRoom(null)
+      return
+    }
+    const duplicate = buildingLocations.some(
+      (l) =>
+        l.id !== loc.id &&
+        l.building_id === buildingId &&
+        l.floor_label === loc.floor_label &&
+        l.location_label.trim().toLowerCase() === label.toLowerCase()
+    )
+    if (duplicate) {
+      setEditRoomError(`"${label}" is already on ${loc.floor_label}.`)
+      return
+    }
+
+    const oldFull = `${loc.floor_label} - ${loc.location_label}`
+    const newFull = `${loc.floor_label} - ${label}`
+    const affected = equipment.filter((e) => e.building_id === buildingId && e.exact_location === oldFull)
+    if (affected.length > 0) {
+      const ok = window.confirm(
+        `Rename "${loc.location_label}" to "${label}"?\n\n` +
+          `${affected.length} piece${affected.length === 1 ? '' : 's'} of equipment in this room (` +
+          `${affected.map((e) => e.equipment_code).join(', ')}) will show the new name too.`
+      )
+      if (!ok) return
+    }
+
+    setEditRoomSaving(true)
+    const { data, error } = await supabase
+      .from('building_locations')
+      .update({ location_label: label })
+      .eq('id', loc.id)
+      .select('id')
+    if (error) {
+      setEditRoomError(error.message)
+      setEditRoomSaving(false)
+      return
+    }
+    // No row changed: the edit rule (migration 018) is not in the database yet.
+    if (!data || data.length === 0) {
+      setEditRoomError('The room could not be renamed. Run migration 018 in Supabase first.')
+      setEditRoomSaving(false)
+      return
+    }
+
+    if (affected.length > 0) {
+      const { error: eqError } = await supabase
+        .from('equipment')
+        .update({ exact_location: newFull })
+        .eq('building_id', buildingId)
+        .eq('exact_location', oldFull)
+      if (eqError) {
+        console.error('Error moving equipment to the new room name:', eqError)
+        alert('The room was renamed, but its equipment still shows the old name: ' + eqError.message)
+      }
+      getEquipment(true)
+    }
+
+    setEditingRoom(null)
+    setEditRoomSaving(false)
+    getBuildingLocations()
   }
 
   // exact_location on equipment is a copied text string, not a foreign key,
@@ -2825,7 +2903,50 @@ function Dashboard({ profile, onLogout }) {
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                                       {locsForThisBuilding
                                         .filter((l) => l.floor_label === floor)
-                                        .map((l) => (
+                                        .map((l) =>
+                                          editingRoom?.id === l.id ? (
+                                            <form
+                                              key={l.id}
+                                              onSubmit={(e) => {
+                                                e.preventDefault()
+                                                saveRoomEdit(l, b.id)
+                                              }}
+                                              style={{
+                                                display: 'flex',
+                                                flexWrap: 'wrap',
+                                                alignItems: 'center',
+                                                gap: '6px',
+                                                flexBasis: '100%'
+                                              }}
+                                            >
+                                              <input
+                                                autoFocus
+                                                value={editingRoom.label}
+                                                onChange={(e) => setEditingRoom({ id: l.id, label: e.target.value })}
+                                                aria-label="Room name"
+                                                style={{ flex: '1 1 260px', minWidth: 0 }}
+                                              />
+                                              <button className="btn btn-primary btn-sm" type="submit" disabled={editRoomSaving}>
+                                                {editRoomSaving ? 'Saving...' : 'Save'}
+                                              </button>
+                                              <button
+                                                className="btn btn-secondary btn-sm"
+                                                type="button"
+                                                onClick={() => {
+                                                  setEditingRoom(null)
+                                                  setEditRoomError(null)
+                                                }}
+                                                disabled={editRoomSaving}
+                                              >
+                                                Cancel
+                                              </button>
+                                              {editRoomError && (
+                                                <p className="form-error" style={{ flexBasis: '100%', margin: 0 }}>
+                                                  {editRoomError}
+                                                </p>
+                                              )}
+                                            </form>
+                                          ) : (
                                           <span
                                             key={l.id}
                                             style={{
@@ -2841,6 +2962,24 @@ function Dashboard({ profile, onLogout }) {
                                           >
                                             {l.location_label}
                                             <button
+                                              onClick={() => {
+                                                setEditRoomError(null)
+                                                setEditingRoom({ id: l.id, label: l.location_label })
+                                              }}
+                                              style={{
+                                                background: 'none',
+                                                border: 'none',
+                                                color: 'var(--blue)',
+                                                cursor: 'pointer',
+                                                fontSize: '0.8rem',
+                                                padding: 0
+                                              }}
+                                              title="Edit room name or office"
+                                              aria-label={`Edit ${l.location_label}`}
+                                            >
+                                              ✎
+                                            </button>
+                                            <button
                                               onClick={() => deleteLocation(l.id, l.floor_label, l.location_label)}
                                               style={{
                                                 background: 'none',
@@ -2855,7 +2994,8 @@ function Dashboard({ profile, onLogout }) {
                                               ✕
                                             </button>
                                           </span>
-                                        ))}
+                                          )
+                                        )}
                                     </div>
                                   </div>
                                 ))
