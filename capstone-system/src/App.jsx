@@ -525,6 +525,12 @@ function Dashboard({ profile, onLogout }) {
   const [bulkSubmitting, setBulkSubmitting] = useState(false)
   const [bulkError, setBulkError] = useState(null)
   const [bulkFloorMode, setBulkFloorMode] = useState('select')
+  // Add Single Room: the Bulk form's choices for one room, plus the office
+  // in it (e.g. Rm105 - Research Publication Office)
+  const [roomForm, setRoomForm] = useState({ floor_label: '', prefix: 'Room ', number: '', office: '' })
+  const [roomFloorMode, setRoomFloorMode] = useState('select')
+  const [roomSubmitting, setRoomSubmitting] = useState(false)
+  const [roomError, setRoomError] = useState(null)
 
   // Stock tracking state
   const [stock, setStock] = useState([])
@@ -959,6 +965,56 @@ function Dashboard({ profile, onLogout }) {
     }
 
     setBulkSubmitting(false)
+  }
+
+  function handleRoomFormChange(e) {
+    const { name, value } = e.target
+    setRoomForm((prev) => ({ ...prev, [name]: value }))
+  }
+
+  // One room, named like the Bulk form (prefix + number), with the office
+  // that uses it after a dash, the same way the existing rooms are named.
+  async function handleRoomSubmit(e, buildingId) {
+    e.preventDefault()
+    setRoomError(null)
+
+    const floor = roomForm.floor_label.trim()
+    const number = roomForm.number.trim()
+    const office = roomForm.office.trim()
+    if (!floor) {
+      setRoomError('Floor is required.')
+      return
+    }
+    if (!number) {
+      setRoomError('Room number is required (e.g. 106 or 303-304).')
+      return
+    }
+    const label = `${roomForm.prefix}${number}${office ? ` - ${office}` : ''}`.trim()
+    const duplicate = buildingLocations.some(
+      (l) =>
+        l.building_id === buildingId &&
+        l.floor_label.trim().toLowerCase() === floor.toLowerCase() &&
+        l.location_label.trim().toLowerCase() === label.toLowerCase()
+    )
+    if (duplicate) {
+      setRoomError(`"${label}" is already on ${floor}.`)
+      return
+    }
+
+    setRoomSubmitting(true)
+    const { error } = await supabase
+      .from('building_locations')
+      .insert([{ building_id: buildingId, floor_label: floor, location_label: label }])
+
+    if (error) {
+      console.error('Error adding room:', error)
+      setRoomError(error.message)
+    } else {
+      setRoomForm({ floor_label: floor, prefix: roomForm.prefix, number: '', office: '' })
+      setRoomFloorMode('select')
+      getBuildingLocations()
+    }
+    setRoomSubmitting(false)
   }
 
   // exact_location on equipment is a copied text string, not a foreign key,
@@ -2863,6 +2919,90 @@ function Dashboard({ profile, onLogout }) {
                                   {locationError && <p className="form-error">{locationError}</p>}
                                   <button className="btn btn-primary btn-sm" type="submit" disabled={locationSubmitting}>
                                     {locationSubmitting ? 'Adding...' : 'Add Location'}
+                                  </button>
+                                </form>
+
+                                <form
+                                  onSubmit={(e) => handleRoomSubmit(e, b.id)}
+                                  style={{ flex: '1 1 240px', display: 'flex', flexDirection: 'column', gap: '8px' }}
+                                >
+                                  <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>
+                                    Add Single Room (e.g. Room 106)
+                                  </div>
+
+                                  {floorGroups.length > 0 && roomFloorMode === 'select' ? (
+                                    <select
+                                      value={roomForm.floor_label}
+                                      onChange={(e) => {
+                                        if (e.target.value === '__new__') {
+                                          setRoomFloorMode('new')
+                                          setRoomForm((prev) => ({ ...prev, floor_label: '' }))
+                                        } else {
+                                          setRoomForm((prev) => ({ ...prev, floor_label: e.target.value }))
+                                        }
+                                      }}
+                                    >
+                                      <option value="">-- Select Floor --</option>
+                                      {floorGroups.map((f) => (
+                                        <option key={f} value={f}>{f}</option>
+                                      ))}
+                                      <option value="__new__">+ Add New Floor...</option>
+                                    </select>
+                                  ) : (
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                      <input
+                                        name="floor_label"
+                                        placeholder="New floor name (e.g. 1st Floor)"
+                                        value={roomForm.floor_label}
+                                        onChange={handleRoomFormChange}
+                                        style={{ flex: 1 }}
+                                      />
+                                      {floorGroups.length > 0 && (
+                                        <button
+                                          type="button"
+                                          className="btn btn-secondary btn-sm"
+                                          onClick={() => {
+                                            setRoomFloorMode('select')
+                                            setRoomForm((prev) => ({ ...prev, floor_label: '' }))
+                                          }}
+                                        >
+                                          Cancel
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  <input
+                                    name="prefix"
+                                    placeholder="Prefix (e.g. Room  or Rm)"
+                                    value={roomForm.prefix}
+                                    onChange={handleRoomFormChange}
+                                  />
+                                  <input
+                                    name="number"
+                                    placeholder="Room number (e.g. 106 or 303-304)"
+                                    value={roomForm.number}
+                                    onChange={handleRoomFormChange}
+                                  />
+                                  <input
+                                    name="office"
+                                    placeholder="Office in this room (optional)"
+                                    value={roomForm.office}
+                                    onChange={handleRoomFormChange}
+                                  />
+                                  {roomForm.number.trim() && (
+                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                      Will be added as:{' '}
+                                      <strong>
+                                        {roomForm.prefix}
+                                        {roomForm.number.trim()}
+                                        {roomForm.office.trim() ? ` - ${roomForm.office.trim()}` : ''}
+                                      </strong>
+                                    </div>
+                                  )}
+                                  {roomError && <p className="form-error">{roomError}</p>}
+                                  <button className="btn btn-primary btn-sm" type="submit" disabled={roomSubmitting}>
+                                    {roomSubmitting ? 'Adding...' : 'Add Room'}
                                   </button>
                                 </form>
 
