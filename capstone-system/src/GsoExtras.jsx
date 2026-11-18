@@ -1660,17 +1660,16 @@ export function InspectorsTab({
   // the Inspection Report (reports.js).
   const inspectionPriority = (i) => priorityOfInspection(i, { actions, assignments, equipment })
   // Counted the same way as the inspector's own app (get_my_stats, migration
-  // 009): an inspection belongs to the account that submitted it. Older
-  // inspections with no account are grouped by the name written on them.
+  // 009): an inspection belongs to the account that submitted it. Only
+  // inspector accounts get a card; older inspections saved before inspector
+  // logins existed stay in each unit's history and in the reports.
   const rows = useMemo(() => {
     const accounts = {}
-    const legacy = {}
     profiles.forEach((p) => {
       const name = cleanName(p.full_name)
       accounts[p.id] = {
         key: `id-${p.id}`,
         name: name || 'Unnamed inspector',
-        hasAccount: true,
         accountId: p.id,
         username: p.username || null,
         isAvailable: p.is_available,
@@ -1678,32 +1677,19 @@ export function InspectorsTab({
       }
     })
     inspections.forEach((i) => {
-      if (i.inspector_id && accounts[i.inspector_id]) {
-        accounts[i.inspector_id].items.push(i)
-        return
-      }
-      const name = cleanName(i.inspector_name) || 'Not recorded'
-      const k = name.toLowerCase()
-      if (!legacy[k]) {
-        legacy[k] = { key: `name-${k}`, name, hasAccount: false, accountId: null, username: null, items: [] }
-      }
-      legacy[k].items.push(i)
+      if (i.inspector_id && accounts[i.inspector_id]) accounts[i.inspector_id].items.push(i)
     })
-    const accountNames = new Set(Object.values(accounts).map((r) => r.name.toLowerCase()))
-    return [...Object.values(accounts), ...Object.values(legacy)]
+    return Object.values(accounts)
       .map((r) => {
         const items = [...r.items].sort((a, b) => new Date(b.inspection_date) - new Date(a.inspection_date))
         return {
           ...r,
-          // An old record with the same name as an account is kept apart, so
-          // the account's numbers match what its app shows.
-          olderRecords: !r.hasAccount && accountNames.has(r.name.toLowerCase()),
           items,
           total: items.length,
           last: items[0]?.inspection_date || null
         }
       })
-      .sort((a, b) => a.name.localeCompare(b.name) || Number(b.hasAccount) - Number(a.hasAccount))
+      .sort((a, b) => a.name.localeCompare(b.name))
   }, [profiles, inspections])
 
   const today = manilaDay(new Date())
@@ -1784,7 +1770,7 @@ export function InspectorsTab({
           form={assignForm}
           setForm={setAssignForm}
           profile={{ full_name: adminName, role: adminRole }}
-          inspectors={rows.filter((x) => x.hasAccount)}
+          inspectors={rows}
           buildings={buildings}
           floors={floorsFor(assignForm.building_id)}
           coveredCount={
@@ -1834,9 +1820,7 @@ export function InspectorsTab({
                 <div className="info-card-top">
                   <strong>{r.name}</strong>
                   <span className="tag-row">
-                    {!r.hasAccount ? (
-                      <span className="tag tag-grey">No account</span>
-                    ) : r.isAvailable === undefined ? (
+                    {r.isAvailable === undefined ? (
                       <span className="tag tag-blue">App account</span>
                     ) : (
                       <span
@@ -1846,36 +1830,24 @@ export function InspectorsTab({
                         {r.isAvailable ? 'Available' : 'Unavailable'}
                       </span>
                     )}
-                    {r.hasAccount && (
-                      <CalendarButton onClick={() => setCalendarFor({ id: r.accountId, name: r.name })} />
-                    )}
+                    <CalendarButton onClick={() => setCalendarFor({ id: r.accountId, name: r.name })} />
                   </span>
                 </div>
                 <div className="info-line">
-                  {r.hasAccount ? (
-                    <>
-                      Username <b>{r.username || '—'}</b>
-                    </>
-                  ) : r.olderRecords ? (
-                    'Older records saved under this name, before the app account'
-                  ) : (
-                    'From older inspection records'
-                  )}
+                  Username <b>{r.username || '—'}</b>
                 </div>
                 <div className="info-line">
                   Last inspection <b>{r.last ? fmtDateTime(r.last) : 'None yet'}</b>
                 </div>
-                {r.hasAccount && <LeaveLine leaves={leaves.filter((l) => l.profile_id === r.accountId)} />}
+                <LeaveLine leaves={leaves.filter((l) => l.profile_id === r.accountId)} />
 
                 {/* Buildings to inspect, from this inspector's assignments */}
                 <div className="assign-box">
                   <div className="assign-head">
                     Buildings to inspect
-                    {r.hasAccount && <span className="assign-count">{mine.length}</span>}
+                    <span className="assign-count">{mine.length}</span>
                   </div>
-                  {!r.hasAccount ? (
-                    <div className="info-line">No app account, so inspections can't be assigned.</div>
-                  ) : mine.length === 0 ? (
+                  {mine.length === 0 ? (
                     <div className="info-line">No buildings assigned yet.</div>
                   ) : (
                     mine.map((a) => {
@@ -1925,7 +1897,7 @@ export function InspectorsTab({
                 </div>
 
                 <div className="info-actions">
-                  {r.hasAccount && assignmentsReady && (
+                  {assignmentsReady && (
                     <button
                       className="btn btn-primary btn-sm"
                       onClick={() => openAssignForm(r.accountId)}
