@@ -136,12 +136,16 @@ function BellIcon({ size = 18 }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Account settings: change a staff login's username / password        */
+/* Edit account: a staff member's name, contact, username and password */
 /* ------------------------------------------------------------------ */
 
-// `account`: { id, full_name, username }. The current password is never
+// `account`: { id, full_name, username, contact? }. Contact is shown only
+// when `contact` is given (technicians). The current password is never
 // shown (it is stored encrypted); a forgotten one is replaced.
 export function AccountSettingsModal({ account, onClose, onSaved }) {
+  const hasContact = account.contact !== undefined
+  const [fullName, setFullName] = useState(account.full_name || '')
+  const [contact, setContact] = useState(account.contact || '')
   const [username, setUsername] = useState(account.username || '')
   const [password, setPassword] = useState('')
   const [error, setError] = useState(null)
@@ -149,6 +153,10 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
 
   async function save() {
     setError(null)
+    if (!fullName.trim()) {
+      setError('The name cannot be empty.')
+      return
+    }
     const problem = checkUsername(username)
     if (problem) {
       setError(problem)
@@ -162,7 +170,9 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
     const { data, error: rpcError } = await supabase.rpc('update_staff_account', {
       p_user_id: account.id,
       p_username: username.trim(),
-      p_password: password || null
+      p_password: password || null,
+      p_full_name: fullName.trim(),
+      p_contact: hasContact ? contact.trim() : null
     })
     setSaving(false)
     if (rpcError) {
@@ -170,7 +180,7 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
       return
     }
     onSaved(
-      `Account updated for ${account.full_name}. Username: "${data?.username}"` +
+      `Account updated for ${data?.full_name || fullName.trim()}. Username: "${data?.username}"` +
         (data?.password_changed ? ' · new password set.' : '.')
     )
   }
@@ -178,10 +188,27 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
   return (
     <div className="modal-overlay">
       <div className="modal-box" style={{ maxWidth: '460px', textAlign: 'left' }}>
-        <div className="modal-title">Account settings</div>
+        <div className="modal-title">Edit account</div>
         <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', margin: '0 0 14px 0' }}>
-          Mobile app login for <strong>{account.full_name}</strong>.
+          Details and mobile app login for <strong>{account.full_name}</strong>.
         </p>
+
+        <div style={{ marginBottom: '12px' }}>
+          <label className="field-label">Full name</label>
+          <input autoComplete="off" value={fullName} onChange={(e) => setFullName(e.target.value)} />
+        </div>
+
+        {hasContact && (
+          <div style={{ marginBottom: '12px' }}>
+            <label className="field-label">Contact info</label>
+            <input
+              autoComplete="off"
+              placeholder="Phone number or other contact (optional)"
+              value={contact}
+              onChange={(e) => setContact(e.target.value)}
+            />
+          </div>
+        )}
 
         <div style={{ marginBottom: '12px' }}>
           <label className="field-label">Username</label>
@@ -1441,7 +1468,7 @@ export function InspectorsTab({
   const [formError, setFormError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState(null)
-  // Which inspector's Account settings window is open
+  // Which inspector's Edit account window is open
   const [settingsFor, setSettingsFor] = useState(null)
   // Inspection assignments (migration 010) and the "Assign inspection" form
   const [assignments, setAssignments] = useState([])
@@ -1924,7 +1951,7 @@ export function InspectorsTab({
                       className="btn btn-secondary btn-sm"
                       onClick={() => setSettingsFor({ id: r.accountId, full_name: r.name, username: r.username })}
                     >
-                      Account settings
+                      Edit account
                     </button>
                   )}
                 </div>

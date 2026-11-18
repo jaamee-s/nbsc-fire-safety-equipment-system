@@ -560,7 +560,7 @@ function Dashboard({ profile, onLogout }) {
   const [techLoginForm, setTechLoginForm] = useState({ username: '', password: '' })
   const [techLoginSaving, setTechLoginSaving] = useState(false)
   const [techLoginError, setTechLoginError] = useState(null)
-  // Which technician's Account settings window is open
+  // Which technician's Edit account window is open
   const [accountSettingsFor, setAccountSettingsFor] = useState(null)
   // Which technician's "Assign job order" list is open
   const [jobPickFor, setJobPickFor] = useState(null)
@@ -4157,17 +4157,26 @@ function Dashboard({ profile, onLogout }) {
                           >
                             {jobPickFor === t.id ? 'Close list' : `Assign job order (${jobOrderActions.length})`}
                           </button>
-                          <button className="btn btn-secondary btn-sm" onClick={() => startEditTechnician(t)}>
-                            Edit
-                          </button>
-                          {acc && (
+                          {/* With an app account: one window for name, contact,
+                              username and password. Without one there is no
+                              login yet, so only the name and contact are edited. */}
+                          {acc ? (
                             <button
                               className="btn btn-secondary btn-sm"
                               onClick={() =>
-                                setAccountSettingsFor({ id: acc.id, full_name: t.full_name, username: acc.username })
+                                setAccountSettingsFor({
+                                  id: acc.id,
+                                  full_name: t.full_name,
+                                  username: acc.username,
+                                  contact: t.contact_info || ''
+                                })
                               }
                             >
-                              Account settings
+                              Edit account
+                            </button>
+                          ) : (
+                            <button className="btn btn-secondary btn-sm" onClick={() => startEditTechnician(t)}>
+                              Edit
                             </button>
                           )}
                           {!t.profile_id && techLoginFor !== t.id && (
@@ -4559,6 +4568,7 @@ function Dashboard({ profile, onLogout }) {
             setAccountSettingsFor(null)
             setAccountNotice(message)
             getStaffAccounts()
+            getTechnicians()
           }}
         />
       )}

@@ -33,7 +33,7 @@ export function checkAccountFields(username, password) {
 export function accountErrorMessage(error) {
   const msg = error?.message || String(error)
   if (/update_staff_account/i.test(msg)) {
-    return 'Account settings are not set up in the database yet. Run migration 008_staff_account_settings.sql in the Supabase SQL Editor.'
+    return 'Editing accounts is not set up in the database yet. Run migration 019_edit_staff_account.sql in the Supabase SQL Editor.'
   }
   if (/create_staff_account|list_staff_accounts|schema cache|does not exist/i.test(msg)) {
     return 'Account creation is not set up in the database yet. Run migration 005_staff_accounts_custom_types.sql in the Supabase SQL Editor.'
