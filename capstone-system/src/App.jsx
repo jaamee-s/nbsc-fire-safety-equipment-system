@@ -14,7 +14,8 @@ import {
   InspectorsTab,
   JobOrderRequestModal,
   LeaveLine,
-  ReplacementNote
+  ReplacementNote,
+  ReportSignatures
 } from './GsoExtras'
 import { buildGsoNotifications, findPurchaseRequestItems, needsReplacementUnit } from './gsoNotifications'
 import { accountErrorMessage, checkAccountFields, USERNAME_HINT } from './staffAccounts'
@@ -2165,7 +2166,12 @@ function Dashboard({ profile, onLogout }) {
   function technicianCounts(techId) {
     const mine = allActions.filter((a) => a.assigned_technician_id === techId)
     const open = mine.filter((a) => a.status === 'in_progress')
+    // Latest finished job (newest completed_date)
+    const lastRepair = mine
+      .filter((a) => a.status === 'completed' && a.completed_date)
+      .reduce((latest, a) => (!latest || a.completed_date > latest ? a.completed_date : latest), null)
     return {
+      lastRepair,
       assigned: open.filter((a) => (a.repair_status || 'assigned') !== 'repaired').length,
       working: open.filter((a) => a.repair_status === 'working').length,
       completed: mine.filter((a) => a.status === 'completed').length
@@ -4064,7 +4070,7 @@ function Dashboard({ profile, onLogout }) {
                           Username <b>{acc ? acc.username : 'No app account yet'}</b>
                         </div>
                         <div className="info-line">
-                          Contact <b>{t.contact_info || 'Not provided'}</b>
+                          Last repair <b>{counts.lastRepair ? formatTimestamp(counts.lastRepair) : 'None yet'}</b>
                         </div>
                         <LeaveLine leaves={leavesFor(t.profile_id)} />
 
@@ -4598,13 +4604,7 @@ function Dashboard({ profile, onLogout }) {
               ))}
             </tbody>
           </table>
-          <div className="report-print-signature">
-            <div className="report-print-sig-label">Prepared by:</div>
-            <div className="report-print-sig-name">{profile.full_name}</div>
-            <div className="report-print-sig-role">
-              {profile.role ? profile.role.charAt(0).toUpperCase() + profile.role.slice(1) : ''} · General Services Office
-            </div>
-          </div>
+          <ReportSignatures />
           {/* The print date: bottom left of every printed page */}
           <div className="print-footer-date">Date printed: {formatTimestamp(reportPrint.generatedAt.toISOString())}</div>
         </div>
@@ -4648,7 +4648,6 @@ function Dashboard({ profile, onLogout }) {
           completed={completedActions}
           purchaseItems={purchaseRequestItems}
           types={allTypes}
-          preparedBy={profile}
           onClose={() => setShowSummary(false)}
         />
       )}

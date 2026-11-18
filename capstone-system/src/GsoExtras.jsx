@@ -900,7 +900,6 @@ export function SummaryModal({
   completed = [],
   purchaseItems = [],
   types = [],
-  preparedBy = null,
   onClose
 }) {
   const now = new Date()
@@ -1128,15 +1127,7 @@ export function SummaryModal({
         <div className="modal-actions no-print">
           <button className="btn btn-primary" onClick={onClose}>Done</button>
         </div>
-        {preparedBy && (
-          <div className="report-print-signature print-only">
-            <div className="report-print-sig-label">Prepared by:</div>
-            <div className="report-print-sig-name">{preparedBy.full_name}</div>
-            <div className="report-print-sig-role">
-              {preparedBy.role ? preparedBy.role.charAt(0).toUpperCase() + preparedBy.role.slice(1) : ''} · General Services Office
-            </div>
-          </div>
-        )}
+        <ReportSignatures className="print-only" />
         {/* The print date: bottom left of every printed page */}
         <div className="print-footer-date print-only">Date printed: {fmtDateTime(now)}</div>
       </div>
@@ -1196,6 +1187,23 @@ function leaveOverlaps(l, from, to) {
 
 // On an Inspector / Technician card: their current or next unavailable
 // dates (sent from the app). Red when it is today.
+// Signature lines at the end of every printed report. Left blank on
+// purpose: any GSO staff member may prepare a report, and both people
+// sign and write their name on the printed copy.
+export function ReportSignatures({ className = '' }) {
+  return (
+    <div className={`report-print-signatures ${className}`.trim()}>
+      {['Prepared by:', 'Approved by:'].map((label) => (
+        <div className="report-print-signature" key={label}>
+          <div className="report-print-sig-label">{label}</div>
+          <div className="report-print-sig-name" />
+          <div className="report-print-sig-role">General Services Office</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function LeaveLine({ leaves = [] }) {
   if (leaves.length === 0) return null
   const today = ymdOf(new Date())

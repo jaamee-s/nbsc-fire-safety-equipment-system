@@ -729,9 +729,18 @@ textarea {
   page-break-inside: avoid;
 }
 
-/* "Prepared by" at the bottom left of every printed report */
-.report-print-signature {
+/* "Prepared by" (left) and "Approved by" (right) at the end of every
+   printed report: blank lines to sign and write a name on */
+.report-print-signatures {
+  display: flex;
+  justify-content: space-between;
+  gap: 40px;
   margin-top: 36px;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.report-print-signature {
   width: 260px;
   text-align: center;
   break-inside: avoid;
@@ -745,6 +754,7 @@ textarea {
 }
 
 .report-print-sig-name {
+  min-height: 1.2em;
   border-bottom: 1px solid #000;
   font-weight: 700;
   font-size: 0.86rem;
