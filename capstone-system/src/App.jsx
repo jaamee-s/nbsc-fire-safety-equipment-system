@@ -2074,6 +2074,17 @@ function Dashboard({ profile, onLogout }) {
     latestAvailability.push({ ...c, name: acc ? acc.full_name : 'A staff member', role: acc ? acc.role : 'inspector' })
   })
 
+  // Units an inspector checked and found Functional in the last 3 days.
+  const checksSince = Date.now() - 3 * 24 * 60 * 60 * 1000
+  const recentFunctionalChecks = (inspections || [])
+    .filter(
+      (i) =>
+        i.condition_status === 'functional' &&
+        i.inspection_date &&
+        new Date(i.inspection_date).getTime() >= checksSince
+    )
+    .map((i) => ({ ...i, equipment: equipment.find((e) => e.id === i.equipment_id) }))
+
   // A person's current / upcoming unavailable dates, earliest first.
   const leavesFor = (profileId) => (profileId ? upcomingLeaves.filter((l) => l.profile_id === profileId) : [])
 
@@ -2084,7 +2095,8 @@ function Dashboard({ profile, onLogout }) {
     completed: completedActions,
     purchaseRequests: purchaseRequestItems,
     leaves: upcomingLeaves,
-    availability: latestAvailability
+    availability: latestAvailability,
+    checks: recentFunctionalChecks
   })
 
   // Shared by the Reports page and the Equipment page's Print Report.
@@ -2244,6 +2256,16 @@ function Dashboard({ profile, onLogout }) {
     // Unavailable dates: the person's page (their card has the calendar).
     if (n.target === 'leave') {
       goTab(n.role === 'technician' ? 'technicians' : 'inspectors')
+      return
+    }
+    // Functional inspection: the unit on the Equipment page, history open.
+    if (n.target === 'equipment') {
+      setSearchTerm(n.code || '')
+      setFilterType('')
+      setFilterStatus('')
+      setFilterBuilding('')
+      if (n.equipmentId) setExpandedHistoryId(n.equipmentId)
+      goTab('equipment')
       return
     }
     setActiveTab('dashboard')

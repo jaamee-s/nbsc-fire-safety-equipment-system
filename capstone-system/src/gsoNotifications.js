@@ -119,9 +119,33 @@ export function buildGsoNotifications({
   completed = [],
   purchaseRequests = [],
   leaves = [],
-  availability = []
+  availability = [],
+  checks = []
 }) {
   const list = []
+
+  // Inspections an inspector submitted as Functional in the last 3 days.
+  // A Defective result already shows up as "New defect reported".
+  // checks: [{ id, inspection_date, inspector_name, inspection_notes, equipment }]
+  checks.forEach((c) => {
+    const code = c.equipment?.equipment_code || 'Equipment'
+    const type = TYPE_LABELS[c.equipment?.equipment_type] || c.equipment?.equipment_type || 'Equipment'
+    const where = `${c.equipment?.buildings?.building_name ?? 'N/A'} — ${c.equipment?.exact_location ?? ''}`
+    list.push({
+      id: `check-${c.id}`,
+      tone: 'green',
+      title: `${code} inspected: Functional`,
+      detail: `${type} · ${where}${c.inspector_name ? ` · by ${c.inspector_name}` : ''}${
+        c.inspection_notes ? ` · "${c.inspection_notes}"` : ''
+      }`,
+      next: 'No action needed. The result is saved in the unit’s Inspection History.',
+      time: c.inspection_date,
+      timeLabel: 'Inspected',
+      target: 'equipment',
+      equipmentId: c.equipment?.id,
+      code
+    })
+  })
 
   // Available / Unavailable switched on the phone (migration 017): each
   // person's latest switch from the last 3 days.
