@@ -120,7 +120,8 @@
 }
 
 .jor-ack { display: grid; grid-template-columns: 1fr 1.25fr; margin: 3mm 0 0 8mm; column-gap: 6mm; }
-.jor-ack__remarks { display: flex; align-items: flex-end; gap: 1mm; }
+/* Remarks sits on the "Acknowledge by:" line, as on the paper form */
+.jor-ack__remarks { display: flex; align-items: flex-end; gap: 1mm; align-self: start; }
 .jor-ack__remarks .nbsc-line { flex: 1; }
 
 .jor-action { margin: 3mm 0 0 8mm; }
@@ -177,7 +178,12 @@
 @media print {
   body.nbsc-printing * { visibility: hidden !important; }
   body.nbsc-printing .nbsc-print-root, body.nbsc-printing .nbsc-print-root * { visibility: visible !important; }
-  body.nbsc-printing .nbsc-print-root { position: absolute; inset: 0 auto auto 0;
+  /* The print page holds only the form, so it stays in the normal page flow:
+     content taken out of it (position: absolute) would not get the A4,
+     zero-margin page below and would print with the dashboard's 12 mm
+     margins, pushing the footer onto a second page. */
+  body.nbsc-printing { page: nbsc-a4; margin: 0; }
+  body.nbsc-printing .nbsc-print-root { position: static; page: nbsc-a4;
                                         padding: 0 !important; background: none !important; min-height: 0 !important; }
   .nbsc-form { page: nbsc-a4; box-shadow: none; margin: 0; height: 297mm; min-height: 0; overflow: hidden;
                 page-break-after: always; break-after: page; }
