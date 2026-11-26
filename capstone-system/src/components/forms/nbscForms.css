@@ -1,0 +1,187 @@
+/* ============================================================
+   NBSC official form layouts (A4, print-ready)
+   Used by: JobOrderRequestForm.jsx, PurchaseRequestForm.jsx
+   ============================================================ */
+
+.nbsc-form {
+  --nbsc-navy: #2f4f9e;
+  --nbsc-navy-dark: #1f3a7a;
+  --nbsc-gold: #c9a227;
+  --nbsc-ink: #222;
+  --nbsc-red: #d9534f;
+  --nbsc-orange: #e8833a;
+
+  box-sizing: border-box;
+  width: 210mm;
+  min-height: 297mm;
+  margin: 0 auto;
+  padding: 12mm 14mm 8mm;
+  background: #fff;
+  color: var(--nbsc-ink);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.25;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+}
+.nbsc-form *,
+.nbsc-form *::before,
+.nbsc-form *::after { box-sizing: border-box; }
+
+/* ---------- Header ---------- */
+.nbsc-header { display: flex; align-items: flex-start; gap: 4mm; }
+.nbsc-header__logo { width: 19mm; height: 22mm; object-fit: contain; flex: none; }
+.nbsc-header__text { flex: 1; text-align: center; font-family: "Times New Roman", Times, serif; }
+.nbsc-header__republic { font-size: 11.5pt; }
+.nbsc-header__college { font-size: 14pt; font-weight: bold; letter-spacing: 0.2px; white-space: nowrap; }
+.nbsc-header__address { font-size: 11.5pt; }
+.nbsc-header__motto {
+  font-family: Georgia, serif; font-style: italic; font-size: 7pt;
+  letter-spacing: 1.6px; color: #a0782a; margin-top: 1mm;
+}
+
+.nbsc-doccode { flex: none; width: 50mm; border: 1px solid var(--nbsc-navy); font-size: 7pt; text-align: center; }
+.nbsc-doccode__title { background: var(--nbsc-navy); color: #fff; padding: 0.6mm 0; }
+.nbsc-doccode__code { font-size: 10.5pt; font-weight: bold; padding: 1mm 0; border-bottom: 1px solid var(--nbsc-navy); }
+.nbsc-doccode__grid { display: grid; grid-template-columns: 1fr 0.75fr 1.15fr 0.9fr; }
+.nbsc-doccode__grid > div { border-right: 1px solid var(--nbsc-navy); padding: 0.6mm 0.3mm; }
+.nbsc-doccode__grid > div:nth-child(4n) { border-right: none; }
+.nbsc-doccode__grid .lbl { background: var(--nbsc-navy); color: #fff; font-size: 5pt; }
+.nbsc-doccode__grid .val { font-size: 8pt; }
+
+.nbsc-rule {
+  height: 2.2mm; margin: 2mm 30% 0 0;
+  border-top: 1.3mm solid var(--nbsc-gold);
+  border-bottom: 0.8mm solid var(--nbsc-navy-dark);
+}
+
+/* ---------- Title ---------- */
+.nbsc-title { text-align: center; font-weight: bold; font-size: 15pt; margin: 5mm 0 2mm; }
+
+/* ---------- Generic fill-in line ---------- */
+.nbsc-line {
+  display: inline-block; border-bottom: 1px solid #333; min-height: 1.25em;
+  padding: 0 1mm; vertical-align: bottom; font-family: "Courier New", monospace;
+  font-weight: bold; color: #0b2a6f;
+}
+.nbsc-filled { font-family: "Courier New", monospace; font-weight: bold; color: #0b2a6f; }
+
+/* ---------- Checkbox ---------- */
+.nbsc-check { display: inline-flex; align-items: center; gap: 1.5mm; white-space: nowrap; }
+.nbsc-check__box {
+  width: 5mm; height: 5mm; border: 1px solid #333; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 11pt; font-weight: bold; color: #0b2a6f;
+}
+
+/* ---------- Signature block ---------- */
+.nbsc-sign { display: inline-block; min-width: 65mm; }
+.nbsc-sign__line {
+  border-bottom: 1px solid #333; min-height: 7mm; text-align: center;
+  display: flex; align-items: flex-end; justify-content: center; padding-bottom: 0.5mm;
+}
+.nbsc-sign__caption { font-size: 10pt; margin-top: 0.8mm; }
+
+/* ---------- Footer ---------- */
+.nbsc-footer { margin-top: auto; padding-top: 4mm; }
+.nbsc-footer__rule { height: 1.6mm; border-top: 0.6mm solid var(--nbsc-navy-dark); border-bottom: 0.9mm solid #9aa3b5; margin-bottom: 2mm; }
+.nbsc-footer__row { display: flex; align-items: center; justify-content: space-around; font-size: 9pt; }
+.nbsc-footer__bp { width: 14mm; height: 12mm; object-fit: contain; }
+.nbsc-footer__item { display: inline-flex; align-items: center; gap: 1.5mm; }
+.nbsc-footer__icon { width: 5mm; height: 5mm; }
+
+/* ============================================================
+   JOB ORDER REQUEST FORM
+   ============================================================ */
+.jor-no { text-align: right; margin-bottom: 4mm; }
+.jor-no .nbsc-line { width: 40mm; }
+
+.jor-info { display: grid; grid-template-columns: 1fr 1fr; column-gap: 0; row-gap: 1mm; }
+.jor-info__row { display: flex; align-items: flex-end; gap: 1mm; }
+.jor-info__row .nbsc-line { flex: 1; }
+
+.jor-type-box { border: 1.2px solid var(--nbsc-red); margin-top: 2mm; padding: 2mm 6mm 3mm; }
+.jor-type-box__title {
+  text-align: center; font-weight: bold; font-style: italic; text-decoration: underline;
+  font-size: 13pt; margin-bottom: 3mm;
+}
+.jor-type-grid { display: grid; grid-template-columns: 1fr 1.3fr 1.4fr; row-gap: 2.5mm; margin-left: 4mm; }
+.jor-loc { margin: 3mm 0 0 6mm; display: grid; grid-template-columns: 45mm 3mm 100mm; row-gap: 1mm; align-items: end; }
+.jor-loc .nbsc-line { width: 100%; }
+.jor-nature__label { font-weight: bold; margin: 3mm 0 2mm 4mm; }
+.jor-nature { display: flex; gap: 7mm; margin-left: 4mm; }
+.jor-desc { margin: 3mm 0 0 3mm; }
+.jor-desc__lines { margin-top: 0.5mm; }
+.jor-desc__text {
+  font-family: "Courier New", monospace; font-weight: bold; color: #0b2a6f;
+  line-height: 6.5mm; min-height: 13mm;
+  background-image: linear-gradient(to bottom, transparent calc(6.5mm - 1px), #333 calc(6.5mm - 1px), #333 6.5mm);
+  background-size: 100% 6.5mm; white-space: pre-wrap; word-break: break-word;
+}
+
+.jor-ack { display: grid; grid-template-columns: 1fr 1.25fr; margin: 3mm 0 0 8mm; column-gap: 6mm; }
+.jor-ack__remarks { display: flex; align-items: flex-end; gap: 1mm; }
+.jor-ack__remarks .nbsc-line { flex: 1; }
+
+.jor-action { margin: 3mm 0 0 8mm; }
+.jor-action__row { display: grid; grid-template-columns: 1fr 1.25fr; column-gap: 6mm; margin-top: 3mm; align-items: end; }
+.jor-action__choice { display: flex; gap: 6mm; }
+.jor-action__choice .nbsc-line { width: 9mm; text-align: center; }
+.jor-action__reason { display: flex; align-items: flex-end; gap: 1mm; }
+.jor-action__reason .nbsc-line { flex: 1; }
+.jor-facilitated { margin: 3mm 0 0 8mm; }
+.jor-facilitated .nbsc-line { width: 70mm; }
+
+.jor-complete-box { border: 1.2px solid var(--nbsc-orange); margin-top: 3mm; padding: 3mm 6mm 2mm; }
+.jor-complete__row { display: grid; grid-template-columns: auto 1fr 1fr; column-gap: 4mm; align-items: end; }
+.jor-complete__row .nbsc-line { width: 100%; text-align: center; }
+.jor-complete__captions { display: grid; grid-template-columns: auto 1fr 1fr; column-gap: 4mm; text-align: center; margin-top: 0.8mm; }
+.jor-complete__captions span:first-child { color: transparent !important; user-select: none; }
+
+/* ============================================================
+   PURCHASE REQUEST FORM
+   ============================================================ */
+.pr-entity { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 4mm; }
+.pr-entity .nbsc-line { width: 75mm; }
+.pr-entity__fund .nbsc-line { width: 28mm; }
+
+.pr-table { width: 100%; border-collapse: collapse; margin-top: 1mm; table-layout: fixed; }
+.pr-table td, .pr-table th { border: 1.2px solid #444; padding: 1mm 1.5mm; vertical-align: top; }
+.pr-table th { font-size: 11pt; text-align: center; vertical-align: middle; }
+.pr-table .pr-row td { height: 11.5mm; vertical-align: middle; font-size: 9.5pt; }
+.pr-table .num { white-space: nowrap; }
+.pr-table .num { text-align: right; }
+.pr-table .ctr { text-align: center; }
+.pr-meta-label { font-size: 10.5pt; }
+.pr-meta-val { display: block; margin-top: 0.8mm; }
+
+.pr-purpose { display: flex; align-items: flex-end; gap: 1mm; margin: 5mm 0 0 0; }
+.pr-purpose .nbsc-line { flex: 1; }
+
+.pr-sign { display: grid; grid-template-columns: 1fr 1fr; column-gap: 10mm; margin-top: 4mm; }
+.pr-sign__head { font-weight: bold; margin-bottom: 4mm; padding-left: 28mm; }
+.pr-sign__row { display: grid; grid-template-columns: 26mm 3mm 1fr; align-items: end; margin-top: 0.8mm; }
+.pr-sign__row .nbsc-line { width: 100%; }
+.pr-sign__right .nbsc-line { display: block; width: 100%; margin-top: 0.8mm; }
+
+/* ============================================================
+   Print
+   Prints ONLY the form. Scoped so the dashboard's other printouts
+   (reports, QR labels, Summary) keep their own page margins:
+   - the A4 / zero-margin page applies only to pages holding a form
+     (a named page), not to every printout;
+   - hiding everything else only happens while the print page has put
+     `nbsc-printing` on <body>.
+   ============================================================ */
+@page nbsc-a4 { size: A4; margin: 0; }
+@media print {
+  body.nbsc-printing * { visibility: hidden !important; }
+  body.nbsc-printing .nbsc-print-root, body.nbsc-printing .nbsc-print-root * { visibility: visible !important; }
+  body.nbsc-printing .nbsc-print-root { position: absolute; inset: 0 auto auto 0;
+                                        padding: 0 !important; background: none !important; min-height: 0 !important; }
+  .nbsc-form { page: nbsc-a4; box-shadow: none; margin: 0; height: 297mm; min-height: 0; overflow: hidden;
+                page-break-after: always; break-after: page; }
+  .nbsc-form:last-child { page-break-after: auto; break-after: auto; }
+  .nbsc-no-print { display: none !important; }
+  .nbsc-form, .nbsc-form * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
