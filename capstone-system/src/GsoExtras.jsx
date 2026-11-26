@@ -4,6 +4,17 @@ import { needsReplacementUnit, playNotificationSound } from './gsoNotifications'
 import { actionForInspection, inspectionPriority as priorityOfInspection, unitsForAssignment } from './reports'
 import { accountErrorMessage, checkAccountFields, checkUsername, USERNAME_HINT } from './staffAccounts'
 import nbscHeader from './assets/nbsc-print-header.png'
+import JobOrderWindow from './JobOrderWindow'
+import { JorEditorModal } from './OfficialFormEditors'
+import {
+  checkJobOrderDraft,
+  formPrintUrl,
+  formsErrorMessage,
+  inspectionDescription,
+  insertJobOrderForm,
+  isJorNoTaken,
+  jobOrderDraftForInspection
+} from './officialForms'
 
 /* =====================================================================
    Exports:
@@ -789,7 +800,7 @@ function SummaryColumn({ title, hint, count, accent, children }) {
   )
 }
 
-function SummaryRow({ onClick, title, tag, lines }) {
+function SummaryRow({ onClick, title, tag, lines, actions }) {
   return (
     <div
       onClick={onClick}
@@ -809,6 +820,12 @@ function SummaryRow({ onClick, title, tag, lines }) {
           {l}
         </div>
       ))}
+      {actions && (
+        // Buttons here do their own thing, not "open the item".
+        <div className="info-actions" style={{ marginTop: '8px' }} onClick={(e) => e.stopPropagation()}>
+          {actions}
+        </div>
+      )}
     </div>
   )
 }
@@ -817,7 +834,8 @@ function SummaryRow({ onClick, title, tag, lines }) {
 // that needs a Purchase Request. (Job Orders are filed from the "Needs Job
 // Order" filter, or from a technician's card — the adviser asked to drop the
 // duplicate Job Order list here.) Clicking a row opens it.
-export function PriorityActionsSummary({ purchaseItems = [], onOpenAction, onOpenExpiry }) {
+// renderFormButtons(item): the Purchase Request form buttons for a row.
+export function PriorityActionsSummary({ purchaseItems = [], onOpenAction, onOpenExpiry, renderFormButtons }) {
   const qtyByType = {}
   purchaseItems.forEach((p) => {
     qtyByType[p.type] = (qtyByType[p.type] || 0) + 1
@@ -862,6 +880,7 @@ export function PriorityActionsSummary({ purchaseItems = [], onOpenAction, onOpe
                     p.reason,
                     `Stock on hand: ${p.stockOnHand}`
                   ]}
+                  actions={renderFormButtons && p.equipmentId ? renderFormButtons(p) : null}
                 />
               ))}
             </>
@@ -1458,8 +1477,7 @@ export function InspectorsTab({
   onOpenPurchaseSummary,
   leaves = [],
   availabilityKey = '',
-  adminName = '',
-  adminRole = 'admin'
+  adminName = ''
 }) {
   const [profiles, setProfiles] = useState([])
   const [expandedKey, setExpandedKey] = useState(null)
@@ -1477,6 +1495,12 @@ export function InspectorsTab({
   const [assignForm, setAssignForm] = useState(null)
   const [assignError, setAssignError] = useState(null)
   const [assignSaving, setAssignSaving] = useState(false)
+  // The official Job Order Request filled in with the assignment, and the
+  // ones already saved, by assignment (migration 020)
+  const [assignDraft, setAssignDraft] = useState(null)
+  const [jorByAssignment, setJorByAssignment] = useState({})
+  const [jorEditorId, setJorEditorId] = useState(null)
+  const [jorCreating, setJorCreating] = useState(null)
   // Whose unavailable dates are open (calendar button)
   const [calendarFor, setCalendarFor] = useState(null)
   // Filters and page for the open inspection history window
@@ -1539,18 +1563,83 @@ export function InspectorsTab({
     setAssignments(list || [])
   }
 
+  // The Job Order Request form of each assignment (newest one), as
+  // { [assignment id]: form }. Before migration 020 there are none (null).
+  async function fetchJorForms() {
+    const { data, error } = await supabase
+      .from('job_order_requests')
+      .select('id, inspection_assignment_id, jor_no, created_at')
+      .not('inspection_assignment_id', 'is', null)
+    if (error) return null
+    const map = {}
+    ;(data || []).forEach((j) => {
+      const prev = map[j.inspection_assignment_id]
+      if (!prev || j.created_at > prev.created_at) map[j.inspection_assignment_id] = j
+    })
+    return map
+  }
+
+  useEffect(() => {
+    fetchJorForms().then((map) => map && setJorByAssignment(map))
+  }, [])
+
+  async function reloadJorForms() {
+    const map = await fetchJorForms()
+    if (map) setJorByAssignment(map)
+  }
+
+  // The form's place and description follow the building / floor chosen.
+  function areaFields(buildingId, floorLabel) {
+    const covered = unitsForAssignment({ building_id: buildingId, floor_label: floorLabel || null }, equipment).length
+    const b = buildings.find((x) => x.id === buildingId)
+    return {
+      office_room_to: `${b?.building_name || 'Building'}${floorLabel ? ` — ${floorLabel}` : ' (whole building)'}`,
+      description: inspectionDescription(covered)
+    }
+  }
+
+  function changeAssignArea(buildingId, floorLabel) {
+    setAssignForm((prev) => ({ ...prev, building_id: buildingId, floor_label: floorLabel }))
+    setAssignDraft((prev) => (prev ? { ...prev, ...areaFields(buildingId, floorLabel) } : prev))
+  }
+
+  // An assignment made before the forms existed: its form, from the assignment.
+  async function createJorForAssignment(a, inspectorName) {
+    setJorCreating(a.id)
+    try {
+      const b = buildings.find((x) => x.id === a.building_id)
+      const draft = jobOrderDraftForInspection({
+        buildingName: b?.building_name,
+        floorLabel: a.floor_label,
+        coveredCount: unitsForAssignment(a, equipment).length,
+        notes: a.notes,
+        profile: { full_name: adminName }
+      })
+      const id = await insertJobOrderForm(draft, { inspection_assignment_id: a.id }, inspectorName)
+      await reloadJorForms()
+      setJorEditorId(id)
+    } catch (error) {
+      alert('Could not create the Job Order Request form: ' + formsErrorMessage(error))
+    }
+    setJorCreating(null)
+  }
+
   // Opens the inspection Job Order Request form for this inspector.
   function openAssignForm(accountId) {
     setAssignFor(accountId)
     setAssignError(null)
+    const buildingId = buildings[0]?.id || ''
     setAssignForm({
       id: crypto.randomUUID(),
       inspector_id: accountId,
-      building_id: buildings[0]?.id || '',
+      building_id: buildingId,
       floor_label: '',
       due_date: manilaDay(new Date()),
-      priority: 'medium',
-      notes: ''
+      priority: 'medium'
+    })
+    setAssignDraft({
+      ...jobOrderDraftForInspection({ profile: { full_name: adminName }, coveredCount: 0 }),
+      ...areaFields(buildingId, '')
     })
   }
 
@@ -1577,7 +1666,17 @@ export function InspectorsTab({
       setAssignError('There is no equipment in service there to inspect. Choose another building or floor.')
       return
     }
+    const problem = checkJobOrderDraft(assignDraft)
+    if (problem) {
+      setAssignError(problem)
+      return
+    }
     setAssignSaving(true)
+    if (await isJorNoTaken(assignDraft.jor_no)) {
+      setAssignSaving(false)
+      setAssignError(`JOR No. "${assignDraft.jor_no.trim()}" is already used by another Job Order Request.`)
+      return
+    }
     const { error } = await supabase.from('inspection_assignments').insert([
       {
         id: assignForm.id,
@@ -1586,15 +1685,28 @@ export function InspectorsTab({
         floor_label: assignForm.floor_label || null,
         due_date: assignForm.due_date,
         priority: assignForm.priority,
-        notes: assignForm.notes.trim() || null,
+        notes: assignDraft.remarks.trim() || null,
         created_by: adminName || null
       }
     ])
-    setAssignSaving(false)
     if (error) {
+      setAssignSaving(false)
       setAssignError(error.message)
       return
     }
+    // The assignment is saved; its official form is saved next. A problem
+    // here (e.g. migration 020 not run yet) only shows a note.
+    try {
+      await insertJobOrderForm(assignDraft, { inspection_assignment_id: assignForm.id }, r.name)
+      reloadJorForms()
+    } catch (formError) {
+      alert(
+        'The inspection Job Order was submitted, but its Job Order Request form could not be created: ' +
+          formsErrorMessage(formError) +
+          '\n\nYou can create it later from the inspector card.'
+      )
+    }
+    setAssignSaving(false)
     const b = buildings.find((x) => x.id === assignForm.building_id)
     setNotice(
       `Job Order submitted: ${r.name} will inspect ${b?.building_name || 'the building'}${assignForm.floor_label ? ` — ${assignForm.floor_label}` : ''} on or before ${formatDay(assignForm.due_date)}. They get a notification on their phone.`
@@ -1765,11 +1877,24 @@ export function InspectorsTab({
         />
       )}
 
-      {assignFor && assignForm && (
+      {jorEditorId && (
+        <JorEditorModal
+          id={jorEditorId}
+          onClose={() => setJorEditorId(null)}
+          onSaved={() => {
+            setJorEditorId(null)
+            reloadJorForms()
+          }}
+        />
+      )}
+
+      {assignFor && assignForm && assignDraft && (
         <InspectionJobOrderModal
           form={assignForm}
           setForm={setAssignForm}
-          profile={{ full_name: adminName, role: adminRole }}
+          onAreaChange={changeAssignArea}
+          draft={assignDraft}
+          onDraftChange={setAssignDraft}
           inspectors={rows}
           buildings={buildings}
           floors={floorsFor(assignForm.building_id)}
@@ -1884,12 +2009,39 @@ export function InspectorsTab({
                             <i style={{ width: `${pct}%` }} />
                           </div>
                           {a.notes && <div className="info-line">Note: “{a.notes}”</div>}
-                          <button
-                            className="btn btn-outline-red btn-sm assign-cancel"
-                            onClick={() => cancelAssignment(a, label)}
-                          >
-                            Cancel
-                          </button>
+                          <div className="info-actions" style={{ marginTop: '2px' }}>
+                            {jorByAssignment[a.id] ? (
+                              <>
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => setJorEditorId(jorByAssignment[a.id].id)}
+                                >
+                                  Edit Job Order Request
+                                  {jorByAssignment[a.id].jor_no ? ` ${jorByAssignment[a.id].jor_no}` : ''}
+                                </button>
+                                <a
+                                  className="btn btn-secondary btn-sm"
+                                  href={formPrintUrl('jor', jorByAssignment[a.id].id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ textDecoration: 'none' }}
+                                >
+                                  View / Print form
+                                </a>
+                              </>
+                            ) : (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => createJorForAssignment(a, r.name)}
+                                disabled={jorCreating === a.id}
+                              >
+                                {jorCreating === a.id ? 'Creating...' : 'Create Job Order Request form'}
+                              </button>
+                            )}
+                            <button className="btn btn-outline-red btn-sm" onClick={() => cancelAssignment(a, label)}>
+                              Cancel
+                            </button>
+                          </div>
                         </div>
                       )
                     })
@@ -2068,66 +2220,16 @@ export function InspectorsTab({
 /* Job Order Request form                                              */
 /* ------------------------------------------------------------------ */
 
-function FormCell({ label, children, span }) {
-  return (
-    <div
-      style={{
-        background: '#fff',
-        padding: '6px 10px',
-        gridColumn: span ? `span ${span}` : undefined
-      }}
-    >
-      <div
-        style={{
-          fontSize: '0.66rem',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          color: '#64748b',
-          marginBottom: '2px'
-        }}
-      >
-        {label}
-      </div>
-      <div style={{ fontWeight: 600, fontSize: '0.88rem', lineHeight: 1.4 }}>{children}</div>
-    </div>
-  )
-}
-
-function FormBand({ children }) {
-  return (
-    <div
-      style={{
-        background: '#0f2a4a',
-        color: '#fff',
-        fontSize: '0.74rem',
-        fontWeight: 700,
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase',
-        padding: '5px 10px',
-        marginTop: '12px'
-      }}
-    >
-      {children}
-    </div>
-  )
-}
-
-const formGrid = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: '1px',
-  background: '#cbd5e1',
-  border: '1px solid #cbd5e1'
-}
-
-// The Job Order Request form for an INSPECTOR: the admin assigns a building
-// (or one floor) to inspect, with a due date and a priority. Same layout as
-// the technician's Job Order Request below. Saved to inspection_assignments
-// (migration 010); the form's number is made from the saved row's id.
+// Filing a Job Order for an INSPECTOR: the admin assigns a building (or one
+// floor) to inspect, with a due date and a priority, on the official Job
+// Order Request form (JobOrderWindow). The assignment is saved to
+// inspection_assignments (migration 010), its form to job_order_requests (020).
 function InspectionJobOrderModal({
   form,
   setForm,
-  profile,
+  onAreaChange,
+  draft,
+  onDraftChange,
   inspectors,
   buildings,
   floors,
@@ -2138,156 +2240,93 @@ function InspectionJobOrderModal({
   onCancel,
   onSubmit
 }) {
-  const joNumber = `IJO-${new Date().getFullYear()}-${form.id.replace(/-/g, '').slice(0, 5).toUpperCase()}`
   const inspector = inspectors.find((i) => i.accountId === form.inspector_id)
   const set = (name) => (e) => setForm((prev) => ({ ...prev, [name]: e.target.value }))
 
-  return (
-    <div className="modal-overlay">
-      <div
-        className="modal-box"
-        style={{ maxWidth: '700px', width: '94vw', maxHeight: '92vh', overflowY: 'auto', textAlign: 'left' }}
-      >
-        <img className="print-letterhead" src={nbscHeader} alt="Northern Bukidnon State College" />
-        <div style={{ textAlign: 'center', borderBottom: '2px solid #0f2a4a', paddingBottom: '10px' }}>
-          <div style={{ fontSize: '0.78rem', color: '#475569' }}>General Services Office</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 800, marginTop: '4px', letterSpacing: '0.04em' }}>
-            JOB ORDER REQUEST
-          </div>
-          <div style={{ fontSize: '0.8rem', color: '#475569' }}>Inspection</div>
-        </div>
-
-        <FormBand>I. Request details</FormBand>
-        <div style={formGrid}>
-          <FormCell label="Job Order No.">{joNumber}</FormCell>
-          <FormCell label="Date requested">{fmtDateTime(new Date())}</FormCell>
-          <FormCell label="Requested by">
-            {profile.full_name} ({profile.role})
-          </FormCell>
-          <FormCell label="Status">Pending submission</FormCell>
-        </div>
-
-        <FormBand>II. Area to inspect</FormBand>
-        <div style={{ ...formGrid, background: '#cbd5e1' }}>
-          <FormCell label="Building">
-            <select
-              value={form.building_id}
-              onChange={(e) => setForm((prev) => ({ ...prev, building_id: e.target.value, floor_label: '' }))}
-            >
-              {buildings.map((b) => (
-                <option key={b.id} value={b.id}>{b.building_name}</option>
-              ))}
-            </select>
-          </FormCell>
-          <FormCell label="Floor">
-            <select value={form.floor_label} onChange={set('floor_label')}>
-              <option value="">Whole building</option>
-              {floors.map((f) => (
-                <option key={f} value={f}>{f}</option>
-              ))}
-            </select>
-          </FormCell>
-          <FormCell label="Equipment covered" span={2}>
-            {coveredCount} unit{coveredCount === 1 ? '' : 's'} in service
-            {coveredCount === 0 && (
-              <span style={{ color: '#b91c1c' }}> — nothing to inspect here, choose another building or floor</span>
-            )}
-          </FormCell>
-        </div>
-
-        <FormBand>III. Inspection requested</FormBand>
-        <div style={formGrid}>
-          <FormCell label="Priority">
-            <select value={form.priority} onChange={set('priority')}>
-              {ASSIGN_PRIORITIES.map((p) => (
-                <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
-              ))}
-            </select>
-          </FormCell>
-          <FormCell label="Inspect on or before">
-            <input type="date" value={form.due_date} min={ymdOf(new Date())} onChange={set('due_date')} />
-          </FormCell>
-        </div>
-
-        <div style={{ marginTop: '12px' }}>
-          <label className="field-label">Remarks / special instructions (optional)</label>
-          <textarea
-            rows={3}
-            placeholder="e.g. Check the fire alarms on this floor first"
-            value={form.notes}
-            onChange={set('notes')}
-          />
-        </div>
-
-        <FormBand>IV. Assigned inspector</FormBand>
-        <div style={{ border: '1px solid #cbd5e1', borderTop: 'none', padding: '10px' }}>
-          <select value={form.inspector_id} onChange={set('inspector_id')}>
-            {inspectors.map((i) => (
-              <option key={i.accountId} value={i.accountId}>
-                {i.name}
-                {i.isAvailable === false ? ' (Unavailable)' : i.isAvailable ? ' (Available)' : ''}
-              </option>
-            ))}
-          </select>
-          <LeaveWarning
-            name={inspector?.name || 'This inspector'}
-            leaves={leaves.filter((l) => l.profile_id === form.inspector_id)}
-            from={ymdOf(new Date())}
-            to={form.due_date}
-          />
-        </div>
-
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(3, 1fr)',
-            gap: '18px',
-            marginTop: '26px'
-          }}
-        >
-          {[
-            { name: profile.full_name, caption: 'Requested by' },
-            { name: '', caption: 'Noted by (GSO Head)' },
-            { name: inspector?.name || '', caption: 'Received by (Inspector)' }
-          ].map((sig) => (
-            <div key={sig.caption} style={{ textAlign: 'center' }}>
-              <div
-                style={{
-                  borderBottom: '1px solid #1e293b',
-                  minHeight: '24px',
-                  fontSize: '0.84rem',
-                  fontWeight: 600
-                }}
-              >
-                {sig.name}
-              </div>
-              <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '3px' }}>{sig.caption}</div>
-            </div>
+  const assignment = (
+    <>
+      <div>
+        <label className="field-label">Assign inspector</label>
+        <select value={form.inspector_id} onChange={set('inspector_id')}>
+          {inspectors.map((i) => (
+            <option key={i.accountId} value={i.accountId}>
+              {i.name}
+              {i.isAvailable === false ? ' (Unavailable)' : i.isAvailable ? ' (Available)' : ''}
+            </option>
           ))}
-        </div>
-
-        {error && <p className="form-error" style={{ marginTop: '12px' }}>{error}</p>}
-
-        <div className="modal-actions" style={{ gap: '8px', marginTop: '14px' }}>
-          <button className="btn btn-secondary" onClick={onCancel} disabled={saving}>Cancel</button>
-          <button className="btn btn-primary" onClick={onSubmit} disabled={saving || coveredCount === 0}>
-            {saving ? 'Submitting...' : 'Submit Job Order'}
-          </button>
+        </select>
+        <LeaveWarning
+          name={inspector?.name || 'This inspector'}
+          leaves={leaves.filter((l) => l.profile_id === form.inspector_id)}
+          from={ymdOf(new Date())}
+          to={form.due_date}
+        />
+      </div>
+      <div>
+        <label className="field-label">Building</label>
+        <select value={form.building_id} onChange={(e) => onAreaChange(e.target.value, '')}>
+          {buildings.map((b) => (
+            <option key={b.id} value={b.id}>{b.building_name}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="field-label">Floor</label>
+        <select value={form.floor_label} onChange={(e) => onAreaChange(form.building_id, e.target.value)}>
+          <option value="">Whole building</option>
+          {floors.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+        <div className="info-line" style={{ marginTop: '4px' }}>
+          {coveredCount} unit{coveredCount === 1 ? '' : 's'} in service
+          {coveredCount === 0 && (
+            <span style={{ color: '#b91c1c' }}> — nothing to inspect here, choose another building or floor</span>
+          )}
         </div>
       </div>
-    </div>
+      <div>
+        <label className="field-label">Priority</label>
+        <select value={form.priority} onChange={set('priority')}>
+          {ASSIGN_PRIORITIES.map((p) => (
+            <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <label className="field-label">Inspect on or before</label>
+        <input type="date" value={form.due_date} min={ymdOf(new Date())} onChange={set('due_date')} />
+      </div>
+    </>
+  )
+
+  return (
+    <JobOrderWindow
+      title="File an inspection Job Order"
+      assignmentTitle="Inspector and area"
+      assignment={assignment}
+      draft={draft}
+      onDraftChange={onDraftChange}
+      facilitatedBy={inspector?.name}
+      error={error}
+      saving={saving}
+      submitDisabled={coveredCount === 0}
+      onCancel={onCancel}
+      onSubmit={onSubmit}
+    />
   )
 }
 
 export function JobOrderRequestModal({
   modal,
-  profile,
   technicians,
   fireExtinguisherStock,
   selectedTechnicianId,
   onSelectTechnician,
-  remarks,
-  onRemarksChange,
+  draft,
+  onDraftChange,
+  error,
+  saving,
   leaves = [],
   onCancel,
   onSubmit
@@ -2342,125 +2381,47 @@ export function JobOrderRequestModal({
     )
   }
 
-  const joNumber = `JO-${new Date().getFullYear()}-${String(modal.actionId).replace(/-/g, '').slice(0, 5).toUpperCase()}`
-  const selectedTech = technicians.find((t) => t.id === selectedTechnicianId)
-
-  return (
-    <div className="modal-overlay">
-      <div
-        className="modal-box"
-        style={{ maxWidth: '700px', width: '94vw', maxHeight: '92vh', overflowY: 'auto', textAlign: 'left' }}
-      >
-        {/* Letterhead */}
-        <img className="print-letterhead" src={nbscHeader} alt="Northern Bukidnon State College" />
-        <div style={{ textAlign: 'center', borderBottom: '2px solid #0f2a4a', paddingBottom: '10px' }}>
-          <div style={{ fontSize: '0.78rem', color: '#475569' }}>General Services Office</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 800, marginTop: '4px', letterSpacing: '0.04em' }}>
-            JOB ORDER REQUEST
-          </div>
-        </div>
-
-        <FormBand>I. Request details</FormBand>
-        <div style={formGrid}>
-          <FormCell label="Job Order No.">{joNumber}</FormCell>
-          <FormCell label="Date requested">{fmtDateTime(new Date())}</FormCell>
-          <FormCell label="Requested by">
-            {profile.full_name} ({profile.role})
-          </FormCell>
-          <FormCell label="Status">Pending submission</FormCell>
-        </div>
-
-        <FormBand>II. Equipment concerned</FormBand>
-        <div style={formGrid}>
-          <FormCell label="Equipment code">{modal.equipmentCode}</FormCell>
-          <FormCell label="Equipment type">
-            {TYPE_LABELS[modal.equipmentType] || modal.equipmentType}
-          </FormCell>
-          <FormCell label="Location (building / floor / room)" span={2}>
-            {modal.location}
-          </FormCell>
-          {modal.isFireExtinguisher && (
-            <FormCell label="Replacement stock on hand" span={2}>
-              {fireExtinguisherStock} fire extinguisher{fireExtinguisherStock === 1 ? '' : 's'} available
-              {fireExtinguisherStock === 0 && (
-                <span style={{ color: '#b91c1c' }}> — no unit on hand, a Purchase Request is also needed</span>
-              )}
-            </FormCell>
+  // The defect and what the technician needs to know, above the picker.
+  const assignment = (
+    <>
+      <div className="info-line">
+        <b>{modal.equipmentCode}</b> — {TYPE_LABELS[modal.equipmentType] || modal.equipmentType}
+        {' · '}
+        <span style={{ textTransform: 'capitalize' }}>{modal.priority}</span> priority
+        {' · '}
+        {ACTION_TYPE_LABELS[modal.actionType] || modal.actionType}
+      </div>
+      <div className="info-line">{modal.location}</div>
+      <div className="info-line">Reported {fmtDateTime(modal.reportedDate)}</div>
+      {modal.isFireExtinguisher && (
+        <div className="info-line">
+          Replacement stock on hand: <b>{fireExtinguisherStock}</b> fire extinguisher
+          {fireExtinguisherStock === 1 ? '' : 's'}
+          {fireExtinguisherStock === 0 && (
+            <span style={{ color: '#b91c1c' }}> — no unit on hand, a Purchase Request is also needed</span>
           )}
         </div>
-
-        <FormBand>III. Work requested</FormBand>
-        <div style={formGrid}>
-          <FormCell label="Nature of work">
-            {ACTION_TYPE_LABELS[modal.actionType] || modal.actionType}
-          </FormCell>
-          <FormCell label="Priority">
-            <span style={{ textTransform: 'capitalize' }}>{modal.priority}</span>
-          </FormCell>
-          <FormCell label="Reported defect / description of work" span={2}>
-            {modal.finding}
-          </FormCell>
-          <FormCell label="Date defect reported" span={2}>
-            {fmtDateTime(modal.reportedDate)}
-          </FormCell>
-        </div>
-
-        <div style={{ marginTop: '12px' }}>
-          <label className="field-label">Remarks / special instructions (optional)</label>
-          <textarea
-            rows={3}
-            placeholder="e.g. Check the alarm wiring in the corridor first"
-            value={remarks}
-            onChange={(e) => onRemarksChange(e.target.value)}
-          />
-        </div>
-
-        <FormBand>IV. Assigned technician</FormBand>
-        <div style={{ border: '1px solid #cbd5e1', borderTop: 'none', padding: '10px' }}>
-          {technicianSelect}
-          {techLeaveWarning}
-        </div>
-
-        {/* Signatures */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(3, 1fr)',
-            gap: '18px',
-            marginTop: '26px'
-          }}
-        >
-          {[
-            { name: profile.full_name, caption: 'Requested by' },
-            { name: '', caption: 'Noted by (GSO Head)' },
-            { name: selectedTech?.full_name || '', caption: 'Received by (Technician)' }
-          ].map((sig) => (
-            <div key={sig.caption} style={{ textAlign: 'center' }}>
-              <div
-                style={{
-                  borderBottom: '1px solid #1e293b',
-                  minHeight: '24px',
-                  fontSize: '0.84rem',
-                  fontWeight: 600
-                }}
-              >
-                {sig.name}
-              </div>
-              <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '3px' }}>{sig.caption}</div>
-            </div>
-          ))}
-        </div>
-
-        <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)', margin: '16px 0 0 0' }}>
-          Form layout is provisional and will be matched to the official GSO Job Order form once the
-          template is provided.
-        </p>
-
-        <div className="modal-actions" style={{ gap: '8px', marginTop: '14px' }}>
-          <button className="btn btn-secondary" onClick={onCancel}>Cancel</button>
-          <button className="btn btn-primary" onClick={onSubmit}>Submit Job Order</button>
-        </div>
+      )}
+      <div>
+        <label className="field-label">Assign technician</label>
+        {technicianSelect}
+        {techLeaveWarning}
       </div>
-    </div>
+    </>
+  )
+
+  return (
+    <JobOrderWindow
+      title="File a Job Order"
+      assignmentTitle="Technician"
+      assignment={assignment}
+      draft={draft}
+      onDraftChange={onDraftChange}
+      facilitatedBy={chosenTech?.full_name}
+      error={error}
+      saving={saving}
+      onCancel={onCancel}
+      onSubmit={onSubmit}
+    />
   )
 }

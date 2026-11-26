@@ -24,6 +24,21 @@ import { InspectionWeeks, TypeBars } from './DashboardCharts'
 import { ReportsTab } from './ReportsTab'
 import { ACTION_STATUS_LABELS, buildInventoryReport, manilaDay } from './reports'
 import nbscHeader from './assets/nbsc-print-header.png'
+import FormPrintPage from './FormPrintPage'
+import { JorEditorModal, PrEditorModal } from './OfficialFormEditors'
+import {
+  checkJobOrderDraft,
+  createJobOrderForm,
+  createPurchaseRequestForm,
+  fetchFormSummaries,
+  formPrintUrl,
+  formsErrorMessage,
+  insertJobOrderForm,
+  isJorNoTaken,
+  jobOrderDraftFromAction,
+  latestBySource,
+  parseFormPrintRoute
+} from './officialForms'
 
 // The print dialog opens a moment after a report sheet is drawn; load the
 // letterhead now so it is never missing from the first printout.
@@ -411,6 +426,18 @@ function App() {
     )
   }
 
+  // Official form print pages (/forms/jor/:id/print, /forms/pr/:id/print),
+  // opened in a new tab from the dashboard.
+  const printRoute = parseFormPrintRoute(window.location.pathname)
+  if (printRoute) {
+    return (
+      <>
+        {successModal}
+        <FormPrintPage kind={printRoute.kind} id={printRoute.id} />
+      </>
+    )
+  }
+
   return (
     <>
       {successModal}
@@ -432,6 +459,11 @@ function Dashboard({ profile, onLogout }) {
   const [unavailability, setUnavailability] = useState([])
   // Available / Unavailable switches made on the phone (migration 017)
   const [availabilityChanges, setAvailabilityChanges] = useState([])
+  // Official Job Order Request / Purchase Request forms (migration 020)
+  const [officialForms, setOfficialForms] = useState({ jobOrders: [], purchases: [] })
+  // The form open for editing: { kind: 'jor' | 'pr', id }
+  const [formEditor, setFormEditor] = useState(null)
+  const [formCreating, setFormCreating] = useState(null)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState(null)
@@ -588,7 +620,9 @@ function Dashboard({ profile, onLogout }) {
   // Technician assignment modal state (when starting a job order)
   const [techAssignModal, setTechAssignModal] = useState(null)
   // Free-text remarks that go on the Job Order Request form
-  const [jobOrderRemarks, setJobOrderRemarks] = useState('')
+  // The official Job Order Request fields filled in while filing (officialForms.js)
+  const [jobOrderDraft, setJobOrderDraft] = useState(null)
+  const [jobOrderError, setJobOrderError] = useState(null)
   const [selectedTechnicianId, setSelectedTechnicianId] = useState('')
 
   // Add Equipment form: the new unit comes out of the storeroom stock, so the
@@ -642,7 +676,8 @@ function Dashboard({ profile, onLogout }) {
       getAllActions(),
       getStaffAccounts(),
       getUnavailability(),
-      getAvailabilityChanges()
+      getAvailabilityChanges(),
+      getOfficialForms()
     ]).then(() => setInitialLoaded(true))
   }, [])
 
@@ -670,6 +705,7 @@ function Dashboard({ profile, onLogout }) {
       getUnavailability()
       getAvailabilityChanges()
       getStock()
+      getOfficialForms()
     }
 
     function connect() {
@@ -1209,6 +1245,46 @@ function Dashboard({ profile, onLogout }) {
     if (!error) setAvailabilityChanges(data || [])
   }
 
+  // The official forms already made, for the buttons on the Priority Action
+  // cards. Before migration 020 there are none.
+  async function getOfficialForms() {
+    setOfficialForms(await fetchFormSummaries())
+  }
+
+  // Creates a Purchase Request form for a unit listed under "Needs Purchase
+  // Request", pre-filled from it, then opens it for the GSO to complete.
+  async function createPurchaseForm(item) {
+    setFormCreating(`pr-${item.equipmentId}`)
+    try {
+      const id = await createPurchaseRequestForm({ item, profile, typeLabel })
+      await getOfficialForms()
+      setFormEditor({ kind: 'pr', id })
+    } catch (error) {
+      alert('Could not create the Purchase Request form: ' + formsErrorMessage(error))
+    }
+    setFormCreating(null)
+  }
+
+  // A Job Order filed before the forms existed has no form yet.
+  async function createJobOrderFormFor(action) {
+    setFormCreating(`jor-${action.id}`)
+    try {
+      const tech = technicians.find((t) => t.id === action.assigned_technician_id)
+      const id = await createJobOrderForm({
+        action,
+        technicianName: tech?.full_name,
+        remarks: action.job_order_remarks,
+        profile,
+        typeLabel
+      })
+      await getOfficialForms()
+      setFormEditor({ kind: 'jor', id })
+    } catch (error) {
+      alert('Could not create the Job Order Request form: ' + formsErrorMessage(error))
+    }
+    setFormCreating(null)
+  }
+
   async function getAllActions() {
     const { data, error } = await supabase
       .from('maintenance_actions')
@@ -1683,6 +1759,16 @@ function Dashboard({ profile, onLogout }) {
 
     const tech = technicians.find((t) => t.id === selectedTechnicianId)
     if (!isReassign) {
+      setJobOrderError(null)
+      const problem = jobOrderDraft ? checkJobOrderDraft(jobOrderDraft) : null
+      if (problem) {
+        setJobOrderError(problem)
+        return
+      }
+      if (jobOrderDraft && (await isJorNoTaken(jobOrderDraft.jor_no))) {
+        setJobOrderError(`JOR No. "${jobOrderDraft.jor_no.trim()}" is already used by another Job Order Request.`)
+        return
+      }
       const message =
         `Submit Job Order Request for ${equipmentCode}?\n\n` +
         `Assigned technician: ${tech?.full_name}${tech?.is_available ? '' : ' (currently marked Unavailable)'}.` +
@@ -1698,7 +1784,7 @@ function Dashboard({ profile, onLogout }) {
           repair_path: 'job_order',
           decided_by: `${profile.full_name} (${profile.role})`,
           decided_at: new Date().toISOString(),
-          job_order_remarks: jobOrderRemarks.trim() || null,
+          job_order_remarks: jobOrderDraft?.remarks.trim() || null,
           status: 'in_progress',
           assigned_technician_id: selectedTechnicianId,
           repair_status: 'assigned'
@@ -1711,6 +1797,22 @@ function Dashboard({ profile, onLogout }) {
       setActionUpdatingId(null)
       return
     }
+    // Save the official Job Order Request filled in on this window. The Job
+    // Order itself is already saved, so a problem here (e.g. migration 020
+    // not run yet) only shows a note.
+    if (!isReassign && jobOrderDraft) {
+      try {
+        await insertJobOrderForm(jobOrderDraft, { source_record_id: actionId }, tech?.full_name)
+        getOfficialForms()
+      } catch (formError) {
+        alert(
+          'The Job Order was submitted, but its Job Order Request form could not be created: ' +
+            formsErrorMessage(formError) +
+            '\n\nYou can create it later from the Priority Action card.'
+        )
+      }
+    }
+
     // Refreshed here too, not only by the live updates, so the technician
     // cards' numbers and the "Assign job order" list change right away.
     getMaintenanceActions()
@@ -1718,7 +1820,7 @@ function Dashboard({ profile, onLogout }) {
 
     setTechAssignModal(null)
     setSelectedTechnicianId('')
-    setJobOrderRemarks('')
+    setJobOrderDraft(null)
     setActionUpdatingId(null)
   }
 
@@ -2057,6 +2159,40 @@ function Dashboard({ profile, onLogout }) {
     stock
   })
 
+  // Newest official form per record: Job Order Requests by Priority Action,
+  // Purchase Requests by equipment (migration 020).
+  const jorBySource = latestBySource(officialForms.jobOrders)
+  const prBySource = latestBySource(officialForms.purchases)
+
+  // "Edit form" / "View / Print form" for a form that exists, or a button
+  // that creates it. Used on the Priority Action cards and the summary.
+  function formButtons({ kind, form, label, onCreate, creating }) {
+    if (form) {
+      const no = kind === 'jor' ? form.jor_no : form.pr_no
+      return (
+        <>
+          <button className="btn btn-secondary btn-sm" onClick={() => setFormEditor({ kind, id: form.id })}>
+            Edit {label}{no ? ` ${no}` : ''}
+          </button>
+          <a
+            className="btn btn-secondary btn-sm"
+            href={formPrintUrl(kind, form.id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ textDecoration: 'none' }}
+          >
+            View / Print form
+          </a>
+        </>
+      )
+    }
+    return (
+      <button className="btn btn-secondary btn-sm" onClick={onCreate} disabled={creating}>
+        {creating ? 'Creating...' : `Create ${label} form`}
+      </button>
+    )
+  }
+
   // Unavailable dates still current or coming up, with who sent them.
   const todayPh = manilaDay(new Date())
   const upcomingLeaves = unavailability
@@ -2197,7 +2333,8 @@ function Dashboard({ profile, onLogout }) {
   // ("Assign job order") that technician is already chosen.
   function openJobOrderRequest(action, technicianId) {
     setSelectedTechnicianId(technicianId || '')
-    setJobOrderRemarks('')
+    setJobOrderDraft(jobOrderDraftFromAction(action, profile, typeLabel))
+    setJobOrderError(null)
     setTechAssignModal({
       actionId: action.id,
       isFireExtinguisher: action.equipment?.equipment_type === 'fire_extinguisher',
@@ -2530,6 +2667,15 @@ function Dashboard({ profile, onLogout }) {
             purchaseItems={purchaseRequestItems}
             onOpenAction={openActionInFilter}
             onOpenExpiry={() => openReport('expiry')}
+            renderFormButtons={(p) =>
+              formButtons({
+                kind: 'pr',
+                form: prBySource[p.equipmentId],
+                label: 'Purchase Request',
+                onCreate: () => createPurchaseForm(p),
+                creating: formCreating === `pr-${p.equipmentId}`
+              })
+            }
           />
         )}
 
@@ -2690,6 +2836,38 @@ function Dashboard({ profile, onLogout }) {
                       : 'Needs a Job Order Request — assign a technician to repair it from Technicians → "Assign job order".'}
                   </p>
                 )}
+
+                {/* Official forms for this defect: the Job Order Request once a
+                    Job Order is filed, the Purchase Request while no unit in
+                    stock can replace it (or once one was made). */}
+                {!readOnly && (() => {
+                  const jorForm = jorBySource[action.id]
+                  const prForm = action.equipment?.id ? prBySource[action.equipment.id] : null
+                  const prItem = purchaseRequestItems.find((p) => p.actionId === action.id)
+                  const showJor = jorForm || action.repair_path === 'job_order'
+                  const showPr = prForm || prItem
+                  if (!showJor && !showPr) return null
+                  return (
+                    <div className="info-actions" style={{ marginTop: '10px' }}>
+                      {showJor &&
+                        formButtons({
+                          kind: 'jor',
+                          form: jorForm,
+                          label: 'Job Order Request',
+                          onCreate: () => createJobOrderFormFor(action),
+                          creating: formCreating === `jor-${action.id}`
+                        })}
+                      {showPr &&
+                        formButtons({
+                          kind: 'pr',
+                          form: prForm,
+                          label: 'Purchase Request',
+                          onCreate: () => createPurchaseForm(prItem),
+                          creating: formCreating === `pr-${prItem?.equipmentId}`
+                        })}
+                    </div>
+                  )
+                })()}
 
                 {/* Stage: In progress — close with outcome tracking or reassign technician */}
                 {action.status === 'in_progress' && (
@@ -3830,7 +4008,6 @@ function Dashboard({ profile, onLogout }) {
             leaves={upcomingLeaves}
             availabilityKey={availabilityChanges[0]?.id || ''}
             adminName={profile.full_name}
-            adminRole={profile.role}
           />
         )}
 
@@ -4381,15 +4558,16 @@ function Dashboard({ profile, onLogout }) {
       {techAssignModal && (
         <JobOrderRequestModal
           modal={techAssignModal}
-          profile={profile}
           technicians={technicians}
           fireExtinguisherStock={
             stock.find((x) => x.equipment_type === 'fire_extinguisher')?.quantity_available ?? 0
           }
           selectedTechnicianId={selectedTechnicianId}
           onSelectTechnician={setSelectedTechnicianId}
-          remarks={jobOrderRemarks}
-          onRemarksChange={setJobOrderRemarks}
+          draft={jobOrderDraft}
+          onDraftChange={setJobOrderDraft}
+          error={jobOrderError}
+          saving={actionUpdatingId === techAssignModal.actionId}
           leaves={upcomingLeaves}
           onCancel={() => setTechAssignModal(null)}
           onSubmit={handleConfirmStartWork}
@@ -4557,6 +4735,27 @@ function Dashboard({ profile, onLogout }) {
           profileId={calendarFor.id}
           name={calendarFor.name}
           onClose={() => setCalendarFor(null)}
+        />
+      )}
+
+      {formEditor?.kind === 'jor' && (
+        <JorEditorModal
+          id={formEditor.id}
+          onClose={() => setFormEditor(null)}
+          onSaved={() => {
+            setFormEditor(null)
+            getOfficialForms()
+          }}
+        />
+      )}
+      {formEditor?.kind === 'pr' && (
+        <PrEditorModal
+          id={formEditor.id}
+          onClose={() => setFormEditor(null)}
+          onSaved={() => {
+            setFormEditor(null)
+            getOfficialForms()
+          }}
         />
       )}
 

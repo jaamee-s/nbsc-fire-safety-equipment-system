@@ -596,6 +596,62 @@ textarea {
   justify-content: flex-end;
 }
 
+/* ===== Job Order window: fields (left) + official form preview (right) ===== */
+.modal-box.jo-window {
+  max-width: 1120px;
+  width: 96vw;
+  max-height: 94vh;
+  overflow-y: auto;
+}
+
+.jo-window-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto;
+  gap: 20px;
+  align-items: start;
+}
+
+.jo-window-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.jo-window-section {
+  font-weight: 700;
+  font-size: 0.9rem;
+  margin-top: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.jo-window-preview {
+  position: sticky;
+  top: 0;
+  background: var(--gray-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.jo-window-preview-frame {
+  overflow: hidden;
+  margin: 0 auto;
+}
+
+@media (max-width: 900px) {
+  .jo-window-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .jo-window-preview {
+    position: static;
+  }
+}
+
 /* ===== QR labels ===== */
 .qr-label {
   display: flex;
