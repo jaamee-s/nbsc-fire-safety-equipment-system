@@ -32,6 +32,7 @@ import { NotificationBell, NotificationsScreen, useNotifications } from './Notif
 import {
   ACTION_TYPES,
   ACTION_TYPE_LABELS,
+  AVAILABILITY_REASONS,
   FINDINGS_BY_TYPE,
   OPEN_PROBLEM_STATUSES,
   OTHER_FINDING,
@@ -46,6 +47,7 @@ import {
   getEquipmentOverview,
   getInspectorDashboard,
   addUnavailableDates,
+  getMyAvailabilityReason,
   getMyInspectionAssignments,
   getMyStats,
   getMyUnavailableDates,
@@ -211,8 +213,8 @@ function useDashboard(account) {
   useAutoRefresh(load)
 
   // Saves the new status, then shows it.
-  const setAvailable = useCallback(async (available) => {
-    const saved = await setMyAvailability(available)
+  const setAvailable = useCallback(async (available, reason) => {
+    const saved = await setMyAvailability(available, reason)
     setStats((prev) => (prev ? { ...prev, is_available: saved !== false } : prev))
   }, [])
 
@@ -1548,48 +1550,129 @@ function UnavailableDatesCard({ account }) {
 }
 
 // Available / Unavailable, set by the inspector or technician themselves.
-// The GSO sees it on the web Inspectors / Technicians page.
+// The GSO sees it on the web Inspectors / Technicians page. Switching to
+// Unavailable asks why (panel comment), and the GSO sees the reason too.
 function AvailabilityCard({ dashboard }) {
   const { stats, setAvailable } = dashboard
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState(null)
+  const [reason, setReason] = useState(null)
+  // The reason picker: null = closed, else { choice, note }
+  const [picking, setPicking] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    getMyAvailabilityReason().then((r) => {
+      if (alive) setReason(r)
+    })
+    return () => {
+      alive = false
+    }
+  }, [stats?.is_available])
+
   // Before migration 009 there is nothing to switch.
   if (!stats) return null
   const available = stats.is_available !== false
 
-  async function change(next) {
+  async function save(next, why) {
     setErr(null)
     setSaving(true)
     try {
-      await setAvailable(next)
+      await setAvailable(next, why)
+      setReason(next ? null : why || null)
+      setPicking(null)
     } catch (e) {
       setErr(e.message)
     }
     setSaving(false)
   }
 
+  function onSwitch(next) {
+    if (next) save(true)
+    else setPicking({ choice: null, note: '' })
+  }
+
+  const chosen = picking
+    ? picking.choice === 'Other'
+      ? picking.note.trim()
+      : picking.choice
+    : null
+
   return (
-    <View style={[s.card, s.availCard]}>
-      <View style={s.flex}>
-        <Text style={s.availLabel}>My status</Text>
-        <Text style={[s.availValue, { color: available ? C.green : C.muted }]}>
-          {available ? '● Available' : '○ Unavailable'}
-        </Text>
-        <Text style={s.availHint}>
-          {available ? 'The GSO sees you as available.' : 'The GSO sees you as unavailable.'}
-        </Text>
-        {err ? <Text style={[s.error, { marginTop: 4 }]}>{err}</Text> : null}
+    <View style={s.card}>
+      <View style={s.availCard}>
+        <View style={s.flex}>
+          <Text style={s.availLabel}>My status</Text>
+          <Text style={[s.availValue, { color: available ? C.green : C.muted }]}>
+            {available ? '● Available' : '○ Unavailable'}
+          </Text>
+          <Text style={s.availHint}>
+            {available
+              ? 'The GSO sees you as available.'
+              : reason
+                ? `Reason: ${reason}`
+                : 'The GSO sees you as unavailable.'}
+          </Text>
+          {!available && !picking ? (
+            <Pressable onPress={() => setPicking({ choice: null, note: '' })} hitSlop={8}>
+              <Text style={s.availLink}>{reason ? 'Change reason' : 'Add a reason'}</Text>
+            </Pressable>
+          ) : null}
+          {err ? <Text style={[s.error, { marginTop: 4 }]}>{err}</Text> : null}
+        </View>
+        {saving ? (
+          <ActivityIndicator color={C.blue} />
+        ) : (
+          <Switch
+            value={available && !picking}
+            onValueChange={onSwitch}
+            disabled={!!picking}
+            trackColor={{ false: C.border, true: '#86EFAC' }}
+            thumbColor={available && !picking ? C.green : '#F1F5F9'}
+          />
+        )}
       </View>
-      {saving ? (
-        <ActivityIndicator color={C.blue} />
-      ) : (
-        <Switch
-          value={available}
-          onValueChange={change}
-          trackColor={{ false: C.border, true: '#86EFAC' }}
-          thumbColor={available ? C.green : '#F1F5F9'}
-        />
-      )}
+
+      {picking ? (
+        <View style={s.reasonBox}>
+          <Text style={s.reasonTitle}>Why are you unavailable?</Text>
+          <View style={s.reasonChips}>
+            {AVAILABILITY_REASONS.map((r) => (
+              <Pressable
+                key={r}
+                onPress={() => setPicking((p) => ({ ...p, choice: r }))}
+                style={[s.reasonChip, picking.choice === r && s.reasonChipOn]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: picking.choice === r }}
+              >
+                <Text style={[s.reasonChipText, picking.choice === r && s.reasonChipTextOn]}>{r}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {picking.choice === 'Other' ? (
+            <TextInput
+              style={s.input}
+              placeholder="Short reason, e.g. Training at the City Hall"
+              placeholderTextColor={C.muted}
+              value={picking.note}
+              onChangeText={(note) => setPicking((p) => ({ ...p, note }))}
+              maxLength={200}
+            />
+          ) : null}
+          <View style={s.reasonActions}>
+            <Pressable onPress={() => setPicking(null)} style={s.reasonCancel} disabled={saving}>
+              <Text style={s.reasonCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => save(false, chosen)}
+              style={[s.reasonSave, !chosen && { opacity: 0.5 }]}
+              disabled={!chosen || saving}
+            >
+              <Text style={s.reasonSaveText}>{available ? 'Set Unavailable' : 'Save reason'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
     </View>
   )
 }
@@ -2152,7 +2235,8 @@ function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) 
   const isRetired = equipment.current_status === 'no_longer_in_service'
   // An expiry warning on a unit that's already been retired is noise.
   const expired = !isRetired && left !== null && left < 0
-  const expiringSoon = !isRetired && left !== null && left >= 0 && left <= 30
+  // Same stages as the GSO's reminders: from 60 days before the expiry date.
+  const expiringSoon = !isRetired && left !== null && left >= 0 && left <= 60
   const isFunctional = equipment.current_status === 'functional'
   // A reported defect must be handled by GSO first. Until GSO records the
   // outcome and the unit is Functional again, inspection stays on hold.
@@ -2183,14 +2267,16 @@ function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) 
         {expired && (
           <View style={[s.banner, s.bannerRed]}>
             <Text style={s.bannerRedText}>
-              Expired {Math.abs(left)} day{Math.abs(left) === 1 ? '' : 's'} ago.
+              Expired {Math.abs(left)} day{Math.abs(left) === 1 ? '' : 's'} ago. Report it as Defective with
+              the finding &quot;Past expiration date&quot; so the GSO can replace it.
             </Text>
           </View>
         )}
         {expiringSoon && (
           <View style={[s.banner, s.bannerAmber]}>
             <Text style={s.bannerAmberText}>
-              {left === 0 ? 'Expires today.' : `Expires in ${left} days.`}
+              {left === 0 ? 'Expires today.' : `Expires in ${left} day${left === 1 ? '' : 's'}.`} The GSO has been reminded
+              to plan its replacement.
             </Text>
           </View>
         )}
@@ -2638,6 +2724,27 @@ const s = StyleSheet.create({
   availLabel: { fontSize: 12, color: C.muted, fontWeight: '600' },
   availValue: { fontSize: 16, fontWeight: '800', marginTop: 2 },
   availHint: { fontSize: 12, color: C.muted, marginTop: 2 },
+  availLink: { fontSize: 13, color: C.blue, fontWeight: '700', marginTop: 6 },
+  reasonBox: { marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border, gap: 10 },
+  reasonTitle: { fontSize: 14, fontWeight: '700', color: C.text },
+  reasonChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  reasonChip: {
+    paddingHorizontal: 14,
+    minHeight: 40,
+    justifyContent: 'center',
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: C.border,
+    backgroundColor: C.white
+  },
+  reasonChipOn: { borderColor: C.blue, backgroundColor: C.blueBg },
+  reasonChipText: { fontSize: 14, color: C.text, fontWeight: '600' },
+  reasonChipTextOn: { color: C.blue },
+  reasonActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
+  reasonCancel: { minHeight: 44, paddingHorizontal: 16, justifyContent: 'center', borderRadius: 10 },
+  reasonCancelText: { fontSize: 15, color: C.muted, fontWeight: '700' },
+  reasonSave: { minHeight: 44, paddingHorizontal: 18, justifyContent: 'center', borderRadius: 10, backgroundColor: C.navy },
+  reasonSaveText: { fontSize: 15, color: C.white, fontWeight: '700' },
 
   jobOrder: {
     borderWidth: 1,

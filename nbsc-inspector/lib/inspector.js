@@ -394,16 +394,41 @@ export async function removeUnavailableDates(id) {
   if (result.error) throw toError('Could not remove those dates: ', result.error)
 }
 
-// Inspectors and technicians set their own Available / Unavailable status.
-export async function setMyAvailability(available) {
+// Why someone is Unavailable, picked when they switch (migration 021).
+// "Other" asks for a short note instead.
+export const AVAILABILITY_REASONS = ['Sick', 'On leave', 'Off-campus', 'Busy with another task', 'Other']
+
+// Inspectors and technicians set their own Available / Unavailable status,
+// with a reason when Unavailable. Before migration 021 the database takes no
+// reason, so the switch is saved without it instead of failing.
+export async function setMyAvailability(available, reason) {
+  const args = { p_available: !!available }
+  if (!available && reason) args.p_reason = reason
   let result
   try {
-    result = await supabase.rpc('set_my_availability', { p_available: !!available })
+    result = await supabase.rpc('set_my_availability', args)
+    if (result.error && args.p_reason && /set_my_availability|schema cache|function/i.test(result.error.message || '')) {
+      result = await supabase.rpc('set_my_availability', { p_available: !!available })
+    }
   } catch (err) {
     throw toError('Could not change your status: ', err)
   }
   if (result.error) throw toError('Could not change your status: ', result.error)
   return result.data
+}
+
+// The reason saved with my current Unavailable status, or null.
+export async function getMyAvailabilityReason() {
+  try {
+    const { data: auth } = await supabase.auth.getUser()
+    const id = auth?.user?.id
+    if (!id) return null
+    const { data, error } = await supabase.from('profiles').select('availability_reason').eq('id', id).maybeSingle()
+    if (error) return null
+    return data?.availability_reason || null
+  } catch {
+    return null
+  }
 }
 
 // Technician updates the repair status of an assigned job.
