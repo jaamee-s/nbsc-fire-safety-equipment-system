@@ -29,6 +29,7 @@ import CampusView from './CampusView'
 import {
   ComplianceRing,
   DashboardGreeting,
+  ExpiringSoon,
   LiveActivity,
   PriorityQueue,
   RoundsProgress,
@@ -617,8 +618,10 @@ function Dashboard({ profile, onLogout }) {
   })
   // Mobile app logins (username shown on cards) and the "account created" note
   const [staffAccounts, setStaffAccounts] = useState([])
-  // Available / Unavailable of each account, set in the mobile app: { [id]: true | false }
+  // Available / Unavailable of each account, set in the mobile app: { [id]: true | false },
+  // and why they are Unavailable (migration 021): { [id]: "Sick" }
   const [staffAvailability, setStaffAvailability] = useState({})
+  const [staffReasons, setStaffReasons] = useState({})
   const [accountNotice, setAccountNotice] = useState(null)
   // "Create app account" for a technician added before accounts existed
   const [techLoginFor, setTechLoginFor] = useState(null)
@@ -1274,7 +1277,8 @@ function Dashboard({ profile, onLogout }) {
     const since = new Date(new Date().getTime() - 3 * 24 * 60 * 60 * 1000).toISOString()
     const { data, error } = await supabase
       .from('staff_availability_changes')
-      .select('id, profile_id, is_available, changed_at')
+      // * so the reason (migration 021) comes along once it exists
+      .select('*')
       .gte('changed_at', since)
       .order('changed_at', { ascending: false })
       .limit(200)
@@ -1993,10 +1997,13 @@ function Dashboard({ profile, onLogout }) {
     const { data, error } = await supabase.rpc('list_staff_availability')
     if (error) return
     const byId = {}
+    const reasons = {}
     ;(data || []).forEach((a) => {
       byId[a.id] = a.is_available
+      if (a.availability_reason) reasons[a.id] = a.availability_reason
     })
     setStaffAvailability(byId)
+    setStaffReasons(reasons)
   }
 
   async function getStaffAccounts() {
@@ -2189,6 +2196,14 @@ function Dashboard({ profile, onLogout }) {
     return Math.round((target - today) / (1000 * 60 * 60 * 24))
   }
 
+  // Units in service expiring within 90 days (or already expired), soonest
+  // first: the dashboard's Expiring soon panel and the staged reminders.
+  const expiryWatch = equipment
+    .filter((item) => item.current_status !== 'no_longer_in_service')
+    .map((item) => ({ ...item, daysLeft: daysUntil(item.expiration_date) }))
+    .filter((item) => item.daysLeft !== null && item.daysLeft <= 90)
+    .sort((a, b) => a.daysLeft - b.daysLeft)
+
   // Retired units no longer need an expiry warning.
   const expiringEquipment = equipment
     .filter((item) => item.current_status !== 'no_longer_in_service')
@@ -2281,6 +2296,7 @@ function Dashboard({ profile, onLogout }) {
         name: a.full_name,
         role: 'Inspector',
         available: staffAvailability[a.id] !== false,
+        reason: staffReasons[a.id] || null,
         onJob: false,
         onLeave: onLeaveToday(a.id)
       })),
@@ -2289,6 +2305,7 @@ function Dashboard({ profile, onLogout }) {
       name: t.full_name,
       role: 'Technician',
       available: t.is_available !== false,
+      reason: t.profile_id ? staffReasons[t.profile_id] || null : null,
       onJob: sortedActions.some((a) => a.assigned_technician_id === t.id && a.repair_status === 'working'),
       onLeave: t.profile_id ? onLeaveToday(t.profile_id) : false
     }))
@@ -2297,10 +2314,11 @@ function Dashboard({ profile, onLogout }) {
   // A person's current / upcoming unavailable dates, earliest first.
   const leavesFor = (profileId) => (profileId ? upcomingLeaves.filter((l) => l.profile_id === profileId) : [])
 
-  // Notifications shown in the header bell
+  // Notifications shown in the header bell. Expiry reminders look 60 days
+  // ahead (expiryWatch), wider than the 30-day list used for Purchase Requests.
   const gsoNotifications = buildGsoNotifications({
     actions: sortedActions,
-    expiring: expiringEquipment,
+    expiring: expiryWatch.filter((e) => e.daysLeft <= 60),
     completed: completedActions,
     purchaseRequests: purchaseRequestItems,
     leaves: upcomingLeaves,
@@ -2723,6 +2741,8 @@ function Dashboard({ profile, onLogout }) {
                 }}
               />
               <LiveActivity notifications={gsoNotifications} onOpen={handleNotificationNavigate} />
+
+              <ExpiringSoon items={expiryWatch} stock={stock} onOpen={() => openReport('expiry')} />
 
               <RoundsProgress equipment={equipment} inspections={inspections} buildings={buildings} />
               <div className="dash-chart">
@@ -4368,6 +4388,11 @@ function Dashboard({ profile, onLogout }) {
                         <div className="info-line">
                           Username <b>{acc ? acc.username : 'No app account yet'}</b>
                         </div>
+                        {!t.is_available && t.profile_id && staffReasons[t.profile_id] && (
+                          <div className="info-line">
+                            Unavailable because <b>{staffReasons[t.profile_id]}</b>
+                          </div>
+                        )}
                         <div className="info-line">
                           Last repair <b>{counts.lastRepair ? formatTimestamp(counts.lastRepair) : 'None yet'}</b>
                         </div>

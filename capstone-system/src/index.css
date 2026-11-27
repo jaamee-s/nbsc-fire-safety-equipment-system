@@ -2341,7 +2341,6 @@ input::-ms-clear {
   font-size: 0.74rem;
   font-weight: 600;
   white-space: nowrap;
-  text-transform: capitalize;
   background: var(--gray-bg);
   color: var(--text-muted);
 }
@@ -2437,6 +2436,80 @@ input::-ms-clear {
   align-items: center;
   gap: 10px;
   font-size: 0.88rem;
+}
+
+/* Expiring soon (full width row) */
+.dash-span-all {
+  grid-column: 1 / -1;
+}
+
+.dash-expiry-groups {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .dash-expiry-groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .dash-expiry-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.dash-expiry-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.dash-expiry-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.dash-expiry-count {
+  min-width: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.dash-expiry-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dash-expiry-item:hover .dash-queue-title {
+  text-decoration: underline;
+}
+
+.dash-staff-reason {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--text-muted);
 }
 
 /* ===== Buildings: campus overview (version B) ===== */

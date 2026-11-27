@@ -172,7 +172,7 @@ export function PriorityQueue({ actions = [], purchaseItems = [], technicians = 
                   </span>
                 </span>
                 <span className={`dash-pill dash-pill-${a.priority}`}>
-                  {a.priority} · {stageOf(a, needsPurchase)}
+                  {(a.priority || '').charAt(0).toUpperCase() + (a.priority || '').slice(1)} · {stageOf(a, needsPurchase)}
                 </span>
               </button>
             )
@@ -274,7 +274,83 @@ export function RoundsProgress({ equipment = [], inspections = [], buildings = [
 
 /* ------------------------------------------------------------------ */
 
-// people: [{ id, name, role, available, onJob, onLeave }]
+// Expiring soon (panel comment): every unit in service expiring within 90
+// days, or already expired, in four groups, with the storeroom stock that
+// can replace them. items come with daysLeft, soonest first.
+const EXPIRY_GROUPS = [
+  { key: 'expired', title: 'Expired', test: (d) => d < 0, color: 'var(--red)', bg: 'var(--red-bg)' },
+  { key: 'week', title: 'This week', test: (d) => d >= 0 && d <= 7, color: 'var(--red)', bg: 'var(--red-bg)' },
+  { key: 'month', title: 'Within 30 days', test: (d) => d > 7 && d <= 30, color: 'var(--amber)', bg: 'var(--amber-bg)' },
+  { key: 'quarter', title: 'Within 90 days', test: (d) => d > 30 && d <= 90, color: 'var(--blue)', bg: 'var(--blue-light)' }
+]
+
+function shortYmd(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd || '')
+  if (!m) return ymd || ''
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  })
+}
+
+export function ExpiringSoon({ items = [], stock = [], onOpen }) {
+  const types = [...new Set(items.map((i) => i.equipment_type))]
+  const onHand = types.map((t) => ({
+    type: t,
+    qty: stock.find((s) => s.equipment_type === t)?.quantity_available ?? 0
+  }))
+  return (
+    <section className="dash-card dash-span-all" aria-labelledby="dash-expiry-title">
+      <div className="dash-card-head">
+        <h2 id="dash-expiry-title">Expiring soon · next 90 days</h2>
+        <button className="dash-link" onClick={onOpen}>
+          Open the Expiring / Expired report
+        </button>
+      </div>
+      {items.length === 0 ? (
+        <p className="dash-empty">✓ Nothing expires in the next 90 days.</p>
+      ) : (
+        <>
+          <div className="dash-expiry-groups">
+            {EXPIRY_GROUPS.map((g) => {
+              const list = items.filter((i) => g.test(i.daysLeft))
+              return (
+                <div key={g.key} className="dash-expiry-group">
+                  <div className="dash-expiry-head" style={{ color: g.color }}>
+                    {g.title} <span className="dash-expiry-count" style={{ background: g.bg }}>{list.length}</span>
+                  </div>
+                  {list.length === 0 ? (
+                    <span className="dash-muted">None</span>
+                  ) : (
+                    list.map((i) => (
+                      <button key={i.id} className="dash-expiry-item" onClick={onOpen}>
+                        <span className="dash-queue-title">
+                          {i.equipment_code} <span className="dash-muted">· {typeName(i.equipment_type)}</span>
+                        </span>
+                        <span className="dash-muted">
+                          {shortYmd(i.expiration_date)}
+                          {i.buildings?.building_name ? ` · ${i.buildings.building_name}` : ''}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <div className="dash-muted">
+            In the storeroom: {onHand.map((o) => `${o.qty} ${typeName(o.type)}`).join(' · ')}
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+
+// people: [{ id, name, role, available, reason, onJob, onLeave }]
 export function StaffOnDuty({ people = [] }) {
   return (
     <section className="dash-card" aria-labelledby="dash-staff-title">
@@ -295,6 +371,7 @@ export function StaffOnDuty({ people = [] }) {
               <div key={p.id} className="dash-staff">
                 <span>
                   {p.name} <span className="dash-muted">· {p.role}</span>
+                  {!p.available && p.reason && <span className="dash-staff-reason">{p.reason}</span>}
                 </span>
                 <span className={`dash-pill ${status[1]}`}>{status[0]}</span>
               </div>

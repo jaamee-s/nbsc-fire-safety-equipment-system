@@ -110,6 +110,25 @@ export function findPurchaseRequestItems({ actions = [], expiring = [], stock = 
 
 const RECENT_COMPLETED_MS = 3 * 24 * 60 * 60 * 1000
 
+// Which expiry reminder a unit is at, by days left (negative = expired).
+export function expiryStage(daysLeft) {
+  if (daysLeft === null || daysLeft === undefined) return null
+  if (daysLeft < 0) return 'expired'
+  if (daysLeft === 0) return 'today'
+  if (daysLeft <= 7) return '7d'
+  if (daysLeft <= 30) return '30d'
+  if (daysLeft <= 60) return '60d'
+  return null
+}
+
+const EXPIRY_NEXT = {
+  '60d': 'Plan ahead: check the storeroom stock, or start a Purchase Request now so the unit arrives in time.',
+  '30d': 'Arrange the replacement or refill with the Supply Office.',
+  '7d': 'Replace or refill it this week. Make sure a unit is ready in the storeroom.',
+  today: 'It expires today. Replace it, or have the inspector report it so a technician is assigned.',
+  expired: 'It is past its expiry date. Replace it as soon as possible; it may not work in a fire.'
+}
+
 // Everything here is derived from data the dashboard already loads. Ids
 // include the stage, so when something moves to a new stage (e.g. technician
 // marks it repaired) it shows up as unread again — and plays the sound.
@@ -149,7 +168,8 @@ export function buildGsoNotifications({
 
   // Available / Unavailable switched on the phone (migration 017): each
   // person's latest switch from the last 3 days.
-  // availability: [{ id, profile_id, is_available, changed_at, name, role }]
+  // availability: [{ id, profile_id, is_available, reason, changed_at, name, role }]
+  // (reason: migration 021, picked in the app when switching to Unavailable)
   availability.forEach((c) => {
     const roleLabel = c.role === 'technician' ? 'Technician' : 'Inspector'
     const isTech = c.role === 'technician'
@@ -157,7 +177,7 @@ export function buildGsoNotifications({
       id: `availability-${c.id}`,
       tone: c.is_available ? 'green' : 'amber',
       title: c.is_available ? `${c.name} is now available` : `${c.name} is now unavailable`,
-      detail: `${roleLabel} · switched in the app`,
+      detail: `${roleLabel} · ${!c.is_available && c.reason ? `Reason: ${c.reason}` : 'switched in the app'}`,
       next: c.is_available
         ? isTech
           ? 'They can take new job orders again.'
@@ -296,16 +316,24 @@ export function buildGsoNotifications({
     })
   })
 
+  // Expiry reminders in stages (panel comment): 60, 30 and 7 days before,
+  // on the day, and after. The stage is part of the id, so each new stage
+  // comes back unread with the sound. Units more than 60 days out wait.
   expiring.forEach((item) => {
+    const stage = expiryStage(item.daysLeft)
+    if (!stage) return
     const expired = item.daysLeft < 0
+    const days = Math.abs(item.daysLeft)
     list.push({
-      id: `expiry-${item.id}-${item.expiration_date}`,
-      tone: expired ? 'red' : 'amber',
+      id: `expiry-${item.id}-${item.expiration_date}-${stage}`,
+      tone: expired || item.daysLeft <= 7 ? 'red' : 'amber',
       title: expired
-        ? `${item.equipment_code} has expired`
-        : `${item.equipment_code} expires ${item.daysLeft === 0 ? 'today' : `in ${item.daysLeft} day${item.daysLeft === 1 ? '' : 's'}`}`,
-      detail: `${TYPE_LABELS[item.equipment_type] || item.equipment_type} · ${item.buildings?.building_name ?? 'N/A'} — ${item.exact_location ?? ''}`,
-      next: 'Arrange a replacement or refill with the Supply Office.',
+        ? `${item.equipment_code} expired ${days} day${days === 1 ? '' : 's'} ago`
+        : item.daysLeft === 0
+          ? `${item.equipment_code} expires today`
+          : `${item.equipment_code} expires in ${item.daysLeft} day${item.daysLeft === 1 ? '' : 's'}`,
+      detail: `${TYPE_LABELS[item.equipment_type] || item.equipment_type} · ${item.buildings?.building_name ?? 'N/A'} — ${item.exact_location ?? ''} · expiry ${formatDateOnly(item.expiration_date)}`,
+      next: EXPIRY_NEXT[stage],
       time: item.expiration_date,
       timeLabel: 'Expiry date',
       target: 'expiry'

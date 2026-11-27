@@ -1336,7 +1336,7 @@ export function AvailabilityModal({ profileId, name, role, technicianId = null, 
       // Each of these is optional: before its migration it is simply empty.
       const switches = await supabase
         .from('staff_availability_changes')
-        .select('id, is_available, changed_at')
+        .select('*')
         .eq('profile_id', profileId)
         .order('changed_at', { ascending: true })
       let rounds = { data: [] }
@@ -1383,7 +1383,11 @@ export function AvailabilityModal({ profileId, name, role, technicianId = null, 
   const d = data || { leaves: [], switches: [], rounds: [], checks: [], jobs: [] }
   const inLeave = (ymd) => d.leaves.find((r) => r.start_date <= ymd && ymd <= r.end_date)
   d.switches.forEach((s) =>
-    add(dayOf(s.changed_at), 'switch', s.is_available ? 'Switched to Available' : 'Switched to Unavailable')
+    add(
+      dayOf(s.changed_at),
+      'switch',
+      s.is_available ? 'Switched to Available' : `Switched to Unavailable${s.reason ? ` · ${s.reason}` : ''}`
+    )
   )
   d.rounds.forEach((r) =>
     add(r.due_date, 'round', `${r.buildings?.building_name || 'Building'}${r.floor_label ? ` · ${r.floor_label}` : ''} round due`)
@@ -1674,10 +1678,12 @@ export function InspectorsTab({
     const availability = await supabase.rpc('list_staff_availability')
     if (!availability.error) {
       const byId = {}
+      const reasons = {}
       ;(availability.data || []).forEach((a) => {
         byId[a.id] = a.is_available
+        reasons[a.id] = a.availability_reason || null
       })
-      list = list.map((p) => ({ ...p, is_available: byId[p.id] }))
+      list = list.map((p) => ({ ...p, is_available: byId[p.id], availability_reason: reasons[p.id] }))
     }
     return list
   }
@@ -1935,6 +1941,7 @@ export function InspectorsTab({
         accountId: p.id,
         username: p.username || null,
         isAvailable: p.is_available,
+        reason: p.availability_reason || null,
         items: []
       }
     })
@@ -2112,6 +2119,11 @@ export function InspectorsTab({
                 <div className="info-line">
                   Username <b>{r.username || '—'}</b>
                 </div>
+                {r.isAvailable === false && r.reason && (
+                  <div className="info-line">
+                    Unavailable because <b>{r.reason}</b>
+                  </div>
+                )}
                 <div className="info-line">
                   Last inspection <b>{r.last ? fmtDateTime(r.last) : 'None yet'}</b>
                 </div>
