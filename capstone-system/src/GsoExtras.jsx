@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabaseClient'
 import { needsReplacementUnit, playNotificationSound } from './gsoNotifications'
-import { actionForInspection, inspectionPriority as priorityOfInspection, unitsForAssignment } from './reports'
-import { accountErrorMessage, checkAccountFields, checkUsername, USERNAME_HINT } from './staffAccounts'
+import { actionForInspection, inspectionPriority as priorityOfInspection, typedNote, unitsForAssignment } from './reports'
+import { accountErrorMessage, checkAccountFields, checkUsername, passwordProblem, USERNAME_HINT } from './staffAccounts'
 import nbscHeader from './assets/nbsc-print-header.png'
 import JobOrderWindow from './JobOrderWindow'
+import { leaveToday } from './staffDates'
+import { SPECIALTIES, fitsJob, neededSpecialty, specialtyLabel } from './technicianSkills'
 import { JorEditorModal } from './OfficialFormEditors'
 import {
   checkJobOrderDraft,
@@ -159,6 +161,9 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
   const [contact, setContact] = useState(account.contact || '')
   const [username, setUsername] = useState(account.username || '')
   const [password, setPassword] = useState('')
+  // Technicians only, after migration 024
+  const hasSpecialties = Array.isArray(account.specialties)
+  const [specialties, setSpecialties] = useState(account.specialties || [])
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
 
@@ -173,8 +178,8 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
       setError(problem)
       return
     }
-    if (password && password.length < 6) {
-      setError('Password must be at least 6 characters.')
+    if (password && passwordProblem(password)) {
+      setError(passwordProblem(password))
       return
     }
     setSaving(true)
@@ -185,6 +190,17 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
       p_full_name: fullName.trim(),
       p_contact: hasContact ? contact.trim() : null
     })
+    if (!rpcError && hasSpecialties && account.technicianId) {
+      const { error: skillError } = await supabase
+        .from('technicians')
+        .update({ specialties })
+        .eq('id', account.technicianId)
+      if (skillError) {
+        setSaving(false)
+        setError('The account was saved, but not the specialties: ' + skillError.message)
+        return
+      }
+    }
     setSaving(false)
     if (rpcError) {
       setError(accountErrorMessage(rpcError))
@@ -208,6 +224,12 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
           <label className="field-label">Full name</label>
           <input autoComplete="off" value={fullName} onChange={(e) => setFullName(e.target.value)} />
         </div>
+
+        {hasSpecialties && (
+          <div style={{ marginBottom: '12px' }}>
+            <SpecialtyPicker value={specialties} onChange={setSpecialties} />
+          </div>
+        )}
 
         {hasContact && (
           <div style={{ marginBottom: '12px' }}>
@@ -236,7 +258,7 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
           />
           <p style={hintStyle}>
             For security, the current password can't be shown. If they forgot it, type a new one
-            (at least 6 characters) and tell them.
+            (at least 8 characters, with a letter and a number) and tell them.
           </p>
         </div>
 
@@ -1251,6 +1273,24 @@ export function ReportSignatures({ className = '' }) {
   )
 }
 
+// Tick boxes for what a technician handles (migration 024).
+export function SpecialtyPicker({ value = [], onChange }) {
+  const toggle = (key) => onChange(value.includes(key) ? value.filter((k) => k !== key) : [...value, key])
+  return (
+    <fieldset className="specialty-picker">
+      <legend className="field-label">Handles (specialties)</legend>
+      {SPECIALTIES.map((s) => (
+        <label key={s.key} className="specialty-option">
+          <input type="checkbox" checked={value.includes(s.key)} onChange={() => toggle(s.key)} />
+          <span>
+            <b>{s.label}</b> <span className="specialty-hint">{s.hint}</span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
 export function LeaveLine({ leaves = [] }) {
   if (leaves.length === 0) return null
   const today = ymdOf(new Date())
@@ -1999,7 +2039,7 @@ export function InspectorsTab({
               <p style={hintStyle}>{USERNAME_HINT}</p>
             </div>
             <div>
-              <label className="field-label">Password (at least 6 characters)</label>
+              <label className="field-label">Password (8+ characters, with a letter and a number)</label>
               <PasswordInput
                 value={form.password}
                 onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
@@ -2089,6 +2129,7 @@ export function InspectorsTab({
           {rows.map((r) => {
             // This inspector's open assignments: most urgent first, then
             // the earliest due date. Finished ones drop off the card.
+            const leaveNow = leaveToday(leaves, r.accountId)
             const mine = assignments
               .filter((a) => a.inspector_id === r.accountId)
               .map((a) => ({ ...a, progress: assignmentProgress(a, equipment, inspections) }))
@@ -2107,10 +2148,14 @@ export function InspectorsTab({
                       <span className="tag tag-blue">App account</span>
                     ) : (
                       <span
-                        className={`tag ${r.isAvailable ? 'tag-green' : 'tag-grey'}`}
-                        title="Set by the inspector in the mobile app"
+                        className={`tag ${r.isAvailable && !leaveNow ? 'tag-green' : 'tag-grey'}`}
+                        title={
+                          leaveNow
+                            ? `On their unavailable dates until ${formatDay(leaveNow.end_date)}`
+                            : 'Set by the inspector in the mobile app'
+                        }
                       >
-                        {r.isAvailable ? 'Available' : 'Unavailable'}
+                        {leaveNow ? 'On leave' : r.isAvailable ? 'Available' : 'Unavailable'}
                       </span>
                     )}
                     <CalendarButton onClick={() => setCalendarFor({ id: r.accountId, name: r.name })} />
@@ -2331,15 +2376,20 @@ export function InspectorsTab({
                     </thead>
                     <tbody>
                       {pageItems.map((i) => {
-                        const failed = i.condition_status === 'defective'
+                        const failed = i.condition_status !== 'functional'
                         return (
                           <tr key={i.id}>
                             <td style={{ whiteSpace: 'nowrap' }}>{fmtDateTime(i.inspection_date)}</td>
                             <td><b>{codeById[i.equipment_id] || '—'}</b></td>
                             <td>
                               <span className={`tag ${failed ? 'tag-red' : 'tag-green'}`}>
-                                {failed ? 'Defective' : 'Functional'}
+                                {i.condition_status === 'for_disposal' ? 'For disposal' : failed ? 'Defective' : 'Functional'}
                               </span>
+                              {typedNote(i) && (
+                                <div style={{ marginTop: '4px' }}>
+                                  <span className="tag tag-amber">{typedNote(i)}</span>
+                                </div>
+                              )}
                             </td>
                             <td><PriorityPill priority={inspectionPriority(i)} /></td>
                             <td>
@@ -2414,7 +2464,13 @@ function InspectionJobOrderModal({
           {inspectors.map((i) => (
             <option key={i.accountId} value={i.accountId}>
               {i.name}
-              {i.isAvailable === false ? ' (Unavailable)' : i.isAvailable ? ' (Available)' : ''}
+              {leaveToday(leaves, i.accountId)
+                ? ' (On leave today)'
+                : i.isAvailable === false
+                  ? ' (Unavailable)'
+                  : i.isAvailable
+                    ? ' (Available)'
+                    : ''}
             </option>
           ))}
         </select>
@@ -2507,16 +2563,31 @@ export function JobOrderRequestModal({
     />
   ) : null
 
+  // Specialties (migration 024): technicians who handle this kind of work
+  // come first and are marked; the others are still listed.
+  const needed = neededSpecialty(modal.equipmentType)
+  const rankFit = (t) => (fitsJob(t, modal.equipmentType) === true ? 0 : fitsJob(t, modal.equipmentType) === null ? 1 : 2)
+  const sortedTechs = [...technicians].sort((a, b) => rankFit(a) - rankFit(b))
+  const chosenFit = chosenTech ? fitsJob(chosenTech, modal.equipmentType) : null
+
   const technicianSelect = (
     <>
       <select value={selectedTechnicianId} onChange={(e) => onSelectTechnician(e.target.value)}>
         <option value="">-- Select technician --</option>
-        {technicians.map((t) => (
+        {sortedTechs.map((t) => (
           <option key={t.id} value={t.id}>
-            {t.full_name} {t.is_available ? '(Available)' : '(Unavailable)'} {t.profile_id ? '· 📱 app' : ''}
+            {fitsJob(t, modal.equipmentType) === true ? '✓ ' : ''}
+            {t.full_name}{' '}
+            {leaveToday(leaves, t.profile_id) ? '(On leave today)' : t.is_available ? '(Available)' : '(Unavailable)'}{' '}
+            {t.profile_id ? '· 📱 app' : ''}
           </option>
         ))}
       </select>
+      {chosenFit === false && (
+        <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
+          {chosenTech.full_name} doesn&apos;t handle {specialtyLabel(needed)} work. You can still assign them, or pick a ✓ technician.
+        </p>
+      )}
       {technicians.length === 0 && (
         <p style={{ fontSize: '0.8rem', color: 'var(--amber)', margin: '6px 0 0 0' }}>
           No technicians listed yet. Add one in the Technicians tab first.

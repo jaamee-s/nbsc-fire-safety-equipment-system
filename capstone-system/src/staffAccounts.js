@@ -22,12 +22,21 @@ export function checkUsername(username) {
   return null
 }
 
+// The password rule the database enforces (migration 022): at least 8
+// characters, with at least one letter and one number.
+export function passwordProblem(password) {
+  const p = password || ''
+  if (p.length < 8) return 'Password must be at least 8 characters.'
+  if (!/[A-Za-z]/.test(p)) return 'Password must have at least one letter.'
+  if (!/[0-9]/.test(p)) return 'Password must have at least one number.'
+  return null
+}
+
 export function checkAccountFields(username, password) {
   const problem = checkUsername(username)
   if (problem) return problem
   if (!password) return 'Password is required.'
-  if (password.length < 6) return 'Password must be at least 6 characters.'
-  return null
+  return passwordProblem(password)
 }
 
 export function accountErrorMessage(error) {

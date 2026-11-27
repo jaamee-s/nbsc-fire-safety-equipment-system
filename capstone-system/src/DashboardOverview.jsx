@@ -137,6 +137,7 @@ const PRIORITY_COLOR = { critical: 'var(--red)', high: '#ea580c', medium: 'var(-
 function stageOf(action, needsPurchase) {
   if (action.status === 'pending') return needsPurchase ? 'Needs Purchase Request' : 'Needs a Job Order'
   if (action.status === 'unresolved') return 'Unresolved'
+  if (action.status === 'for_disposal') return 'For disposal'
   if (action.repair_status === 'repaired') return 'Verify repair'
   if (action.repair_status === 'working') return 'Working on it'
   return 'Assigned'

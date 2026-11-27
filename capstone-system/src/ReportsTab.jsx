@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './supabaseClient'
 import {
   ACTION_STATUS_LABELS,
+  CHANGE_AREAS,
   PRIORITIES,
   REPORTS,
   RESULT_LABELS,
@@ -58,6 +59,32 @@ export function ReportsTab({
         if (!error) setAssignments(data || [])
       })
   }, [])
+  // Change Log (migration 023): the newest 2,000 admin changes, loaded when
+  // that report is opened. Empty (with a note) before 023 is run.
+  const [changeLog, setChangeLog] = useState(null)
+  const [changeLogError, setChangeLogError] = useState(null)
+  useEffect(() => {
+    if (reportKey !== 'changes') return
+    let alive = true
+    supabase
+      .from('change_log')
+      .select('id, changed_at, actor_name, actor_role, table_name, row_label, action, changes')
+      .order('changed_at', { ascending: false })
+      .limit(2000)
+      .then(({ data, error }) => {
+        if (!alive) return
+        setChangeLogError(error ? 'The change log appears once migration 023_change_log.sql is run in Supabase.' : null)
+        setChangeLog(error ? [] : data || [])
+      })
+    return () => {
+      alive = false
+    }
+  }, [reportKey])
+  const changePeople = useMemo(
+    () => [...new Set((changeLog || []).map((c) => c.actor_name || 'Unknown'))].sort((a, b) => a.localeCompare(b)),
+    [changeLog]
+  )
+
   const info = REPORTS.find((r) => r.key === reportKey)
 
   function chooseReport(key) {
@@ -79,10 +106,10 @@ export function ReportsTab({
         : buildReport(
             reportKey,
             filters,
-            { equipment, inspections, actions, technicians, purchaseItems, assignments },
+            { equipment, inspections, actions, technicians, purchaseItems, assignments, changeLog: changeLog || [] },
             { ...ctx, buildings }
           ),
-    [reportKey, filters, equipment, inspections, actions, technicians, purchaseItems, assignments, ctx, buildings]
+    [reportKey, filters, equipment, inspections, actions, technicians, purchaseItems, assignments, changeLog, ctx, buildings]
   )
 
   const datesBackwards = filters.from && filters.to && filters.from > filters.to
@@ -250,8 +277,31 @@ export function ReportsTab({
                 {buildingSelect}
               </>
             )}
+
+            {reportKey === 'changes' && (
+              <>
+                {dateFields}
+                <Field label="Area">
+                  <select value={filters.area} onChange={set('area')}>
+                    <option value="">All areas</option>
+                    {Object.entries(CHANGE_AREAS).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Changed by">
+                  <select value={filters.person} onChange={set('person')}>
+                    <option value="">Everyone</option>
+                    {changePeople.map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </Field>
+              </>
+            )}
           </div>
         )}
+        {reportKey === 'changes' && changeLogError && <p className="form-error">{changeLogError}</p>}
       </div>
 
       <div className="report-preview-head">

@@ -1676,6 +1676,82 @@ input::-ms-clear {
   border-color: var(--blue);
 }
 
+/* ===== Backup (Reports page) ===== */
+.backup-panel {
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.backup-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.backup-head h3 {
+  font-size: 1rem;
+  margin: 0 0 4px;
+}
+
+.backup-head p,
+.backup-status {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  max-width: 70ch;
+}
+
+.backup-guide summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.backup-guide ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 0.86rem;
+  display: grid;
+  gap: 4px;
+}
+
+/* ===== Technician specialties (tick boxes) ===== */
+.specialty-picker {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px 10px;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.specialty-picker legend {
+  padding: 0 4px;
+  margin-bottom: 0;
+}
+
+.specialty-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.specialty-option input {
+  width: auto;
+  margin-top: 3px;
+}
+
+.specialty-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
 /* ===== A person's month calendar (version C) ===== */
 .modal-box.person-cal {
   max-width: 1080px;
@@ -2570,9 +2646,13 @@ input::-ms-clear {
   align-items: flex-start;
 }
 
-.campus-map {
+.campus-map-scroll {
   flex: 999 1 460px;
   min-width: 0;
+  overflow-x: auto;
+}
+
+.campus-map {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
   gap: 14px;
@@ -2601,6 +2681,43 @@ input::-ms-clear {
 .campus-tile:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 14px rgba(15, 42, 74, 0.1);
+}
+
+/* Arrange map: empty squares to drop on, and draggable tiles */
+.campus-cell {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  min-height: 110px;
+}
+
+.campus-tile-arrange {
+  cursor: grab;
+  justify-content: space-between;
+}
+
+.campus-tile-arrange:active {
+  cursor: grabbing;
+}
+
+.campus-arrows {
+  display: flex;
+  gap: 4px;
+}
+
+.campus-arrows button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.campus-arrows button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .campus-tile.selected {

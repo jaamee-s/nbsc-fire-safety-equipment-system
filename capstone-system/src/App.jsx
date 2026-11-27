@@ -15,17 +15,21 @@ import {
   JobOrderRequestModal,
   LeaveLine,
   ReplacementNote,
-  ReportSignatures
+  ReportSignatures,
+  SpecialtyPicker
 } from './GsoExtras'
+import { leaveToday } from './staffDates'
 import { buildGsoNotifications, findPurchaseRequestItems, needsReplacementUnit } from './gsoNotifications'
 import { accountErrorMessage, checkAccountFields, USERNAME_HINT } from './staffAccounts'
 // StatusDonut (pie chart) is hidden for now — see the dashboard graphs.
 import { InspectionWeeks, TypeBars } from './DashboardCharts'
 import { ReportsTab } from './ReportsTab'
-import { ACTION_STATUS_LABELS, buildInventoryReport, manilaDay } from './reports'
+import { ACTION_STATUS_LABELS, buildInventoryReport, manilaDay, typedNote } from './reports'
 import nbscHeader from './assets/nbsc-print-header.png'
 import FormPrintPage from './FormPrintPage'
 import CampusView from './CampusView'
+import BackupPanel from './BackupPanel'
+import { fitsJob, neededSpecialty, specialtyLabel } from './technicianSkills'
 import {
   ComplianceRing,
   DashboardGreeting,
@@ -834,10 +838,34 @@ function Dashboard({ profile, onLogout }) {
     setLoading(false)
   }
 
+  // Arrange map (migration 025): saves every building whose square changed.
+  // Returns a message when something could not be saved, else null.
+  async function saveBuildingPositions(layout) {
+    const changed = buildings.filter(
+      (b) => layout[b.id] && (b.map_col !== layout[b.id].col || b.map_row !== layout[b.id].row)
+    )
+    for (const b of changed) {
+      const { data, error } = await supabase
+        .from('buildings')
+        .update({ map_col: layout[b.id].col, map_row: layout[b.id].row })
+        .eq('id', b.id)
+        .select('id')
+      if (error || !data || data.length === 0) {
+        await getBuildings()
+        return error
+          ? 'The map could not be saved: ' + error.message
+          : 'The map could not be saved. Run migration 025_building_map_positions.sql in Supabase first.'
+      }
+    }
+    await getBuildings()
+    return null
+  }
+
   async function getBuildings() {
     const { data, error } = await supabase
       .from('buildings')
-      .select('id, building_name, location_description')
+      // * so the map squares (migration 025) come along once they exist
+      .select('*')
       .order('building_name', { ascending: true })
 
     if (error) console.error('Error fetching buildings:', error)
@@ -1361,7 +1389,8 @@ function Dashboard({ profile, onLogout }) {
   async function getTechnicians() {
     const { data, error } = await supabase
       .from('technicians')
-      .select('id, full_name, contact_info, is_available, profile_id')
+      // * so specialties (migration 024) come along once they exist
+      .select('*')
       .order('full_name', { ascending: true })
 
     if (error) {
@@ -1374,11 +1403,8 @@ function Dashboard({ profile, onLogout }) {
   async function getInspections() {
     const { data, error } = await supabase
       .from('inspections')
-      .select(`
-        id, equipment_id, inspection_date, condition_status,
-        findings, recommended_action, inspection_notes, action_required,
-        inspector_name, inspector_id
-      `)
+      // * so entry_method / typed_reason (migration 026) come along once they exist
+      .select('*')
       .order('inspection_date', { ascending: false })
 
     if (error) console.error('Error fetching inspections:', error)
@@ -2022,7 +2048,9 @@ function Dashboard({ profile, onLogout }) {
       full_name: t.full_name || '',
       contact_info: t.contact_info || '',
       is_available: t.is_available,
-      has_account: !!t.profile_id
+      has_account: !!t.profile_id,
+      // null before migration 024 (no specialties to edit yet)
+      specialties: Array.isArray(t.specialties) ? t.specialties : null
     })
   }
 
@@ -2044,6 +2072,7 @@ function Dashboard({ profile, onLogout }) {
       contact_info: editTechnicianForm.contact_info.trim() || null
     }
     if (!editTechnicianForm.has_account) changes.is_available = editTechnicianForm.is_available
+    if (editTechnicianForm.specialties) changes.specialties = editTechnicianForm.specialties
     const { error } = await supabase.from('technicians').update(changes).eq('id', id)
 
     if (error) {
@@ -2174,6 +2203,7 @@ function Dashboard({ profile, onLogout }) {
     if (priorityFilter === 'pending') return a.status === 'pending'
     if (priorityFilter === 'in_progress') return a.status === 'in_progress'
     if (priorityFilter === 'unresolved') return a.status === 'unresolved'
+    if (priorityFilter === 'for_disposal') return a.status === 'for_disposal'
     // "All" lists every active card (read-only) under the Purchase Request
     // summary, so the count on the chip matches what is shown.
     return true
@@ -2475,6 +2505,7 @@ function Dashboard({ profile, onLogout }) {
       action.status === 'pending' ? 'pending'
         : action.status === 'in_progress' ? 'in_progress'
         : action.status === 'unresolved' ? 'unresolved'
+        : action.status === 'for_disposal' ? 'for_disposal'
         : 'all'
     setActiveTab('dashboard')
     setPriorityFilter(filter)
@@ -2766,6 +2797,16 @@ function Dashboard({ profile, onLogout }) {
           >
             All <span className="chip-count">{sortedActions.length}</span>
           </button>
+          {/* Disposable extinguishers reported "For disposal" (migration 026) */}
+          {sortedActions.some((a) => a.status === 'for_disposal') && (
+            <button
+              className={`filter-chip ${priorityFilter === 'for_disposal' ? 'active' : ''}`}
+              onClick={() => setPriorityFilter('for_disposal')}
+            >
+              ♻ For disposal{' '}
+              <span className="chip-count">{sortedActions.filter((a) => a.status === 'for_disposal').length}</span>
+            </button>
+          )}
 
           {/* Hidden for now (adviser's request). Kept in the code so they can
               be turned back on: remove these comment markers.
@@ -2919,7 +2960,7 @@ function Dashboard({ profile, onLogout }) {
                             </p>
                           ) : (
                             history.slice(0, 3).map((insp) => {
-                              const failed = insp.condition_status === 'defective'
+                              const failed = insp.condition_status !== 'functional'
                               return (
                                 <div
                                   key={insp.id}
@@ -2930,8 +2971,11 @@ function Dashboard({ profile, onLogout }) {
                                   }}
                                 >
                                   <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>
-                                    {failed ? '⚠ Defective' : '✓ Functional'}
+                                    {insp.condition_status === 'for_disposal' ? '♻ For disposal' : failed ? '⚠ Defective' : '✓ Functional'}
                                   </span>
+                                  {typedNote(insp) && (
+                                    <span className="tag tag-amber" style={{ marginLeft: '8px' }}>{typedNote(insp)}</span>
+                                  )}
                                   <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginLeft: '8px' }}>
                                     {relativeTime(insp.inspection_date)}
                                   </span>
@@ -2994,6 +3038,36 @@ function Dashboard({ profile, onLogout }) {
                     </div>
                   )
                 })()}
+
+                {/* Stage: For disposal — a disposable extinguisher the inspector
+                    reported (migration 026). Recording the disposal retires it,
+                    takes one unit from stock and offers to add the replacement:
+                    the same as closing a fire extinguisher job as Resolved. */}
+                {action.status === 'for_disposal' && (
+                  <div style={{ marginTop: '10px' }}>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--amber)', fontWeight: 600, margin: '0 0 8px 0' }}>
+                      ♻ Reported for disposal: a disposable extinguisher that can&apos;t be refilled. Dispose of it, then
+                      record it here; a replacement comes from stock.
+                    </p>
+                    {!readOnly && (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        disabled={actionUpdatingId === action.id}
+                        onClick={() => {
+                          if (
+                            !window.confirm(
+                              `Record the disposal of ${action.equipment?.equipment_code}?\n\nIt will be marked No Longer in Service, one fire extinguisher is taken from stock, and you can add its replacement.`
+                            )
+                          )
+                            return
+                          handleRecordOutcome(action, 'resolved', 'Disposed (disposable extinguisher)')
+                        }}
+                      >
+                        {actionUpdatingId === action.id ? 'Saving...' : 'Record disposal'}
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {/* Stage: In progress — close with outcome tracking or reassign technician */}
                 {action.status === 'in_progress' && (
@@ -3134,6 +3208,7 @@ function Dashboard({ profile, onLogout }) {
             jumpToEquipment('')
             setFilterBuilding(b.id)
           }}
+          onSavePositions={saveBuildingPositions}
         />
 
         {buildings.length === 0 ? (
@@ -4053,7 +4128,7 @@ function Dashboard({ profile, onLogout }) {
                             </p>
                           ) : (
                             history.map((insp) => {
-                              const failed = insp.condition_status === 'defective'
+                              const failed = insp.condition_status !== 'functional'
                               return (
                                 <div
                                   key={insp.id}
@@ -4072,8 +4147,9 @@ function Dashboard({ profile, onLogout }) {
                                     }}
                                   >
                                     <span className={`status-badge ${failed ? 'inactive-state' : 'active'}`}>
-                                      {failed ? '⚠ Defective' : '✓ Functional'}
+                                      {insp.condition_status === 'for_disposal' ? '♻ For disposal' : failed ? '⚠ Defective' : '✓ Functional'}
                                     </span>
+                                    {typedNote(insp) && <span className="tag tag-amber">{typedNote(insp)}</span>}
                                     <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                                       {formatTimestamp(insp.inspection_date)}
                                       <span style={{ opacity: 0.75 }}>
@@ -4136,6 +4212,7 @@ function Dashboard({ profile, onLogout }) {
             onOpenSummary={() => setShowSummary(true)}
           />
         )}
+        {activeTab === 'reports' && <BackupPanel />}
 
         {/* ===================== INSPECTORS TAB ===================== */}
         {activeTab === 'inspectors' && (
@@ -4295,7 +4372,7 @@ function Dashboard({ profile, onLogout }) {
                     <p style={HINT_STYLE}>{USERNAME_HINT}</p>
                   </div>
                   <div>
-                    <label className="field-label">Password (at least 6 characters)</label>
+                    <label className="field-label">Password (8+ characters, with a letter and a number)</label>
                     <PasswordInput
                       value={technicianForm.password}
                       onChange={(e) => setTechnicianForm((prev) => ({ ...prev, password: e.target.value }))}
@@ -4324,6 +4401,8 @@ function Dashboard({ profile, onLogout }) {
               <div className="card-grid">
                 {technicians.map((t) => {
                   const acc = t.profile_id && staffAccounts.find((a) => a.id === t.profile_id)
+                  // On their unavailable dates today: Unavailable, whatever the switch says.
+                  const leaveNow = leaveToday(upcomingLeaves, t.profile_id)
                   const counts = technicianCounts(t.id)
                   return (
                   <div key={t.id} className="info-card">
@@ -4343,6 +4422,12 @@ function Dashboard({ profile, onLogout }) {
                             onChange={(e) => setEditTechnicianForm((prev) => ({ ...prev, contact_info: e.target.value }))}
                           />
                         </div>
+                        {editTechnicianForm.specialties && (
+                          <SpecialtyPicker
+                            value={editTechnicianForm.specialties}
+                            onChange={(list) => setEditTechnicianForm((prev) => ({ ...prev, specialties: list }))}
+                          />
+                        )}
                         {/* With an app account, the technician sets this in the app. */}
                         {!editTechnicianForm.has_account && (
                           <div>
@@ -4375,10 +4460,16 @@ function Dashboard({ profile, onLogout }) {
                           <strong>{t.full_name}</strong>
                           <span className="tag-row">
                             <span
-                              className={`tag ${t.is_available ? 'tag-green' : 'tag-grey'}`}
-                              title={t.profile_id ? 'Set by the technician in the mobile app' : 'No app account yet'}
+                              className={`tag ${t.is_available && !leaveNow ? 'tag-green' : 'tag-grey'}`}
+                              title={
+                                leaveNow
+                                  ? `On their unavailable dates until ${formatTimestamp(leaveNow.end_date)}`
+                                  : t.profile_id
+                                    ? 'Set by the technician in the mobile app'
+                                    : 'No app account yet'
+                              }
                             >
-                              {t.is_available ? 'Available' : 'Unavailable'}
+                              {leaveNow ? 'On leave' : t.is_available ? 'Available' : 'Unavailable'}
                             </span>
                             {t.profile_id && (
                               <CalendarButton onClick={() => setCalendarFor({ id: t.profile_id, name: t.full_name, technicianId: t.id })} />
@@ -4396,6 +4487,20 @@ function Dashboard({ profile, onLogout }) {
                         <div className="info-line">
                           Last repair <b>{counts.lastRepair ? formatTimestamp(counts.lastRepair) : 'None yet'}</b>
                         </div>
+                        {Array.isArray(t.specialties) && (
+                          <div className="info-line">
+                            Handles{' '}
+                            {t.specialties.length === 0 ? (
+                              <span style={{ color: 'var(--text-muted)' }}>not set yet (Edit to choose)</span>
+                            ) : (
+                              <span className="tag-row" style={{ display: 'inline-flex', flexWrap: 'wrap', gap: '4px' }}>
+                                {t.specialties.map((s) => (
+                                  <span key={s} className="tag tag-blue">{specialtyLabel(s)}</span>
+                                ))}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         <LeaveLine leaves={leavesFor(t.profile_id)} />
 
                         <div className="mini-stats">
@@ -4426,6 +4531,8 @@ function Dashboard({ profile, onLogout }) {
                                 // Needs a new unit and there's none in stock:
                                 // the Purchase Request comes first.
                                 const waitsForPurchase = purchaseRequestItems.some((p) => p.actionId === a.id)
+                                // Their specialty vs. the work (migration 024); null = not set.
+                                const fit = fitsJob(t, a.equipment?.equipment_type)
                                 return (
                                 <button
                                   key={a.id}
@@ -4441,8 +4548,18 @@ function Dashboard({ profile, onLogout }) {
                                     <b>
                                       {a.equipment?.equipment_code} — {typeLabel(a.equipment?.equipment_type)}
                                     </b>
-                                    <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
-                                      {a.priority}
+                                    <span className="tag-row" style={{ display: 'inline-flex', gap: '4px' }}>
+                                      {fit !== null && (
+                                        <span
+                                          className={`tag ${fit ? 'tag-green' : 'tag-grey'}`}
+                                          title={`Needs: ${specialtyLabel(neededSpecialty(a.equipment?.equipment_type))}`}
+                                        >
+                                          {fit ? '✓ Their specialty' : 'Not their specialty'}
+                                        </span>
+                                      )}
+                                      <span className={`tag ${a.priority === 'critical' ? 'tag-red' : a.priority === 'high' ? 'tag-orange' : a.priority === 'medium' ? 'tag-amber' : 'tag-blue'}`}>
+                                        {a.priority}
+                                      </span>
                                     </span>
                                   </span>
                                   <span className="info-line">
@@ -4492,7 +4609,10 @@ function Dashboard({ profile, onLogout }) {
                                   id: acc.id,
                                   full_name: t.full_name,
                                   username: acc.username,
-                                  contact: t.contact_info || ''
+                                  contact: t.contact_info || '',
+                                  technicianId: t.id,
+                                  // undefined before migration 024: no specialties to edit
+                                  specialties: Array.isArray(t.specialties) ? t.specialties : undefined
                                 })
                               }
                             >
@@ -4535,7 +4655,7 @@ function Dashboard({ profile, onLogout }) {
                               <p style={HINT_STYLE}>{USERNAME_HINT}</p>
                             </div>
                             <div>
-                              <label className="field-label">Password (at least 6 characters)</label>
+                              <label className="field-label">Password (8+ characters, with a letter and a number)</label>
                               <PasswordInput
                                 value={techLoginForm.password}
                                 onChange={(e) => setTechLoginForm((prev) => ({ ...prev, password: e.target.value }))}

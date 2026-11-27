@@ -5,8 +5,37 @@
    One tile per building, coloured by its worst open problem; picking a
    tile lists its floors with every unit in service and its status.
    Rooms are still added and edited in the Buildings table below.
+
+   "Arrange map" (migration 025): drag a building to another square, or use
+   its arrow buttons, to lay the tiles out like the real campus. Each
+   building keeps its square (buildings.map_col / map_row); one dropped on
+   another building swaps places with it.
    ===================================================================== */
 import { useState } from 'react'
+
+// The campus map is a grid of squares, MAP_COLS wide.
+const MAP_COLS = 6
+
+// Where every building sits: its saved square, or (not placed yet) the
+// first free square, left to right, top to bottom.
+function layoutOf(buildings) {
+  const taken = new Set()
+  const pos = {}
+  buildings.forEach((b) => {
+    if (b.map_col && b.map_row && b.map_col <= MAP_COLS && !taken.has(`${b.map_col},${b.map_row}`)) {
+      pos[b.id] = { col: b.map_col, row: b.map_row }
+      taken.add(`${b.map_col},${b.map_row}`)
+    }
+  })
+  let n = 0
+  buildings.forEach((b) => {
+    if (pos[b.id]) return
+    while (taken.has(`${(n % MAP_COLS) + 1},${Math.floor(n / MAP_COLS) + 1}`)) n += 1
+    pos[b.id] = { col: (n % MAP_COLS) + 1, row: Math.floor(n / MAP_COLS) + 1 }
+    taken.add(`${pos[b.id].col},${pos[b.id].row}`)
+  })
+  return pos
+}
 
 // Worst first. Each unit and each building gets one of these.
 const LEVELS = {
@@ -40,9 +69,34 @@ export default function CampusView({
   actions = [],
   expiring = [],
   onManageRooms,
-  onViewEquipment
+  onViewEquipment,
+  onSavePositions
 }) {
   const [picked, setPicked] = useState(null)
+  const [arranging, setArranging] = useState(false)
+  const [dragId, setDragId] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState(null)
+  // Positions can be saved once migration 025 added the columns.
+  const canArrange = !!onSavePositions && buildings.length > 0 && 'map_col' in buildings[0]
+  const layout = layoutOf(buildings)
+  const rows = Math.max(1, ...Object.values(layout).map((p) => p.row)) + (arranging ? 1 : 0)
+
+  // Moves a building to a square (swapping with whoever is there), then
+  // saves every building's square so the layout stays as it is now.
+  async function moveTo(id, col, row) {
+    if (col < 1 || col > MAP_COLS || row < 1 || row > 12) return
+    const next = { ...layout }
+    const from = next[id]
+    const other = Object.keys(next).find((k) => k !== id && next[k].col === col && next[k].row === row)
+    if (other) next[other] = from
+    next[id] = { col, row }
+    setSaving(true)
+    setSaveError(null)
+    const problem = await onSavePositions(next)
+    if (problem) setSaveError(problem)
+    setSaving(false)
+  }
 
   // The most urgent open Priority Action of each unit (actions come sorted).
   const actionFor = {}
@@ -87,8 +141,22 @@ export default function CampusView({
       <div className="campus-head">
         <div>
           <h2>Campus overview</h2>
-          <p>Each building shows its worst open problem. Pick a building to see its floors and units.</p>
+          <p>
+            {arranging
+              ? 'Drag a building to the square that matches the real campus, or use its arrows. Dropping it on another building swaps them.'
+              : 'Each building shows its worst open problem. Pick a building to see its floors and units.'}
+          </p>
+          {saveError && <p className="form-error">{saveError}</p>}
         </div>
+        {canArrange && (
+          <button
+            className={`btn btn-sm ${arranging ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setArranging((v) => !v)}
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : arranging ? 'Done arranging' : 'Arrange map'}
+          </button>
+        )}
         <div className="campus-legend">
           {['ok', 'expiring', 'minor', 'high', 'critical'].map((k) => (
             <span key={k}>
@@ -100,15 +168,68 @@ export default function CampusView({
       </div>
 
       <div className="campus-body">
-        <div className="campus-map">
+        <div className="campus-map-scroll">
+        <div
+          className={`campus-map ${arranging ? 'arranging' : ''}`}
+          style={{ gridTemplateColumns: `repeat(${MAP_COLS}, minmax(150px, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(110px, auto))` }}
+        >
+          {arranging &&
+            Array.from({ length: rows * MAP_COLS }, (_, i) => {
+              const col = (i % MAP_COLS) + 1
+              const row = Math.floor(i / MAP_COLS) + 1
+              const used = Object.values(layout).some((p) => p.col === col && p.row === row)
+              if (used) return null
+              return (
+                <div
+                  key={`cell-${col}-${row}`}
+                  className="campus-cell"
+                  style={{ gridColumn: col, gridRow: row }}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragId) moveTo(dragId, col, row)
+                    setDragId(null)
+                  }}
+                />
+              )
+            })}
           {tiles.map((t) => {
             const lv = t.level ? LEVELS[t.level] : null
             const isSel = selected && selected.b.id === t.b.id
+            const p = layout[t.b.id]
+            const place = { gridColumn: p.col, gridRow: p.row }
+            if (arranging) {
+              return (
+                <div
+                  key={t.b.id}
+                  className="campus-tile campus-tile-arrange"
+                  style={{ ...place, borderColor: lv ? lv.color : 'var(--border)' }}
+                  draggable={!saving}
+                  onDragStart={() => setDragId(t.b.id)}
+                  onDragEnd={() => setDragId(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragId && dragId !== t.b.id) moveTo(dragId, p.col, p.row)
+                    setDragId(null)
+                  }}
+                >
+                  <strong>{t.b.building_name}</strong>
+                  <span className="campus-tile-sub">Square {p.col}, {p.row}</span>
+                  <span className="campus-arrows">
+                    <button aria-label={`Move ${t.b.building_name} left`} disabled={saving || p.col === 1} onClick={() => moveTo(t.b.id, p.col - 1, p.row)}>←</button>
+                    <button aria-label={`Move ${t.b.building_name} up`} disabled={saving || p.row === 1} onClick={() => moveTo(t.b.id, p.col, p.row - 1)}>↑</button>
+                    <button aria-label={`Move ${t.b.building_name} down`} disabled={saving || p.row === 12} onClick={() => moveTo(t.b.id, p.col, p.row + 1)}>↓</button>
+                    <button aria-label={`Move ${t.b.building_name} right`} disabled={saving || p.col === MAP_COLS} onClick={() => moveTo(t.b.id, p.col + 1, p.row)}>→</button>
+                  </span>
+                </div>
+              )
+            }
             return (
               <button
                 key={t.b.id}
                 className={`campus-tile ${isSel ? 'selected' : ''}`}
-                style={{ borderColor: lv ? lv.color : 'var(--border)' }}
+                style={{ ...place, borderColor: lv ? lv.color : 'var(--border)' }}
                 onClick={() => setPicked(t.b.id)}
                 aria-pressed={isSel}
               >
@@ -130,6 +251,7 @@ export default function CampusView({
               </button>
             )
           })}
+        </div>
         </div>
 
         {selected && (

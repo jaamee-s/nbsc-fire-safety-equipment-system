@@ -19,8 +19,42 @@ export const REPORTS = [
   { key: 'repairs', label: 'Technician Report', description: 'Reported defects and the job orders given to technicians, in a date range.' },
   { key: 'purchase', label: 'Purchase Requests Needed', description: 'Units that need a replacement that the storeroom stock cannot cover.' },
   { key: 'expiry', label: 'Expiring / Expired', description: 'Units past or near their expiration date.' },
-  { key: 'summary', label: 'System Summary', description: 'Totals, requests needed, repairs, inspections and stock.' }
+  { key: 'summary', label: 'System Summary', description: 'Totals, requests needed, repairs, inspections and stock.' },
+  { key: 'changes', label: 'Change Log', description: 'Every add, edit and delete made by an admin, with who did it and when.' }
 ]
+
+// Change Log (migration 023): the GSO-managed tables, by the name people know.
+export const CHANGE_AREAS = {
+  equipment: 'Equipment',
+  buildings: 'Buildings',
+  building_locations: 'Floors and rooms',
+  equipment_stock: 'Stock',
+  technicians: 'Technicians',
+  profiles: 'Staff accounts',
+  maintenance_actions: 'Priority Actions / repairs',
+  inspection_assignments: 'Inspection job orders',
+  job_order_requests: 'Job Order Request forms',
+  purchase_requests: 'Purchase Request forms',
+  purchase_request_items: 'Purchase Request items'
+}
+
+// 'exact_location' -> 'Exact location'
+const fieldName = (k) => k.replace(/_id$/, '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
+
+function changeValue(v) {
+  if (v === null || v === undefined || v === '') return '(blank)'
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No'
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v)
+  return s.length > 60 ? s.slice(0, 57) + '...' : s
+}
+
+// The fields an edit changed, in words: "Status: Defective → Functional".
+export function describeChanges(entry) {
+  if (entry.action !== 'edited') return entry.action === 'added' ? 'Added' : 'Deleted'
+  return Object.entries(entry.changes || {})
+    .map(([k, [a, b]]) => `${fieldName(k)}: ${changeValue(a)} → ${changeValue(b)}`)
+    .join('; ')
+}
 
 export const ACTION_STATUS_LABELS = {
   pending: 'Needs Job Order',
@@ -31,7 +65,13 @@ export const ACTION_STATUS_LABELS = {
   completed: 'Completed'
 }
 
-const RESULT_LABELS = { functional: 'Functional', defective: 'Defective' }
+const RESULT_LABELS = { functional: 'Functional', defective: 'Defective', for_disposal: 'For disposal' }
+
+// "Code typed" note for an inspection whose code was typed instead of
+// scanned (migration 026), e.g. "Code typed (sticker damaged)".
+export function typedNote(i) {
+  return i?.entry_method === 'typed' ? `Code typed${i.typed_reason ? ` (${i.typed_reason.toLowerCase()})` : ''}` : ''
+}
 const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 }
 
 // Calendar day in the Philippines ('YYYY-MM-DD').
@@ -102,6 +142,8 @@ export function defaultFilters(key) {
       return { type: '', building: '' }
     case 'expiry':
       return { show: 'both', within: '30', type: '', building: '' }
+    case 'changes':
+      return { from: '', to: '', area: '', person: '' }
     default:
       return {}
   }
@@ -236,7 +278,7 @@ export function buildReport(key, f, data, ctx) {
           cleanInspectorName(i.inspector_name),
           RESULT_LABELS[i.condition_status] || i.condition_status,
           i.priority ? cap(i.priority) : '—',
-          i.findings || '—'
+          [i.findings, typedNote(i)].filter(Boolean).join(' · ') || '—'
         ]
       }),
       total: items.length,
@@ -350,6 +392,34 @@ export function buildReport(key, f, data, ctx) {
       ]),
       total: items.length,
       unit: 'unit'
+    }
+  }
+
+  if (key === 'changes') {
+    const items = (data.changeLog || []).filter(
+      (c) =>
+        inRange(c.changed_at, f.from, f.to) &&
+        (!f.area || c.table_name === f.area) &&
+        (!f.person || (c.actor_name || 'Unknown') === f.person)
+    )
+    return {
+      title: 'Change Log',
+      filterText: [
+        ['Dates', rangeText(f.from, f.to, fmtDay)],
+        ['Area', f.area ? CHANGE_AREAS[f.area] || f.area : 'All areas'],
+        ['Changed by', f.person || 'Everyone']
+      ],
+      columns: ['#', 'Date and time', 'Changed by', 'Area', 'Record', 'Change'],
+      rows: items.map((c, n) => [
+        String(n + 1),
+        ctx.formatTimestamp(c.changed_at),
+        `${c.actor_name || 'Unknown'}${c.actor_role ? ` (${c.actor_role})` : ''}`,
+        CHANGE_AREAS[c.table_name] || c.table_name,
+        c.row_label || '—',
+        describeChanges(c)
+      ]),
+      total: items.length,
+      unit: 'change'
     }
   }
 

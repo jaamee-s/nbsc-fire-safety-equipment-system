@@ -237,6 +237,21 @@ export function buildGsoNotifications({
       })
     }
 
+    // A disposable extinguisher reported "For disposal" (migration 026)
+    if (a.status === 'for_disposal') {
+      list.push({
+        id: `disposal-${a.id}`,
+        tone: 'amber',
+        title: `${code} reported for disposal`,
+        detail: `${a.description} · ${where}`,
+        next: 'Dispose of it, then open Priority Actions → For disposal and record it. A replacement comes from stock.',
+        time: a.reported_date,
+        timeLabel: 'Reported',
+        target: 'jobOrder',
+        actionId: a.id
+      })
+    }
+
     if (a.status === 'in_progress' && a.repair_status === 'repaired') {
       list.push({
         id: `repaired-${a.id}`,
