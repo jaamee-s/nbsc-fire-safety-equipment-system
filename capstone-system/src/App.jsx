@@ -459,6 +459,28 @@ function Dashboard({ profile, onLogout }) {
   const [unavailability, setUnavailability] = useState([])
   // Available / Unavailable switches made on the phone (migration 017)
   const [availabilityChanges, setAvailabilityChanges] = useState([])
+  // Light / Dark mode, remembered on this computer. Applied to <html> only
+  // while the dashboard is open, so the login page always stays light.
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem('firescan-theme') === 'dark' ? 'dark' : 'light'
+    } catch {
+      return 'light'
+    }
+  })
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'dark') root.dataset.theme = 'dark'
+    else delete root.dataset.theme
+    try {
+      localStorage.setItem('firescan-theme', theme)
+    } catch {
+      // Private window or blocked storage: the choice just isn't remembered.
+    }
+    return () => {
+      delete root.dataset.theme
+    }
+  }, [theme])
   // Official Job Order Request / Purchase Request forms (migration 020)
   const [officialForms, setOfficialForms] = useState({ jobOrders: [], purchases: [] })
   // The form open for editing: { kind: 'jor' | 'pr', id }
@@ -2513,6 +2535,14 @@ function Dashboard({ profile, onLogout }) {
             <span className={`status-dot ${needsActionCount > 0 ? 'alert' : ''}`}></span>
             {needsActionCount > 0 ? `${needsActionCount} need attention` : 'All operational'}
           </span>
+          <div className="theme-switch" role="group" aria-label="Colour theme">
+            <button aria-pressed={theme === 'light'} onClick={() => setTheme('light')}>
+              ☀ Light
+            </button>
+            <button aria-pressed={theme === 'dark'} onClick={() => setTheme('dark')}>
+              ☾ Dark
+            </button>
+          </div>
           <button
             className="logout-btn"
             style={{ marginRight: '6px' }}

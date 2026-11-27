@@ -257,11 +257,12 @@ export function AccountSettingsModal({ account, onClose, onSaved }) {
 /* Notifications                                                       */
 /* ------------------------------------------------------------------ */
 
+// Row tints come from the theme tokens, so unread rows stay readable in dark mode.
 const TONE = {
-  red: { bar: '#dc2626', bg: '#fef2f2' },
-  amber: { bar: '#d97706', bg: '#fffbeb' },
-  green: { bar: '#16a34a', bg: '#f0fdf4' },
-  blue: { bar: '#2563eb', bg: '#eff6ff' }
+  red: { bar: '#dc2626', bg: 'var(--red-bg)' },
+  amber: { bar: '#d97706', bg: 'var(--amber-bg)' },
+  green: { bar: '#16a34a', bg: 'var(--green-bg)' },
+  blue: { bar: '#2563eb', bg: 'var(--blue-light)' }
 }
 
 // Read/unread and the sound setting are saved per account, so two admins
@@ -537,9 +538,9 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
               maxWidth: '92vw',
               maxHeight: '480px',
               overflowY: 'auto',
-              background: '#fff',
-              color: '#1e293b',
-              border: '1px solid #e3e8ef',
+              background: 'var(--card)',
+              color: 'var(--text)',
+              border: '1px solid var(--border)',
               borderRadius: '12px',
               boxShadow: '0 12px 32px rgba(15,42,74,0.25)',
               zIndex: 999,
@@ -549,10 +550,10 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
             <div
               style={{
                 padding: '12px 14px',
-                borderBottom: '1px solid #e3e8ef',
+                borderBottom: '1px solid var(--border)',
                 position: 'sticky',
                 top: 0,
-                background: '#fff',
+                background: 'var(--card)',
                 zIndex: 1
               }}
             >
@@ -576,7 +577,7 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                   </button>
                 )}
                 {desktopPermission === 'denied' && (
-                  <span style={{ fontSize: '0.74rem', color: '#64748b', alignSelf: 'center' }}>
+                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', alignSelf: 'center' }}>
                     Desktop alerts are blocked in this browser&apos;s settings.
                   </span>
                 )}
@@ -584,7 +585,7 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
             </div>
 
             {notifications.length === 0 ? (
-              <p style={{ padding: '18px 14px', margin: 0, color: '#64748b', fontSize: '0.88rem' }}>
+              <p style={{ padding: '18px 14px', margin: 0, color: 'var(--text-muted)', fontSize: '0.88rem' }}>
                 You&apos;re all caught up. Nothing needs your attention.
               </p>
             ) : (
@@ -604,9 +605,9 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                     style={{
                       cursor: 'pointer',
                       padding: '11px 14px',
-                      borderBottom: '1px solid #eef1f5',
+                      borderBottom: '1px solid var(--border)',
                       borderLeft: `4px solid ${tone.bar}`,
-                      background: isUnread ? tone.bg : '#fff'
+                      background: isUnread ? tone.bg : 'var(--card)'
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
@@ -626,14 +627,14 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                         />
                       )}
                     </div>
-                    <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '2px' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                       {n.detail}
                     </div>
                     <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>
                       <strong>Next:</strong> {n.next}
                     </div>
                     {n.arrivedAt && (
-                      <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '3px' }}>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--chart-grey)', marginTop: '3px' }}>
                         {ago(n.arrivedAt)}
                         {showEvent &&
                           ` · ${n.timeLabel || 'Date'} ${/^\d{4}-\d{2}-\d{2}$/.test(String(n.time)) ? formatDay(n.time) : fmtDateTime(n.time)}`}
@@ -673,9 +674,9 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                 onClick={() => openItem(n)}
                 style={{
                   cursor: 'pointer',
-                  background: '#fff',
-                  color: '#1e293b',
-                  border: '1px solid #e3e8ef',
+                  background: 'var(--card)',
+                  color: 'var(--text)',
+                  border: '1px solid var(--border)',
                   borderLeft: `5px solid ${tone.bar}`,
                   borderRadius: '12px',
                   boxShadow: '0 10px 28px rgba(15,42,74,0.28)',
@@ -702,10 +703,10 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>{n.title}</div>
-                  <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '2px' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                     {n.detail}
                   </div>
-                  <div style={{ fontSize: '0.72rem', color: '#2563eb', marginTop: '4px', fontWeight: 600 }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--blue)', marginTop: '4px', fontWeight: 600 }}>
                     Click to open
                   </div>
                 </div>
@@ -718,7 +719,7 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
                   style={{
                     background: 'none',
                     border: 'none',
-                    color: '#94a3b8',
+                    color: 'var(--chart-grey)',
                     cursor: 'pointer',
                     fontSize: '0.9rem',
                     alignSelf: 'flex-start',
@@ -741,10 +742,10 @@ export function NotificationBell({ accountId, notifications, onNavigate, ready =
 /* ------------------------------------------------------------------ */
 
 const PRIORITY_TAG = {
-  critical: { bg: '#fef2f2', fg: '#b91c1c' },
-  high: { bg: '#fff1e6', fg: '#c2410c' },
-  medium: { bg: '#fffbeb', fg: '#b45309' },
-  low: { bg: '#eff6ff', fg: '#2563eb' }
+  critical: { bg: 'var(--red-bg)', fg: 'var(--red)' },
+  high: { bg: 'var(--orange-bg)', fg: 'var(--orange)' },
+  medium: { bg: 'var(--amber-bg)', fg: 'var(--amber)' },
+  low: { bg: 'var(--blue-light)', fg: 'var(--blue)' }
 }
 
 const PR_STATUS_LABELS = {
@@ -783,7 +784,7 @@ function SummaryColumn({ title, hint, count, accent, children }) {
         border: '1px solid var(--border)',
         borderTop: `4px solid ${accent}`,
         borderRadius: '10px',
-        background: '#fff',
+        background: 'var(--card)',
         padding: '14px 16px',
         minWidth: 0
       }}
@@ -808,7 +809,7 @@ function SummaryRow({ onClick, title, tag, lines, actions }) {
       style={{
         cursor: onClick ? 'pointer' : 'default',
         padding: '9px 0',
-        borderTop: '1px solid #eef1f5'
+        borderTop: '1px solid var(--border)'
       }}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
@@ -899,14 +900,14 @@ function Tile({ label, value, color }) {
   return (
     <div
       style={{
-        border: '1px solid #e3e8ef',
+        border: '1px solid var(--border)',
         borderRadius: '10px',
         padding: '12px 14px',
-        background: '#fff'
+        background: 'var(--card)'
       }}
     >
-      <div style={{ fontSize: '1.6rem', fontWeight: 800, color: color || '#1e293b' }}>{value}</div>
-      <div style={{ fontSize: '0.78rem', color: '#64748b' }}>{label}</div>
+      <div style={{ fontSize: '1.6rem', fontWeight: 800, color: color || 'var(--text)' }}>{value}</div>
+      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{label}</div>
     </div>
   )
 }
@@ -920,7 +921,7 @@ function SummarySection({ title, children }) {
           fontSize: '0.92rem',
           marginBottom: '8px',
           paddingBottom: '4px',
-          borderBottom: '2px solid #e3e8ef'
+          borderBottom: '2px solid var(--border)'
         }}
       >
         {title}
@@ -991,8 +992,8 @@ export function SummaryModal({
     (a) => a.completed_date && now - new Date(a.completed_date) <= 7 * 24 * 60 * 60 * 1000
   ).length
 
-  const th = { textAlign: 'left', fontSize: '0.78rem', color: '#64748b', padding: '6px 8px', borderBottom: '1px solid #e3e8ef' }
-  const td = { fontSize: '0.86rem', padding: '6px 8px', borderBottom: '1px solid #f1f5f9' }
+  const th = { textAlign: 'left', fontSize: '0.78rem', color: 'var(--text-muted)', padding: '6px 8px', borderBottom: '1px solid var(--border)' }
+  const td = { fontSize: '0.86rem', padding: '6px 8px', borderBottom: '1px solid var(--border)' }
 
   // Prints this window as a summary report. While printing, the page's
   // print stylesheet shows only this window (see .printing-summary in
@@ -1020,7 +1021,7 @@ export function SummaryModal({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
           <div>
             <div className="modal-title" style={{ marginBottom: '2px' }}>System Summary</div>
-            <div style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '16px' }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
               NBSC Fire Safety Equipment System · generated {fmtDateTime(now)}
             </div>
           </div>
@@ -1034,7 +1035,7 @@ export function SummaryModal({
           <div style={tileGrid}>
             <Tile label="Active equipment" value={active.length} />
             <Tile label="Functional" value={functional} color="#15803d" />
-            <Tile label="Needs attention" value={needsAttention} color={needsAttention ? '#b91c1c' : undefined} />
+            <Tile label="Needs attention" value={needsAttention} color={needsAttention ? 'var(--red)' : undefined} />
             <Tile label="Retired" value={retired} />
           </div>
           <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '12px' }}>
@@ -1051,8 +1052,8 @@ export function SummaryModal({
                 <tr key={r.type}>
                   <td style={td}>{TYPE_LABELS[r.type] || r.type}</td>
                   <td style={td}>{r.total}</td>
-                  <td style={{ ...td, color: '#15803d', fontWeight: 600 }}>{r.ok}</td>
-                  <td style={{ ...td, color: r.bad ? '#b91c1c' : undefined, fontWeight: r.bad ? 600 : 400 }}>{r.bad}</td>
+                  <td style={{ ...td, color: 'var(--green)', fontWeight: 600 }}>{r.ok}</td>
+                  <td style={{ ...td, color: r.bad ? 'var(--red)' : undefined, fontWeight: r.bad ? 600 : 400 }}>{r.bad}</td>
                 </tr>
               ))}
             </tbody>
@@ -1062,12 +1063,12 @@ export function SummaryModal({
         <SummarySection title="Priority actions">
           <div style={tileGrid}>
             <Tile label="Open actions" value={actions.length} />
-            <Tile label="Needs Job Order" value={pending} color={pending ? '#b45309' : undefined} />
+            <Tile label="Needs Job Order" value={pending} color={pending ? 'var(--amber)' : undefined} />
             <Tile label="In progress" value={inProgress} color="#2563eb" />
-            <Tile label="Awaiting your verification" value={awaitingVerify} color={awaitingVerify ? '#15803d' : undefined} />
-            <Tile label="Unresolved" value={unresolved} color={unresolved ? '#b91c1c' : undefined} />
+            <Tile label="Awaiting your verification" value={awaitingVerify} color={awaitingVerify ? 'var(--green)' : undefined} />
+            <Tile label="Unresolved" value={unresolved} color={unresolved ? 'var(--red)' : undefined} />
           </div>
-          <div style={{ fontSize: '0.84rem', color: '#64748b', marginTop: '10px' }}>
+          <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginTop: '10px' }}>
             By priority — Critical: <strong>{prio('critical')}</strong> · High: <strong>{prio('high')}</strong> ·
             Medium: <strong>{prio('medium')}</strong> · Low: <strong>{prio('low')}</strong>
           </div>
@@ -1075,8 +1076,8 @@ export function SummaryModal({
 
         <SummarySection title="Requests needed">
           <div style={tileGrid}>
-            <Tile label="Needs Job Order Request" value={pending} color={pending ? '#b45309' : undefined} />
-            <Tile label="Needs Purchase Request" value={purchaseItems.length} color={purchaseItems.length ? '#b91c1c' : undefined} />
+            <Tile label="Needs Job Order Request" value={pending} color={pending ? 'var(--amber)' : undefined} />
+            <Tile label="Needs Purchase Request" value={purchaseItems.length} color={purchaseItems.length ? 'var(--red)' : undefined} />
           </div>
           {purchaseItems.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '12px' }}>
@@ -1094,7 +1095,7 @@ export function SummaryModal({
                     <td style={td}>{p.code} — {TYPE_LABELS[p.type] || p.type}</td>
                     <td style={td}>{p.building ?? 'N/A'} — {p.location ?? ''}</td>
                     <td style={td}>{p.reason}</td>
-                    <td style={{ ...td, color: '#b91c1c', fontWeight: 600 }}>{p.stockOnHand}</td>
+                    <td style={{ ...td, color: 'var(--red)', fontWeight: 600 }}>{p.stockOnHand}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1139,14 +1140,14 @@ export function SummaryModal({
             <Tile label="Total recorded" value={inspections.length} />
             <Tile label="Today" value={insToday} />
             <Tile label="Last 7 days" value={insWeek} />
-            <Tile label="Defects found (all time)" value={insDefects} color={insDefects ? '#b91c1c' : undefined} />
+            <Tile label="Defects found (all time)" value={insDefects} color={insDefects ? 'var(--red)' : undefined} />
           </div>
         </SummarySection>
 
         <SummarySection title="Expiration">
           <div style={tileGrid}>
-            <Tile label="Expired" value={expiredCount} color={expiredCount ? '#b91c1c' : undefined} />
-            <Tile label="Expiring within 30 days" value={soonCount} color={soonCount ? '#b45309' : undefined} />
+            <Tile label="Expired" value={expiredCount} color={expiredCount ? 'var(--red)' : undefined} />
+            <Tile label="Expiring within 30 days" value={soonCount} color={soonCount ? 'var(--amber)' : undefined} />
           </div>
         </SummarySection>
 
@@ -1164,7 +1165,7 @@ export function SummaryModal({
               const s = stock.find((x) => x.equipment_type === type)
               const qty = s ? s.quantity_available : 0
               return (
-                <Tile key={type} label={TYPE_LABELS[type] || type} value={qty} color={qty === 0 ? '#b91c1c' : undefined} />
+                <Tile key={type} label={TYPE_LABELS[type] || type} value={qty} color={qty === 0 ? 'var(--red)' : undefined} />
               )
             })}
           </div>
@@ -2281,7 +2282,7 @@ function InspectionJobOrderModal({
         <div className="info-line" style={{ marginTop: '4px' }}>
           {coveredCount} unit{coveredCount === 1 ? '' : 's'} in service
           {coveredCount === 0 && (
-            <span style={{ color: '#b91c1c' }}> — nothing to inspect here, choose another building or floor</span>
+            <span style={{ color: 'var(--red)' }}> — nothing to inspect here, choose another building or floor</span>
           )}
         </div>
       </div>
@@ -2398,7 +2399,7 @@ export function JobOrderRequestModal({
           Replacement stock on hand: <b>{fireExtinguisherStock}</b> fire extinguisher
           {fireExtinguisherStock === 1 ? '' : 's'}
           {fireExtinguisherStock === 0 && (
-            <span style={{ color: '#b91c1c' }}> — no unit on hand, a Purchase Request is also needed</span>
+            <span style={{ color: 'var(--red)' }}> — no unit on hand, a Purchase Request is also needed</span>
           )}
         </div>
       )}

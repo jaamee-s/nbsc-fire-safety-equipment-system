@@ -20,7 +20,68 @@
   --text: #1e293b;
   --text-muted: #64748b;
   --chart-grey: #94a3b8;
+  --campus-ground: #eef4ec;
+  --orange: #c2410c;
+  --orange-bg: #fff1e6;
   --radius: 12px;
+}
+
+/* ===== Dark mode =====
+   The header's Light / Dark switch sets data-theme="dark" on <html> while
+   the dashboard is open (the login page always stays light). Only the
+   tokens change; every part of the page that uses them follows. */
+:root[data-theme="dark"] {
+  --navy: #0d2342;
+  --navy-dark: #081831;
+  --blue: #7aa5ff;
+  --blue-dark: #9dbcff;
+  --blue-light: #1a2a47;
+  --green: #4ade80;
+  --green-bg: #12301f;
+  --green-border: #1f5b38;
+  --amber: #fbbf24;
+  --amber-bg: #33270f;
+  --amber-border: #6b5218;
+  --red: #f87171;
+  --red-bg: #3a1a1d;
+  --red-border: #7a2e33;
+  --orange: #fb923c;
+  --orange-bg: #3a2516;
+  --gray-bg: #0e141d;
+  --card: #161e2a;
+  --border: #2a3546;
+  --text: #e5eaf1;
+  --text-muted: #9aa6b6;
+  --chart-grey: #64748b;
+  --campus-ground: #13201a;
+  color-scheme: dark;
+}
+
+/* Filled buttons and badges keep a strong colour so their white text stays readable */
+:root[data-theme="dark"] .btn-primary { background: #2563eb; }
+:root[data-theme="dark"] .btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+:root[data-theme="dark"] .side-badge { background: #dc2626; }
+
+/* Printouts are always on white paper */
+@media print {
+  :root[data-theme="dark"] {
+    --blue: #2563eb;
+    --blue-light: #eaf1ff;
+    --green: #15803d;
+    --green-bg: #eafaf0;
+    --amber: #b45309;
+    --amber-bg: #fff8e8;
+    --red: #b91c1c;
+    --red-bg: #fdeeee;
+    --orange: #c2410c;
+    --orange-bg: #fff1e6;
+    --gray-bg: #f3f5f8;
+    --card: #ffffff;
+    --border: #e3e8ef;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    color-scheme: light;
+  }
 }
 
 * {
@@ -274,14 +335,14 @@ h1, h2, h3 {
 .btn-primary:hover:not(:disabled) { background: var(--blue-dark); }
 
 .btn-secondary {
-  background: #fff;
+  background: var(--card);
   color: var(--text);
   border: 1px solid var(--border);
 }
-.btn-secondary:hover:not(:disabled) { background: #f5f7fa; }
+.btn-secondary:hover:not(:disabled) { background: var(--gray-bg); }
 
 .btn-outline-red {
-  background: #fff;
+  background: var(--card);
   color: var(--red);
   border: 1px solid var(--red-border);
 }
@@ -325,7 +386,7 @@ input, select, textarea {
   font-size: 0.93rem;
   font-family: inherit;
   color: var(--text);
-  background: #fff;
+  background: var(--card);
 }
 
 input:focus, select:focus, textarea:focus {
@@ -571,7 +632,7 @@ textarea {
 }
 
 .modal-box {
-  background: #fff;
+  background: var(--card);
   border-radius: 14px;
   padding: 28px 30px;
   max-width: 380px;
@@ -1307,6 +1368,102 @@ input::-ms-clear {
   color: var(--red);
 }
 
+/* ===== Light / Dark switch (header) ===== */
+.theme-switch {
+  display: inline-flex;
+  padding: 3px;
+  margin-right: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.theme-switch button {
+  height: 28px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #c9d3e3;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.theme-switch button[aria-pressed="true"] {
+  background: #f4511e;
+  color: #ffffff;
+}
+
+.theme-switch button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+}
+
+/* ===== Navy sidebar =====
+   The same navy as the header, so the two read as one frame. Only the
+   colours change: the layout, icons, hover slide and expand-on-hover
+   above are untouched. */
+.app-sidebar {
+  background: var(--navy);
+  border-right-color: var(--navy-dark);
+}
+
+.app-sidebar .side-group-title {
+  color: #8fa3bf;
+}
+
+.app-sidebar .side-item,
+.app-sidebar .side-logout {
+  color: #dbe4f0;
+}
+
+.app-sidebar .side-item::before {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.app-sidebar .side-item:hover {
+  color: #ffffff;
+}
+
+.app-sidebar .side-item.active {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  box-shadow: inset 3px 0 0 #f4511e;
+}
+
+.app-sidebar .side-user {
+  border-top-color: rgba(255, 255, 255, 0.14);
+  color: #8fa3bf;
+}
+
+.app-sidebar .side-user strong {
+  color: #ffffff;
+}
+
+.app-sidebar .side-logout::before {
+  background: rgba(248, 113, 113, 0.16);
+}
+
+.app-sidebar .side-logout:hover {
+  color: #fca5a5;
+}
+
+@media (min-width: 861px) and (hover: hover) {
+  .app-sidebar:hover,
+  .app-sidebar:has(:focus-visible) {
+    box-shadow: 6px 0 18px rgba(10, 29, 51, 0.35);
+  }
+}
+
+@media (max-width: 860px) {
+  .app-sidebar {
+    border-bottom-color: var(--navy-dark);
+  }
+}
+
 .main-content {
   flex: 1;
   min-width: 0;
@@ -1441,7 +1598,7 @@ input::-ms-clear {
 .mini-stats b.bad { color: var(--red); }
 .mini-stats b.ok { color: var(--green); }
 
-.tag-orange { background: #fff1e6; color: #c2410c; border-color: #fed7aa; }
+.tag-orange { background: var(--orange-bg); color: var(--orange); border-color: #fed7aa; }
 .tag-amber { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }
 
 /* Calendar button on Inspector / Technician cards, and its month view */
