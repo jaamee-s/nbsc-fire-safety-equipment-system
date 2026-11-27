@@ -1296,11 +1296,26 @@ export function CalendarButton({ onClick }) {
   )
 }
 
-// Shows the dates one inspector / technician said they are unavailable
-// (migration 012), as a month calendar plus a list. Read-only for the admin:
-// the person sets them in the mobile app.
-export function AvailabilityModal({ profileId, name, onClose }) {
-  const [rows, setRows] = useState(null)
+// A person's month calendar (version C), opened from the calendar button on
+// an inspector or technician card. Shows, day by day:
+//   - their unavailable dates (migration 012) and the Available / Unavailable
+//     switches they made in the app (migration 017);
+//   - an inspector's inspection rounds due (migration 010) and the units they
+//     inspected that day;
+//   - a technician's jobs: assigned, marked repaired, completed.
+// Read-only for the admin: the person sets their dates in the mobile app.
+// technicianId: the technician record (jobs are linked to it, not the account).
+const EVENT_STYLE = {
+  leave: { bg: 'var(--gray-bg)', fg: 'var(--text)', dot: 'var(--chart-grey)', label: 'Unavailable' },
+  switch: { bg: 'var(--amber-bg)', fg: 'var(--amber)', dot: 'var(--amber)', label: 'Availability switch' },
+  round: { bg: 'var(--blue-light)', fg: 'var(--blue)', dot: 'var(--blue)', label: 'Inspection round due' },
+  done: { bg: 'var(--green-bg)', fg: 'var(--green)', dot: 'var(--green)', label: 'Work done' },
+  job: { bg: 'var(--orange-bg)', fg: 'var(--orange)', dot: '#ea580c', label: 'Job assigned' }
+}
+
+export function AvailabilityModal({ profileId, name, role, technicianId = null, onClose }) {
+  const isTech = role === 'technician' || !!technicianId
+  const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [month, setMonth] = useState(() => {
     const d = new Date()
@@ -1308,22 +1323,83 @@ export function AvailabilityModal({ profileId, name, onClose }) {
   })
 
   useEffect(() => {
-    supabase
-      .from('staff_unavailability')
-      .select('id, start_date, end_date, reason, created_at')
-      .eq('profile_id', profileId)
-      .order('start_date', { ascending: true })
-      .then(({ data, error: err }) => {
-        if (err) setError('Unavailable dates appear once the latest database update (migration 012) is run.')
-        else setRows(data || [])
+    async function load() {
+      const leaves = await supabase
+        .from('staff_unavailability')
+        .select('id, start_date, end_date, reason, created_at')
+        .eq('profile_id', profileId)
+        .order('start_date', { ascending: true })
+      if (leaves.error) {
+        setError('Unavailable dates appear once the latest database update (migration 012) is run.')
+        return
+      }
+      // Each of these is optional: before its migration it is simply empty.
+      const switches = await supabase
+        .from('staff_availability_changes')
+        .select('id, is_available, changed_at')
+        .eq('profile_id', profileId)
+        .order('changed_at', { ascending: true })
+      let rounds = { data: [] }
+      let checks = { data: [] }
+      let jobs = { data: [] }
+      if (isTech) {
+        if (technicianId) {
+          jobs = await supabase
+            .from('maintenance_actions')
+            .select('id, description, priority, status, repair_status, decided_at, repaired_at, completed_date, equipment ( equipment_code )')
+            .eq('assigned_technician_id', technicianId)
+        }
+      } else {
+        rounds = await supabase
+          .from('inspection_assignments')
+          .select('id, due_date, floor_label, priority, status, buildings ( building_name )')
+          .eq('inspector_id', profileId)
+          .neq('status', 'cancelled')
+        checks = await supabase
+          .from('inspections')
+          .select('id, inspection_date, condition_status')
+          .eq('inspector_id', profileId)
+      }
+      setData({
+        leaves: leaves.data || [],
+        switches: switches.error ? [] : switches.data || [],
+        rounds: rounds.error ? [] : rounds.data || [],
+        checks: checks.error ? [] : checks.data || [],
+        jobs: jobs.error ? [] : jobs.data || []
       })
-  }, [profileId])
+    }
+    load()
+  }, [profileId, technicianId, isTech])
 
   const today = ymdOf(new Date())
-  const list = rows || []
-  const inRange = (ymd) => list.find((r) => r.start_date <= ymd && ymd <= r.end_date)
-  const current = list.filter((r) => r.end_date >= today)
-  const onLeaveToday = list.some((r) => r.start_date <= today && today <= r.end_date)
+  const dayOf = (ts) => (ts ? ymdOf(new Date(ts)) : null)
+
+  // Every event as { ymd, kind, text }, then grouped by day.
+  const byDay = {}
+  const add = (ymd, kind, text) => {
+    if (!ymd) return
+    ;(byDay[ymd] = byDay[ymd] || []).push({ kind, text })
+  }
+  const d = data || { leaves: [], switches: [], rounds: [], checks: [], jobs: [] }
+  const inLeave = (ymd) => d.leaves.find((r) => r.start_date <= ymd && ymd <= r.end_date)
+  d.switches.forEach((s) =>
+    add(dayOf(s.changed_at), 'switch', s.is_available ? 'Switched to Available' : 'Switched to Unavailable')
+  )
+  d.rounds.forEach((r) =>
+    add(r.due_date, 'round', `${r.buildings?.building_name || 'Building'}${r.floor_label ? ` · ${r.floor_label}` : ''} round due`)
+  )
+  const checksPerDay = {}
+  d.checks.forEach((c) => {
+    const ymd = dayOf(c.inspection_date)
+    if (ymd) checksPerDay[ymd] = (checksPerDay[ymd] || 0) + 1
+  })
+  Object.entries(checksPerDay).forEach(([ymd, n]) => add(ymd, 'done', `✓ ${n} unit${n === 1 ? '' : 's'} inspected`))
+  d.jobs.forEach((j) => {
+    const code = j.equipment?.equipment_code || 'Job'
+    add(dayOf(j.decided_at), 'job', `${code} assigned`)
+    add(dayOf(j.repaired_at), 'done', `✓ ${code} marked repaired`)
+    if (j.completed_date) add(dayOf(j.completed_date), 'done', `✓ ${code} completed`)
+  })
 
   // The month's days, with blanks before the 1st so weekdays line up.
   const first = month.getDay()
@@ -1333,74 +1409,147 @@ export function AvailabilityModal({ profileId, name, onClose }) {
     ...Array.from({ length: daysInMonth }, (_, i) => new Date(month.getFullYear(), month.getMonth(), i + 1))
   ]
 
+  // Coming up: unavailable dates and work due in the next 14 days.
+  const horizon = ymdOf(new Date(new Date().getTime() + 14 * 24 * 60 * 60 * 1000))
+  const upcoming = [
+    ...d.leaves
+      .filter((r) => r.end_date >= today && r.start_date <= horizon)
+      .map((r) => ({
+        ymd: r.start_date < today ? today : r.start_date,
+        kind: 'leave',
+        text: `Unavailable${r.end_date !== r.start_date ? ` until ${formatDay(r.end_date)}` : ''}${r.reason ? ` · ${r.reason}` : ''}`
+      })),
+    ...d.rounds
+      .filter((r) => r.due_date <= horizon)
+      .map((r) => ({
+        ymd: r.due_date,
+        kind: 'round',
+        text: `${r.buildings?.building_name || 'Building'}${r.floor_label ? ` · ${r.floor_label}` : ''} round due${r.due_date < today ? ' (overdue)' : ''}`
+      })),
+    ...d.jobs
+      .filter((j) => j.status === 'in_progress' && j.repair_status !== 'repaired')
+      .map((j) => ({
+        ymd: dayOf(j.decided_at) || today,
+        kind: 'job',
+        text: `${j.equipment?.equipment_code || 'Job'} · ${j.description || 'repair'} (${j.repair_status === 'working' ? 'working on it' : 'assigned'})`
+      }))
+  ].sort((a, b) => a.ymd.localeCompare(b.ymd))
+  const onLeaveToday = !!inLeave(today)
+
   return (
     <div className="modal-overlay">
-      <div className="modal-box" style={{ maxWidth: '460px', textAlign: 'left' }}>
-        <div className="modal-title" style={{ marginBottom: '2px' }}>Unavailable dates</div>
-        <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
-          {name} · set by them in the mobile app
+      <div className="modal-box person-cal" style={{ textAlign: 'left' }}>
+        <div className="person-cal-top">
+          <div>
+            <div className="modal-title" style={{ marginBottom: '2px' }}>{name}</div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              {isTech ? 'Technician' : 'Inspector'} schedule · dates are set by them in the mobile app
+            </div>
+          </div>
+          {onLeaveToday ? (
+            <span className="tag tag-red">Unavailable today</span>
+          ) : (
+            <span className="tag tag-green">Available today</span>
+          )}
         </div>
 
         {error ? (
           <p className="form-error">{error}</p>
-        ) : rows === null ? (
+        ) : data === null ? (
           <p style={{ color: 'var(--text-muted)' }}>Loading...</p>
         ) : (
-          <>
-            {onLeaveToday && <div className="tag tag-red" style={{ marginBottom: '10px' }}>Unavailable today</div>}
-
-            <div className="cal-head">
-              <button className="btn btn-secondary btn-sm" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>
-                ‹
-              </button>
-              <b>{month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</b>
-              <button className="btn btn-secondary btn-sm" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>
-                ›
-              </button>
+          <div className="person-cal-body">
+            <div className="person-cal-main">
+              <div className="cal-head">
+                <button
+                  className="btn btn-secondary btn-sm"
+                  aria-label="Previous month"
+                  onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}
+                >
+                  ‹
+                </button>
+                <b>{month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</b>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  aria-label="Next month"
+                  onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}
+                >
+                  ›
+                </button>
+              </div>
+              <div className="pcal-grid">
+                {WEEKDAYS.map((w) => (
+                  <div key={w} className="pcal-weekday">{w}</div>
+                ))}
+                {cells.map((day, i) => {
+                  if (!day) return <div key={`b${i}`} className="pcal-day pcal-blank" />
+                  const ymd = ymdOf(day)
+                  const leave = inLeave(ymd)
+                  const events = byDay[ymd] || []
+                  return (
+                    <div
+                      key={ymd}
+                      className={`pcal-day ${leave ? 'pcal-off' : ''} ${ymd === today ? 'pcal-today' : ''}`}
+                      title={leave ? `Unavailable${leave.reason ? `: ${leave.reason}` : ''}` : ''}
+                    >
+                      <span className="pcal-num">{day.getDate()}</span>
+                      {leave && (
+                        <span className="pcal-ev" style={{ background: EVENT_STYLE.leave.bg, color: EVENT_STYLE.leave.fg }}>
+                          Unavailable
+                        </span>
+                      )}
+                      {events.slice(0, 2).map((e, k) => (
+                        <span
+                          key={k}
+                          className="pcal-ev"
+                          style={{ background: EVENT_STYLE[e.kind].bg, color: EVENT_STYLE[e.kind].fg }}
+                        >
+                          {e.text}
+                        </span>
+                      ))}
+                      {events.length > 2 && (
+                        <span className="pcal-more" title={events.slice(2).map((e) => e.text).join('\n')}>
+                          +{events.length - 2} more
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="chart-legend">
+                {(isTech ? ['leave', 'switch', 'job', 'done'] : ['leave', 'switch', 'round', 'done']).map((k) => (
+                  <span key={k}>
+                    <i style={{ background: EVENT_STYLE[k].dot }} />
+                    {EVENT_STYLE[k].label}
+                  </span>
+                ))}
+                <span>
+                  <i style={{ background: 'transparent', border: '2px solid #f4511e' }} />
+                  Today
+                </span>
+              </div>
             </div>
-            <div className="cal-grid">
-              {WEEKDAYS.map((w) => (
-                <div key={w} className="cal-weekday">{w}</div>
-              ))}
-              {cells.map((d, i) => {
-                if (!d) return <div key={`b${i}`} />
-                const ymd = ymdOf(d)
-                const hit = inRange(ymd)
-                return (
-                  <div
-                    key={ymd}
-                    className={`cal-day ${hit ? 'off' : ''} ${ymd === today ? 'today' : ''}`}
-                    title={hit ? `Unavailable${hit.reason ? `: ${hit.reason}` : ''}` : ''}
-                  >
-                    {d.getDate()}
+
+            <aside className="person-cal-side">
+              <div className="assign-head">
+                Coming up <span className="assign-count">{upcoming.length}</span>
+              </div>
+              {upcoming.length === 0 ? (
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: 0 }}>
+                  Nothing in the next 14 days.
+                </p>
+              ) : (
+                upcoming.map((u, i) => (
+                  <div key={i} className="pcal-up">
+                    <span className="pcal-up-date" style={{ background: EVENT_STYLE[u.kind].bg, color: EVENT_STYLE[u.kind].fg }}>
+                      {formatDay(u.ymd)}
+                    </span>
+                    <span>{u.text}</span>
                   </div>
-                )
-              })}
-            </div>
-            <div className="chart-legend">
-              <span><i style={{ background: 'var(--red)' }} />Unavailable</span>
-              <span><i style={{ background: 'transparent', border: '2px solid var(--blue)' }} />Today</span>
-            </div>
-
-            <div className="assign-head" style={{ marginTop: '14px' }}>
-              Current and upcoming <span className="assign-count">{current.length}</span>
-            </div>
-            {current.length === 0 ? (
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', margin: '6px 0 0 0' }}>
-                No unavailable dates set.
-              </p>
-            ) : (
-              current.map((r) => (
-                <div key={r.id} className="info-line" style={{ marginTop: '6px' }}>
-                  <b>
-                    {formatDay(r.start_date)}
-                    {r.end_date !== r.start_date ? ` – ${formatDay(r.end_date)}` : ''}
-                  </b>
-                  {r.reason ? ` · ${r.reason}` : ''}
-                </div>
-              ))
-            )}
-          </>
+                ))
+              )}
+            </aside>
+          </div>
         )}
 
         <div className="modal-actions" style={{ marginTop: '16px' }}>
@@ -1874,6 +2023,7 @@ export function InspectorsTab({
         <AvailabilityModal
           profileId={calendarFor.id}
           name={calendarFor.name}
+          role="inspector"
           onClose={() => setCalendarFor(null)}
         />
       )}

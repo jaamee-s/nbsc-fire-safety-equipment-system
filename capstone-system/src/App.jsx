@@ -4361,7 +4361,7 @@ function Dashboard({ profile, onLogout }) {
                               {t.is_available ? 'Available' : 'Unavailable'}
                             </span>
                             {t.profile_id && (
-                              <CalendarButton onClick={() => setCalendarFor({ id: t.profile_id, name: t.full_name })} />
+                              <CalendarButton onClick={() => setCalendarFor({ id: t.profile_id, name: t.full_name, technicianId: t.id })} />
                             )}
                           </span>
                         </div>
@@ -4856,6 +4856,8 @@ function Dashboard({ profile, onLogout }) {
         <AvailabilityModal
           profileId={calendarFor.id}
           name={calendarFor.name}
+          role="technician"
+          technicianId={calendarFor.technicianId}
           onClose={() => setCalendarFor(null)}
         />
       )}
