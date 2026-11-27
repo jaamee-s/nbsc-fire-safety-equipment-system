@@ -25,6 +25,15 @@ import { ReportsTab } from './ReportsTab'
 import { ACTION_STATUS_LABELS, buildInventoryReport, manilaDay } from './reports'
 import nbscHeader from './assets/nbsc-print-header.png'
 import FormPrintPage from './FormPrintPage'
+import CampusView from './CampusView'
+import {
+  ComplianceRing,
+  DashboardGreeting,
+  LiveActivity,
+  PriorityQueue,
+  RoundsProgress,
+  StaffOnDuty
+} from './DashboardOverview'
 import { JorEditorModal, PrEditorModal } from './OfficialFormEditors'
 import {
   checkJobOrderDraft,
@@ -608,6 +617,8 @@ function Dashboard({ profile, onLogout }) {
   })
   // Mobile app logins (username shown on cards) and the "account created" note
   const [staffAccounts, setStaffAccounts] = useState([])
+  // Available / Unavailable of each account, set in the mobile app: { [id]: true | false }
+  const [staffAvailability, setStaffAvailability] = useState({})
   const [accountNotice, setAccountNotice] = useState(null)
   // "Create app account" for a technician added before accounts existed
   const [techLoginFor, setTechLoginFor] = useState(null)
@@ -699,7 +710,8 @@ function Dashboard({ profile, onLogout }) {
       getStaffAccounts(),
       getUnavailability(),
       getAvailabilityChanges(),
-      getOfficialForms()
+      getOfficialForms(),
+      getStaffAvailability()
     ]).then(() => setInitialLoaded(true))
   }, [])
 
@@ -728,6 +740,7 @@ function Dashboard({ profile, onLogout }) {
       getAvailabilityChanges()
       getStock()
       getOfficialForms()
+      getStaffAvailability()
     }
 
     function connect() {
@@ -760,6 +773,7 @@ function Dashboard({ profile, onLogout }) {
         // Someone switched Available / Unavailable on the phone (migration 017).
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'staff_availability_changes' }, () => {
           getAvailabilityChanges()
+          getStaffAvailability()
         })
       channel = ch
       ch.subscribe((status) => {
@@ -1974,6 +1988,17 @@ function Dashboard({ profile, onLogout }) {
     getStaffAccounts()
   }
 
+  // Before migration 009 the function does not exist; everyone shows as available.
+  async function getStaffAvailability() {
+    const { data, error } = await supabase.rpc('list_staff_availability')
+    if (error) return
+    const byId = {}
+    ;(data || []).forEach((a) => {
+      byId[a.id] = a.is_available
+    })
+    setStaffAvailability(byId)
+  }
+
   async function getStaffAccounts() {
     const { data, error } = await supabase.rpc('list_staff_accounts')
     // Before migration 005 this function doesn't exist; usernames just don't show.
@@ -2243,6 +2268,31 @@ function Dashboard({ profile, onLogout }) {
         new Date(i.inspection_date).getTime() >= checksSince
     )
     .map((i) => ({ ...i, equipment: equipment.find((e) => e.id === i.equipment_id) }))
+
+  // Dashboard "Staff on duty": every inspector and technician with an app
+  // account, and whether they are available, on leave today or on a job.
+  const onLeaveToday = (profileId) =>
+    upcomingLeaves.some((l) => l.profile_id === profileId && l.start_date <= todayPh && l.end_date >= todayPh)
+  const staffOnDuty = [
+    ...staffAccounts
+      .filter((a) => a.role === 'inspector')
+      .map((a) => ({
+        id: a.id,
+        name: a.full_name,
+        role: 'Inspector',
+        available: staffAvailability[a.id] !== false,
+        onJob: false,
+        onLeave: onLeaveToday(a.id)
+      })),
+    ...technicians.map((t) => ({
+      id: t.id,
+      name: t.full_name,
+      role: 'Technician',
+      available: t.is_available !== false,
+      onJob: sortedActions.some((a) => a.assigned_technician_id === t.id && a.repair_status === 'working'),
+      onLeave: t.profile_id ? onLeaveToday(t.profile_id) : false
+    }))
+  ].sort((a, b) => a.name.localeCompare(b.name))
 
   // A person's current / upcoming unavailable dates, earliest first.
   const leavesFor = (profileId) => (profileId ? upcomingLeaves.filter((l) => l.profile_id === profileId) : [])
@@ -2602,6 +2652,11 @@ function Dashboard({ profile, onLogout }) {
           <div className="page-wrap">
         {(activeTab === 'dashboard' || activeTab === 'priority') && (
         <div>
+            <DashboardGreeting
+              name={profile.full_name}
+              onAssignJob={() => goTab('technicians')}
+              onAssignInspection={() => goTab('inspectors')}
+            />
             <div className="stat-grid">
               <button className="stat-card stat-card-clickable" onClick={() => jumpToEquipment('')}>
                 <div className="stat-icon blue">📦</div>
@@ -2642,17 +2697,38 @@ function Dashboard({ profile, onLogout }) {
               </button>
             </div>
 
-            <div className="chart-grid">
-              {/* Pie chart hidden for now (adviser's request): "Equipment by
-                  type" below has the same totals, per type and overall.
-              <StatusDonut
-                functional={activeCount}
-                needsAttention={needsActionCount}
-                retired={retiredCount}
+            {/* Overview (version A in version D's card style). Pie chart
+                hidden for now (adviser's request): "Equipment by type" has
+                the same totals, per type and overall.
+            <StatusDonut
+              functional={activeCount}
+              needsAttention={needsActionCount}
+              retired={retiredCount}
+            />
+            */}
+            <div className="dash-grid">
+              <ComplianceRing equipment={equipment} inspections={inspections} />
+              <div className="dash-span-2 dash-chart">
+                <TypeBars rows={typeChartRows} />
+              </div>
+
+              <PriorityQueue
+                actions={sortedActions}
+                purchaseItems={purchaseRequestItems}
+                technicians={technicians}
+                onOpen={openActionInFilter}
+                onSeeAll={() => {
+                  setPriorityFilter('all')
+                  scrollToId('priority-actions-section')
+                }}
               />
-              */}
-              <TypeBars rows={typeChartRows} />
-              <InspectionWeeks inspections={inspections} />
+              <LiveActivity notifications={gsoNotifications} onOpen={handleNotificationNavigate} />
+
+              <RoundsProgress equipment={equipment} inspections={inspections} buildings={buildings} />
+              <div className="dash-chart">
+                <InspectionWeeks inspections={inspections} />
+              </div>
+              <StaffOnDuty people={staffOnDuty} />
             </div>
 
         <div id="priority-actions-section" className="section-heading" style={{ scrollMarginTop: '80px' }}>
@@ -3024,6 +3100,22 @@ function Dashboard({ profile, onLogout }) {
           </div>
         )}
 
+        <CampusView
+          buildings={buildings}
+          buildingLocations={buildingLocations}
+          equipment={equipment}
+          actions={sortedActions}
+          expiring={expiringEquipment}
+          onManageRooms={(b) => {
+            setExpandedLocationsBuildingId(b.id)
+            scrollToId(`building-row-${b.id}`)
+          }}
+          onViewEquipment={(b) => {
+            jumpToEquipment('')
+            setFilterBuilding(b.id)
+          }}
+        />
+
         {buildings.length === 0 ? (
           <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>No buildings added yet.</p>
         ) : (
@@ -3049,7 +3141,7 @@ function Dashboard({ profile, onLogout }) {
                   const open = expandedLocationsBuildingId === b.id
                   return (
                     <Fragment key={b.id}>
-                      <tr>
+                      <tr id={`building-row-${b.id}`} style={{ scrollMarginTop: '80px' }}>
                         <td><strong>{b.building_name}</strong></td>
                         <td>{b.location_description || '—'}</td>
                         <td className="num">{floorCount}</td>

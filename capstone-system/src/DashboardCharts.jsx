@@ -92,6 +92,9 @@ const pct = (n, total) => (total > 0 ? Math.round((n / total) * 100) : 0)
 //   retired    No Longer in Service — counted, not part of total or %
 //   storeroom  new units in the GSO storeroom (Stock page), not installed
 // Each status changes by itself as inspectors and technicians work.
+// Drawn with HTML rather than one scaled SVG picture, so the text stays a
+// readable size however wide the card is (the SVG version shrank its text
+// to fit the dashboard card).
 export function TypeBars({ rows }) {
   const typeRows = rows.filter((r) => r.ok + r.bad + r.retired + (r.storeroom || 0) > 0)
   const all = typeRows.reduce(
@@ -107,11 +110,6 @@ export function TypeBars({ rows }) {
   const shown = typeRows.length ? [all, ...typeRows] : []
   // Type bars share one scale so they compare; "All equipment" fills its own.
   const max = Math.max(1, ...typeRows.map((r) => r.ok + r.bad))
-  const labelW = 118
-  const barW = 200
-  const textX = labelW + barW + 12
-  const rowH = 42
-  const height = Math.max(rowH, shown.length * rowH)
 
   return (
     <div className="chart-panel chart-wide">
@@ -119,40 +117,41 @@ export function TypeBars({ rows }) {
       {shown.length === 0 ? (
         <p className="chart-empty">No equipment yet.</p>
       ) : (
-        <svg viewBox={`0 0 760 ${height}`} className="chart-svg" role="img" aria-label="Equipment by type">
-          {shown.map((r, i) => {
+        <div className="tb-list" role="list" aria-label="Equipment by type">
+          {shown.map((r) => {
             const isAll = r.type === '__all__'
             const total = r.ok + r.bad
             const scale = isAll ? Math.max(1, total) : max
-            const y = i * rowH + 8
-            const okW = (r.ok / scale) * barW
-            const badW = (r.bad / scale) * barW
             const extra = [
               `Total ${total}`,
               `${r.retired} no longer in service`,
               r.storeroom > 0 ? `+${r.storeroom} new in storeroom` : null
             ].filter(Boolean)
             return (
-              <g key={r.type}>
-                {isAll && <line x1="0" y1={rowH - 1} x2="760" y2={rowH - 1} stroke="var(--border)" />}
-                <text x="0" y={y + 12} className={`chart-text ${isAll ? 'chart-strong' : ''}`}>
-                  {r.label.length > 17 ? `${r.label.slice(0, 16)}…` : r.label}
-                </text>
-                <rect x={labelW} y={y} width={barW} height="16" rx="2" fill="var(--border)" opacity="0.45" />
-                {okW > 0 && <rect x={labelW} y={y} width={okW} height="16" rx="2" fill="var(--green)" />}
-                {badW > 0 && <rect x={labelW + okW} y={y} width={badW} height="16" rx="2" fill="var(--red)" />}
-                <text x={textX} y={y + 12} className="chart-text">
-                  <tspan className="chart-ok">{r.ok} functional ({pct(r.ok, total)}%)</tspan>
-                  <tspan> · </tspan>
-                  <tspan className="chart-bad">{r.bad} defective ({pct(r.bad, total)}%)</tspan>
-                </text>
-                <text x={textX} y={y + 28} className="chart-text chart-small">
-                  {extra.join(' · ')}
-                </text>
-              </g>
+              <div key={r.type} role="listitem" className={`tb-row ${isAll ? 'tb-all' : ''}`}>
+                <span className="tb-label" title={r.label}>
+                  {r.label}
+                </span>
+                <span className="tb-bar" aria-hidden="true">
+                  {r.ok > 0 && <i style={{ width: `${(r.ok / scale) * 100}%`, background: 'var(--green)' }} />}
+                  {r.bad > 0 && <i style={{ width: `${(r.bad / scale) * 100}%`, background: 'var(--red)' }} />}
+                </span>
+                <span className="tb-text">
+                  <span className="tb-main">
+                    <span className="chart-ok">
+                      {r.ok} functional ({pct(r.ok, total)}%)
+                    </span>
+                    {' · '}
+                    <span className="chart-bad">
+                      {r.bad} defective ({pct(r.bad, total)}%)
+                    </span>
+                  </span>
+                  <span className="tb-sub">{extra.join(' · ')}</span>
+                </span>
+              </div>
             )
           })}
-        </svg>
+        </div>
       )}
       <div className="chart-legend">
         <span><i style={{ background: 'var(--green)' }} />Functional</span>
@@ -189,44 +188,40 @@ export function InspectionWeeks({ inspections }) {
     }
   })
   const max = Math.max(4, ...weeks.map((w) => w.ok + w.bad))
-  const top = 14
-  const bottom = 100
-  const h = bottom - top
-  const yFor = (v) => bottom - (v / max) * h
-  const colW = 470 / 4
+  const share = (v) => `${(v / max) * 100}%`
 
+  // HTML columns (not a scaled SVG), so numbers and dates stay readable.
   return (
     <div className="chart-panel chart-wide">
       <h3>Inspections, last 4 weeks</h3>
-      <svg viewBox="0 0 520 120" className="chart-svg" role="img" aria-label="Inspections, last 4 weeks">
-        <line x1="40" y1={bottom} x2="510" y2={bottom} stroke="var(--border)" />
-        {[0.5, 1].map((f) => (
-          <g key={f}>
-            <line x1="40" y1={yFor(max * f)} x2="510" y2={yFor(max * f)} stroke="var(--border)" strokeDasharray="3 3" />
-            <text x="32" y={yFor(max * f) + 4} textAnchor="end" className="chart-text">
-              {Math.round(max * f)}
-            </text>
-          </g>
-        ))}
-        <text x="32" y={bottom + 4} textAnchor="end" className="chart-text">0</text>
-        {weeks.map((w, i) => {
-          const x = 40 + i * colW + colW / 2 - 25
-          const okTop = yFor(w.ok)
-          const badTop = yFor(w.ok + w.bad)
-          return (
-            <g key={w.label}>
-              {w.ok > 0 && <rect x={x} y={okTop} width="50" height={bottom - okTop} fill="var(--green)" />}
-              {w.bad > 0 && <rect x={x} y={badTop} width="50" height={okTop - badTop} fill="var(--red)" />}
-              <text x={x + 25} y={badTop - 4} textAnchor="middle" className="chart-text chart-strong">
+      <div className="iw-chart" role="img" aria-label={weeks.map((w) => `${w.label}: ${w.ok + w.bad}`).join(', ')}>
+        <div className="iw-plot">
+          {[1, 0.5].map((f) => (
+            <span key={f} className="iw-grid" style={{ bottom: share(max * f) }}>
+              <b>{Math.round(max * f)}</b>
+            </span>
+          ))}
+          <span className="iw-grid iw-zero" style={{ bottom: 0 }}>
+            <b>0</b>
+          </span>
+          {weeks.map((w) => (
+            <div key={w.label} className="iw-col">
+              <span className="iw-total" style={{ bottom: share(w.ok + w.bad) }}>
                 {w.ok + w.bad}
-              </text>
-              <text x={x + 25} y="116" textAnchor="middle" className="chart-text">
-                {w.label}
-              </text>
-            </g>
-          )
-        })}
-      </svg>
+              </span>
+              <span className="iw-stack" style={{ height: share(w.ok + w.bad) }}>
+                {w.bad > 0 && <i style={{ flexGrow: w.bad, background: 'var(--red)' }} />}
+                {w.ok > 0 && <i style={{ flexGrow: w.ok, background: 'var(--green)' }} />}
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="iw-dates">
+          {weeks.map((w) => (
+            <span key={w.label}>{w.label}</span>
+          ))}
+        </div>
+      </div>
       <Legend
         items={[
           { label: 'Functional', color: 'var(--green)' },
