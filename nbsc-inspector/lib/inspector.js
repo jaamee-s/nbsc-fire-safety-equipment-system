@@ -1,8 +1,15 @@
 import { supabase } from './supabase'
+import { findInEquipmentCopy, isNetworkError, queueInspection, sendQueue } from './offline'
 
 // These MUST match the database check constraints exactly — lowercase with
 // underscores. A mismatch is rejected by Postgres, not caught by the UI.
-export const CONDITION_OPTIONS = ['functional', 'defective']
+export const CONDITION_OPTIONS = ['functional', 'defective', 'for_disposal']
+
+// Why a disposable fire extinguisher is reported "For disposal" (migration 026).
+export const DISPOSAL_REASONS = ['Used / discharged', 'Past expiration date', 'Damaged or leaking']
+
+// Why the code was typed instead of scanned (migration 026).
+export const TYPED_REASONS = ['Sticker damaged or faded', 'Sticker missing', "QR code won't scan"]
 
 export const ACTION_TYPES = [
   'repair',
@@ -222,14 +229,25 @@ export async function findEquipmentByQrCode(scannedValue) {
   try {
     result = await supabase.rpc('lookup_equipment', { p_code: code })
   } catch (err) {
+    if (isNetworkError(err)) return offlineLookup(code)
     throw toError('Lookup failed: ', err)
   }
 
   const { data, error } = result
+  if (error && isNetworkError(error)) return offlineLookup(code)
   if (error) throw toError('Lookup failed: ', error)
   if (!data) throw new Error(`No equipment found for "${code}".`)
 
   return data
+}
+
+// No signal: the copy of the equipment list saved on this phone (offline.js).
+async function offlineLookup(code) {
+  const saved = await findInEquipmentCopy(code)
+  if (saved) return saved
+  throw new Error(
+    `No connection, and "${code}" is not in the equipment list saved on this phone. Try again where there is signal.`
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -244,13 +262,66 @@ export async function findEquipmentByQrCode(scannedValue) {
 // with an unresolved defect, so those rules hold even if the screen is stale.
 // ---------------------------------------------------------------------------
 
-export async function submitInspection({
+// Without signal the inspection is kept on this phone and sent later
+// (offline.js); it then returns { success: true, queued: true }.
+// equipmentCode only labels it in the waiting list.
+export async function submitInspection(args) {
+  validateInspection(args)
+  try {
+    await submitInspectionNow(args)
+    return { success: true }
+  } catch (err) {
+    if (!isNetworkError(err)) throw err
+    await queueInspection(
+      {
+        equipmentId: args.equipmentId,
+        conditionStatus: args.conditionStatus,
+        findings: args.findings,
+        inspectionNotes: args.inspectionNotes,
+        actionType: args.actionType,
+        priority: args.priority,
+        entryMethod: args.entryMethod,
+        typedReason: args.typedReason
+      },
+      `${args.equipmentCode || 'Equipment'} · ${
+        args.conditionStatus === 'defective' ? 'Defective' : args.conditionStatus === 'for_disposal' ? 'For disposal' : 'Functional'
+      }`
+    )
+    return { success: true, queued: true }
+  }
+}
+
+// Sends the inspections waiting on this phone. Returns how many were sent.
+export function sendWaitingInspections() {
+  return sendQueue(submitInspectionNow)
+}
+
+function validateInspection({ conditionStatus, findings }) {
+  if (!CONDITION_OPTIONS.includes(conditionStatus)) {
+    throw new Error('Select a condition first.')
+  }
+  if (conditionStatus === 'defective' && !(findings || '').trim()) {
+    throw new Error('Select what is wrong before submitting.')
+  }
+  if (conditionStatus === 'for_disposal' && !(findings || '').trim()) {
+    throw new Error('Select why it is for disposal before submitting.')
+  }
+}
+
+// entryMethod 'scanned' | 'typed' (with typedReason), and inspectedAt for an
+// inspection sent later from the waiting list (migration 026). Before 026
+// the database doesn't take those, so it is sent without them; "For
+// disposal" needs 026.
+async function submitInspectionNow({
   equipmentId,
   conditionStatus,
   findings,
   inspectionNotes,
   actionType,
-  priority
+  priority,
+  entryMethod,
+  typedReason,
+  inspectedAt
 }) {
   if (!CONDITION_OPTIONS.includes(conditionStatus)) {
     throw new Error('Select a condition first.')
@@ -261,7 +332,7 @@ export async function submitInspection({
 
   let result
   try {
-    result = await supabase.rpc('submit_inspector_inspection', {
+    const base = {
       p_equipment_id: equipmentId,
       p_condition_status: conditionStatus,
       p_findings: (findings || '').trim() || null,
@@ -269,7 +340,20 @@ export async function submitInspection({
       p_inspection_notes: (inspectionNotes || '').trim() || null,
       p_action_type: actionType || 'other',
       p_priority: priority || 'medium'
+    }
+    result = await supabase.rpc('submit_inspector_inspection', {
+      ...base,
+      p_entry_method: entryMethod || null,
+      p_typed_reason: entryMethod === 'typed' ? typedReason || null : null,
+      p_inspected_at: inspectedAt || null
     })
+    if (
+      result.error &&
+      conditionStatus !== 'for_disposal' &&
+      /submit_inspector_inspection|schema cache|could not find the function/i.test(result.error.message || '')
+    ) {
+      result = await supabase.rpc('submit_inspector_inspection', base)
+    }
   } catch (err) {
     throw toError('Submission failed: ', err)
   }

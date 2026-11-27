@@ -28,11 +28,14 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import SummaryScreen from './SummaryScreen'
+import { refreshEquipmentCopy, removeQueued, watchQueue } from './lib/offline'
 import { NotificationBell, NotificationsScreen, useNotifications } from './Notifications'
 import {
   ACTION_TYPES,
   ACTION_TYPE_LABELS,
   AVAILABILITY_REASONS,
+  DISPOSAL_REASONS,
+  TYPED_REASONS,
   FINDINGS_BY_TYPE,
   OPEN_PROBLEM_STATUSES,
   OTHER_FINDING,
@@ -56,6 +59,7 @@ import {
   onSignedOut,
   relativeTime,
   restoreSession,
+  sendWaitingInspections,
   setMyAvailability,
   signIn,
   signOut,
@@ -251,6 +255,20 @@ function RootApp() {
   const [history, setHistory] = useState([])
 
   const dashboard = useDashboard(account)
+  // Offline mode (lib/offline.js), inspectors only: a fresh copy of the
+  // equipment list on the phone, and waiting inspections sent by themselves.
+  const isInspector = !!account && account.role === 'inspector'
+  const reloadDashboard = dashboard.reload
+  const offlineTick = useCallback(async () => {
+    if (!isInspector) return
+    const sent = await sendWaitingInspections()
+    if (sent > 0) reloadDashboard(true)
+    refreshEquipmentCopy()
+  }, [isInspector, reloadDashboard])
+  useEffect(() => {
+    offlineTick()
+  }, [offlineTick])
+  useAutoRefresh(offlineTick)
   // The inspector's job orders feed the Notifications "To do" list too.
   const notifData = useMemo(
     () => (dashboard.data ? { ...dashboard.data, assignments: dashboard.assignments || [] } : null),
@@ -585,19 +603,25 @@ function RootApp() {
 
       {screen === 'scan' && (
         <ScanScreen
-          onFound={handleFound}
+          onFound={(item) => handleFound({ ...item, _via: 'scan' })}
           onCancel={goHome}
           onManual={() => goToScreen('manual')}
         />
       )}
 
-      {screen === 'manual' && <ManualEntry onFound={handleFound} onCancel={goHome} />}
+      {screen === 'manual' && (
+        <ManualEntry
+          onFound={(item, why) => handleFound({ ...item, _via: 'typed', _typedReason: why })}
+          onCancel={goHome}
+        />
+      )}
 
       {screen === 'detail' && (
         <EquipmentDetail
           equipment={equipment}
           canInspect={account && account.role === 'inspector'}
           onInspect={() => setScreen('form')}
+          onScan={() => goToScreen('scan')}
           onCancel={detailFrom === 'notifications' ? () => goToScreen('notifications') : goHome}
         />
       )}
@@ -1014,6 +1038,8 @@ function HomeScreen({ account, dashboard, onOpenEquipment }) {
       />
 
       <ErrorCard error={error || openError} />
+
+      <WaitingInspectionsCard onSent={() => reload(true)} />
 
       {loading && !data ? (
         <View style={[s.card, s.centerPad]}>
@@ -1549,6 +1575,56 @@ function UnavailableDatesCard({ account }) {
   )
 }
 
+// Inspections saved on this phone without signal, waiting to be sent.
+// Shown only while there are some.
+function WaitingInspectionsCard({ onSent }) {
+  const [list, setList] = useState([])
+  const [sending, setSending] = useState(false)
+  useEffect(() => watchQueue(setList), [])
+  if (list.length === 0) return null
+
+  const waiting = list.filter((x) => !x.error)
+  const refused = list.filter((x) => x.error)
+
+  async function sendNow() {
+    setSending(true)
+    const sent = await sendWaitingInspections()
+    setSending(false)
+    if (sent > 0) onSent()
+  }
+
+  return (
+    <View style={[s.card, s.waitCard]}>
+      {waiting.length > 0 ? (
+        <>
+          <Text style={s.waitTitle}>
+            {waiting.length} inspection{waiting.length === 1 ? '' : 's'} saved on this phone
+          </Text>
+          <Text style={s.availHint}>Waiting for signal. They are sent by themselves; nothing is lost.</Text>
+          {waiting.map((x) => (
+            <Text key={x.id} style={s.waitItem}>
+              • {x.label} · {formatDateTime(x.savedAt)}
+            </Text>
+          ))}
+          <Pressable style={[s.btn, s.btnPrimary, { marginTop: 10 }]} onPress={sendNow} disabled={sending}>
+            <Text style={s.btnPrimaryText}>{sending ? 'Sending...' : 'Send now'}</Text>
+          </Pressable>
+        </>
+      ) : null}
+      {refused.map((x) => (
+        <View key={x.id} style={[s.banner, s.bannerRed]}>
+          <Text style={s.bannerRedText}>
+            Not accepted: {x.label} ({formatDateTime(x.savedAt)}). {x.error}
+          </Text>
+          <Pressable onPress={() => removeQueued(x.id)} hitSlop={8}>
+            <Text style={[s.availLink, { color: C.red }]}>Remove from this phone</Text>
+          </Pressable>
+        </View>
+      ))}
+    </View>
+  )
+}
+
 // Available / Unavailable, set by the inspector or technician themselves.
 // The GSO sees it on the web Inspectors / Technicians page. Switching to
 // Unavailable asks why (panel comment), and the GSO sees the reason too.
@@ -1559,6 +1635,24 @@ function AvailabilityCard({ dashboard }) {
   const [reason, setReason] = useState(null)
   // The reason picker: null = closed, else { choice, note }
   const [picking, setPicking] = useState(null)
+  // My unavailable dates covering today, if any: then I count as Unavailable
+  // automatically, whatever the switch says.
+  const [leaveNow, setLeaveNow] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    getMyUnavailableDates()
+      .then((rows) => {
+        if (!alive) return
+        const d = new Date()
+        const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        setLeaveNow((rows || []).find((r) => r.start_date <= today && r.end_date >= today) || null)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [stats?.is_available])
 
   useEffect(() => {
     let alive = true
@@ -1573,6 +1667,20 @@ function AvailabilityCard({ dashboard }) {
   // Before migration 009 there is nothing to switch.
   if (!stats) return null
   const available = stats.is_available !== false
+
+  if (leaveNow) {
+    return (
+      <View style={s.card}>
+        <Text style={s.availLabel}>My status</Text>
+        <Text style={[s.availValue, { color: C.muted }]}>○ Unavailable · on leave</Text>
+        <Text style={s.availHint}>
+          Until {formatYmd(leaveNow.end_date)}
+          {leaveNow.reason ? ` · ${leaveNow.reason}` : ''}. Set automatically by your unavailable dates; the GSO
+          sees you as on leave. You can switch again after these dates.
+        </Text>
+      </View>
+    )
+  }
 
   async function save(next, why) {
     setErr(null)
@@ -2166,15 +2274,20 @@ function ScanScreen({ onFound, onCancel, onManual }) {
 
 function ManualEntry({ onFound, onCancel }) {
   const [code, setCode] = useState('')
+  const [why, setWhy] = useState(null)
   const [error, setError] = useState(null)
   const [looking, setLooking] = useState(false)
 
   async function lookup() {
     setError(null)
+    if (!why) {
+      setError('Choose why you are typing the code instead of scanning it.')
+      return
+    }
     setLooking(true)
     try {
       // On success this screen closes, so only reset `looking` on failure.
-      onFound(await findEquipmentByQrCode(code))
+      onFound(await findEquipmentByQrCode(code), why)
     } catch (err) {
       setError(err.message)
       setLooking(false)
@@ -2189,6 +2302,22 @@ function ManualEntry({ onFound, onCancel }) {
           Type the code printed under the QR sticker. Use this when a sticker is
           scratched, faded or painted over.
         </Text>
+
+        <Text style={s.label}>Why are you typing it?</Text>
+        <View style={s.reasonChips}>
+          {TYPED_REASONS.map((r) => (
+            <Pressable
+              key={r}
+              onPress={() => setWhy(r)}
+              style={[s.reasonChip, why === r && s.reasonChipOn]}
+              accessibilityRole="button"
+              accessibilityState={{ selected: why === r }}
+            >
+              <Text style={[s.reasonChipText, why === r && s.reasonChipTextOn]}>{r}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={s.availHint}>The GSO sees that this inspection's code was typed, and why.</Text>
 
         <TextInput
           style={[s.input, s.inputCode, { marginTop: 16 }]}
@@ -2226,7 +2355,10 @@ function ManualEntry({ onFound, onCancel }) {
 /* What the scan reveals                                               */
 /* ------------------------------------------------------------------ */
 
-function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) {
+function EquipmentDetail({ equipment, canInspect = true, onInspect, onScan, onCancel }) {
+  // Inspections start from a scan (or a typed code with a reason). A unit
+  // opened from a list or a notification has neither.
+  const reachedHere = equipment._via === 'scan' || equipment._via === 'typed'
   const left = daysUntil(equipment.expiration_date)
   // Permanently retired equipment has nothing left to inspect — a disposed
   // fire extinguisher is physically gone, and anything else in this state
@@ -2255,6 +2387,15 @@ function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) 
             {STATUS_LABELS[equipment.current_status] || equipment.current_status}
           </Text>
         </View>
+
+        {equipment._offline ? (
+          <View style={[s.banner, s.bannerAmber]}>
+            <Text style={s.bannerAmberText}>
+              No signal: these details were saved on this phone on {formatDateTime(equipment._savedAt)}. Your
+              inspection will be sent when the signal is back.
+            </Text>
+          </View>
+        ) : null}
 
         <Row label="Building" value={equipment.buildings?.building_name ?? '—'} />
         <Row label="Location" value={equipment.exact_location ?? '—'} />
@@ -2296,7 +2437,19 @@ function EquipmentDetail({ equipment, canInspect = true, onInspect, onCancel }) 
               This equipment has been retired and is no longer in service.
             </Text>
           </View>
-        ) : !canInspect ? null : (
+        ) : !canInspect ? null : !reachedHere ? (
+          <>
+            <View style={[s.banner, s.bannerAmber, { marginTop: 16 }]}>
+              <Text style={s.bannerAmberText}>
+                To show you are at the unit, inspections start from its QR code. If the sticker is damaged,
+                choose "Enter code manually" on the scan screen.
+              </Text>
+            </View>
+            <Pressable style={[s.btn, s.btnPrimary]} onPress={onScan}>
+              <Text style={s.btnPrimaryText}>Scan the QR code to inspect</Text>
+            </Pressable>
+          </>
+        ) : (
           <Pressable
             style={[s.btn, s.btnPrimary, onHold && s.btnDisabled]}
             onPress={onInspect}
@@ -2341,7 +2494,13 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
   const [saving, setSaving] = useState(false)
 
   const defective = condition === 'defective'
+  const disposal = condition === 'for_disposal'
   const isOther = selectedFinding === OTHER_FINDING
+  // "For disposal" (migration 026): fire extinguishers only.
+  const isExtinguisher = equipment.equipment_type === 'fire_extinguisher'
+  const [disposalReason, setDisposalReason] = useState(null)
+  const [disposalOther, setDisposalOther] = useState('')
+  const disposalText = disposalReason === 'Other' ? disposalOther.trim() : disposalReason || ''
 
   // Choosing a finding sets what it implies. Both stay overridable, but the
   // override rows stay collapsed so the fast path is: finding, submit.
@@ -2353,25 +2512,29 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
   }
 
   const findingsText = isOther ? otherText : selectedFinding || ''
-  const canSubmit = condition === 'functional' || (defective && findingsText.trim())
+  const canSubmit =
+    condition === 'functional' || (defective && findingsText.trim()) || (disposal && disposalText)
 
   async function submit() {
     setError(null)
     setSaving(true)
     try {
-      await submitInspection({
+      const saved = await submitInspection({
         equipmentId: equipment.id,
+        equipmentCode: equipment.equipment_code,
         conditionStatus: condition,
         // Only a defective inspection carries findings. Before, tapping
         // Defective, picking a finding, then switching to Functional still
         // submitted that finding — so GSO's history showed a "Functional"
         // inspection with "Gauge in red zone" under it.
-        findings: defective ? findingsText : '',
+        findings: defective ? findingsText : disposal ? disposalText : '',
         inspectionNotes: notes,
-        actionType,
-        priority
+        actionType: disposal ? 'replace' : actionType,
+        priority: disposal ? 'high' : priority,
+        entryMethod: equipment._via === 'typed' ? 'typed' : 'scanned',
+        typedReason: equipment._typedReason || null
       })
-      onSubmitted({ condition })
+      onSubmitted({ condition, queued: !!saved?.queued })
     } catch (err) {
       setError(err.message)
     }
@@ -2403,6 +2566,44 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
             <Text style={[s.choiceText, defective && s.choiceTextActive]}>Defective</Text>
           </Pressable>
         </View>
+        {isExtinguisher ? (
+          <Pressable
+            style={[s.choice, s.choiceWide, disposal && s.choiceAmber]}
+            onPress={() => setCondition('for_disposal')}
+          >
+            <Text style={[s.choiceText, disposal && s.choiceTextActive]}>For disposal (disposable type)</Text>
+          </Pressable>
+        ) : null}
+
+        {disposal && (
+          <>
+            <Text style={s.availHint}>
+              A disposable extinguisher can't be refilled. The GSO is asked to dispose of it and replace it from stock.
+            </Text>
+            <Text style={s.label}>Why is it for disposal?</Text>
+            <View style={s.findingWrap}>
+              {[...DISPOSAL_REASONS, 'Other'].map((r) => (
+                <Pressable
+                  key={r}
+                  style={[s.finding, disposalReason === r && s.findingActive]}
+                  onPress={() => setDisposalReason(r)}
+                >
+                  <Text style={[s.findingText, disposalReason === r && s.findingTextActive]}>{r}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {disposalReason === 'Other' ? (
+              <TextInput
+                style={s.input}
+                placeholder="Describe the reason"
+                placeholderTextColor={C.muted}
+                value={disposalOther}
+                onChangeText={setDisposalOther}
+                maxLength={200}
+              />
+            ) : null}
+          </>
+        )}
 
         {defective && (
           <>
@@ -2546,22 +2747,36 @@ function InspectionForm({ equipment, onSubmitted, onCancel }) {
 
 function DoneScreen({ result, equipment, onNext, onHome }) {
   const defective = result?.condition === 'defective'
+  const disposal = result?.condition === 'for_disposal'
 
   return (
     <ScrollView contentContainerStyle={s.scroll}>
       <View style={s.card}>
-        <Text style={s.h1}>Inspection recorded</Text>
+        <Text style={s.h1}>{result?.queued ? 'Saved on this phone' : 'Inspection recorded'}</Text>
         <Text style={s.muted}>
           {equipment?.equipment_code} was marked{' '}
           <Text style={{ fontWeight: '700' }}>
-            {defective ? 'defective' : 'functional'}
+            {disposal ? 'for disposal' : defective ? 'defective' : 'functional'}
           </Text>
           .
         </Text>
 
-        <View style={[s.banner, defective ? s.bannerAmber : s.bannerGreen]}>
-          <Text style={defective ? s.bannerAmberText : s.bannerGreenText}>
-            {defective
+        {result?.queued ? (
+          <View style={[s.banner, s.bannerAmber]}>
+            <Text style={s.bannerAmberText}>
+              No signal right now. It will be sent to the GSO by itself when the signal is back
+              {defective ? ', and then the GSO is notified of the defect' : ''}. You can keep inspecting.
+            </Text>
+          </View>
+        ) : null}
+
+        <View
+          style={[s.banner, defective || disposal ? s.bannerAmber : s.bannerGreen, result?.queued && { display: 'none' }]}
+        >
+          <Text style={defective || disposal ? s.bannerAmberText : s.bannerGreenText}>
+            {disposal
+              ? 'GSO has been notified. They will dispose of it and put a replacement from stock in its place.'
+              : defective
               ? 'GSO has been notified. This unit now appears in their Priority Actions, and it cannot be inspected again until GSO resolves it.'
               : 'No action needed. The unit is marked Functional.'}
           </Text>
@@ -2725,6 +2940,9 @@ const s = StyleSheet.create({
   availValue: { fontSize: 16, fontWeight: '800', marginTop: 2 },
   availHint: { fontSize: 12, color: C.muted, marginTop: 2 },
   availLink: { fontSize: 13, color: C.blue, fontWeight: '700', marginTop: 6 },
+  waitCard: { borderColor: '#F3D896', backgroundColor: C.amberBg },
+  waitTitle: { fontSize: 16, fontWeight: '800', color: C.amber },
+  waitItem: { fontSize: 13, color: C.text, marginTop: 4 },
   reasonBox: { marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: C.border, gap: 10 },
   reasonTitle: { fontSize: 14, fontWeight: '700', color: C.text },
   reasonChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
@@ -2937,6 +3155,10 @@ const s = StyleSheet.create({
   },
   choiceGreen: { borderColor: C.green, backgroundColor: C.greenBg },
   choiceRed: { borderColor: C.red, backgroundColor: C.redBg },
+  choiceAmber: { borderColor: C.amber, backgroundColor: C.amberBg },
+  // Full width under the two buttons, same height as them (flex: 0 would
+  // start it at zero height in the browser and squash it).
+  choiceWide: { marginTop: 10, flexGrow: 0, flexShrink: 0, flexBasis: 'auto' },
   choiceText: { fontSize: 16, fontWeight: '700', color: C.muted },
   choiceTextActive: { color: C.text },
 
